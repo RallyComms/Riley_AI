@@ -1,0 +1,41 @@
+patterns:
+  press_release:
+    must_any: ["for immediate release","media contact"]
+  press_statement:
+    must_any: ["statement from","today we","we applaud","we condemn"]
+  pitch_email:
+    must_any: ["subject:","following up","reaching out"]
+  talking_points:
+    must_any: ["talking points","key messages","interview prep"]
+  interview_guide:
+    must_any: ["interview guide","stakeholder interview","role-specific"]
+  interview_question_bank:
+    must_any: ["general questions","moment you realized","partnerships"]
+  conference_proposal:
+    must_any: ["learning objectives","audience","session title"]
+  work_plan|strategy_memo:
+    must_any: ["deliverables","deadline","owner","status"]
+  web_copy:
+    must_any: ["webpage","program explainer","services we provide"]
+  deck|analysis_report:
+    must_any: ["slide","sentiment","clusters","findings","media analysis"]
+  op_ed_draft:
+    must_any: ["op-ed","op ed","opinion"]
+  fact_sheet:
+    must_any: ["fact sheet"]
+  proclamation_language:
+    must_any: ["proclamation"]
+  editorial_calendar:
+    must_any: ["editorial calendar"]
+  coverage_tracker:
+    must_any: ["coverage tracker","coverage"]
+  speaking_tracker:
+    must_any: ["speaking opportunities","call for speakers","cfp"]
+  bio_profile:
+    must_any: ["bio","biography","about the speaker","headshot"]
+  workback_plan:
+    must_any: ["work back plan","workback"]
+  competitive_analysis:
+    must_any: ["peer organizations","peer matrix","competitor matrix"]
+  pitch_email:
+    must_any: ["pitch","follow-up pitch","initial pitch","lat 404 pitch"]
