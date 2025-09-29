@@ -6,6 +6,9 @@ from openai import OpenAI
 
 load_dotenv()
 
+UNKNOWN_LABEL = os.getenv("UNKNOWN_LABEL", "unmapped_other")
+LOW_CONF_THRESHOLD = float(os.getenv("CLF_LOW_CONF_THRESHOLD", "0.65"))
+
 CLASSIFY_MODEL = os.getenv("CLASSIFY_MODEL", "gpt-4o-mini")
 SAMPLE_CHARS = int(os.getenv("CLASSIFY_SAMPLE_CHARS", "6000"))
 MAX_RETRIES = int(os.getenv("CLASSIFY_MAX_RETRIES", "3"))
@@ -76,36 +79,43 @@ def build_label_hints(labels, synonyms_map, patterns_map) -> str:
 SYSTEM_PROMPT = (
     "You are a careful document classifier for a communications/PR knowledge base.\n"
     "Return STRICT JSON with fields: doc_type, doc_subtype, confidence, evidence.\n"
-    "- doc_type MUST be one of the allowed labels provided.\n"
+    "- doc_type MUST be one of the ALLOWED_LABELS provided, unless none fits.\n"
+    "- If none fits, still return your best guess in a field named 'proposed_new_label',\n"
+    "  and set doc_type to the closest safe choice from ALLOWED_LABELS.\n"
     "- doc_subtype is a short free-text description (e.g., \"fact sheet\", \"proclamation language\").\n"
     "- confidence is a number 0..1 (be honest; do not always return 1).\n"
     "- evidence is a list (2-5) of short phrases you saw that justify your choice.\n"
+    "- (Optional) If you were uncertain, add 'uncertainty_reason'.\n"
     "Use CONTENT, FILENAME, SOURCE_PATH (folder context), EXTRACT_TYPE, and LABEL_HINTS.\n"
-    "If uncertain, choose the safest close label from the allowed list."
+    "If uncertain, choose the safest close label from the allowed list and include 'proposed_new_label'."
 )
 
+
 def classify_sample(client, model, labels, filename, source_path, extract_type, sample, label_hints):
-    user_content = (
-        "ALLOWED_LABELS = [" + ", ".join(labels) + "]\n"
-        "LABEL_HINTS =\n" + label_hints + "\n\n"
-        "FILENAME = " + str(filename) + "\n"
-        "SOURCE_PATH_LAST_PARTS = " + path_context_tokens(source_path) + "\n"
-        "EXTRACT_TYPE = " + str(extract_type) + "\n"
-        "CONTENT_SAMPLE = <<BEGIN>>" + sample + "<<END>>\n\n"
-        "Respond with JSON ONLY:\n"
-        "{\"doc_type\": \"...\", \"doc_subtype\": \"...\", \"confidence\": 0.0, \"evidence\": [\"...\",\"...\"]}"
-    )
+    user_content = "\n".join([
+        "ALLOWED_LABELS = [" + ", ".join(labels) + "]",
+        "LABEL_HINTS =",
+        label_hints,
+        "",
+        f"FILENAME = {filename}",
+        f"SOURCE_PATH_LAST_PARTS = {path_context_tokens(source_path)}",
+        f"EXTRACT_TYPE = {extract_type}",
+        "CONTENT_SAMPLE = <<BEGIN>>" + sample + "<<END>>",
+        "",
+        'Respond with JSON ONLY:',
+        '{"doc_type": "...", "doc_subtype": "...", "confidence": 0.0, "evidence": ["...","..."]}',
+    ])
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            resp = client.chat.completions.create(
+            resp = client.chat_completions.create(  # or client.chat.completions.create if that's what you're using
                 model=model,
                 messages=[
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": user_content},
                 ],
                 temperature=0,
-                response_format={"type": "json_object"} 
+                response_format={"type": "json_object"}
             )
             raw = resp.choices[0].message.content or ""
             data = clean_model_json(raw)
@@ -120,7 +130,8 @@ def classify_sample(client, model, labels, filename, source_path, extract_type, 
     print(f"[classify_llm] ERROR: classification failed after {MAX_RETRIES} attempts for '{filename}'")
     raise last_err if last_err else RuntimeError("Unknown classification error")
 
-def coerce_to_allowed(data: dict, allowed: list) -> dict:
+
+def coerce_to_allowed(data: dict, allowed: list, unknown_label: str = UNKNOWN_LABEL) -> dict:
     out = dict(data or {})
 
     # Normalize evidence early
@@ -132,19 +143,26 @@ def coerce_to_allowed(data: dict, allowed: list) -> dict:
     # Clamp subtype length
     out["doc_subtype"] = (out.get("doc_subtype") or "")[:160]
 
-    dt = out.get("doc_type")
+    # Preserve what the model originally said
+    model_dt = out.get("doc_type")
+    out["_model_doc_type"] = model_dt
+    out["_proposed_new_label"] = (out.get("proposed_new_label") or "").strip()
+    out["_uncertainty_reason"] = (out.get("uncertainty_reason") or "").strip()
 
-    if dt not in allowed:
-        # Prefer neutral bucket over one-pager if available
-        out["doc_type"] = "press_statement" if "press_statement" in allowed else "messaging_one_pager"
-        # Parse existing confidence (if any), then cap at 0.6 when coerced
+    # Final label
+    if model_dt not in allowed:
+        out["_coerced"] = True
+        # Assign safe working label so pipeline can continue
+        out["doc_type"] = unknown_label
+        # Parse and bound confidence
         try:
             c = float(out.get("confidence", 0.4))
         except Exception:
             c = 0.4
+        # Keep the model's honesty but don't let this look "high confidence"
         out["confidence"] = min(max(c, 0.0), 0.6)
     else:
-        # Valid type: just coerce to float and bound 0..1 (no artificial capping)
+        out["_coerced"] = False
         try:
             c = float(out.get("confidence", 0.5))
         except Exception:
@@ -381,8 +399,17 @@ def enforce_extract_constraints(data, extract_type, hay, filename: str = ""):
     fname = (filename or "").lower()
 
     if extract_type == "xlsx_schema":
-        # 1) Filename cues (strongest)
-        if "media list" in fname:
+        # 0) Story bank / competitive analysis (explicit early catches)
+        if ("story bank" in hay) or ("story bank" in fname):
+            guess = "story_bank" if "story_bank" in allowed else None
+        elif any(k in hay for k in [
+            "peer org", "peer organizations", "competitive", "competitor",
+            "benchmark", "matrix", "rubric", "criteria"
+        ]):
+            guess = "competitive_analysis" if "competitive_analysis" in allowed else None
+
+        # 1) Media list priority (check both filename and content FIRST)
+        elif ("media list" in hay) or ("media list" in fname):
             guess = "media_list"
 
         # 2) Editorial calendar by schema/content
@@ -390,11 +417,13 @@ def enforce_extract_constraints(data, extract_type, hay, filename: str = ""):
             guess = "editorial_calendar"
 
         # 3) Media-list schema cues (columns etc.)
-        elif any(k in hay for k in ["media list", "reporter", "outlet", "beat", "email"]):
+        elif any(k in hay for k in ["reporter", "outlet", "beat", "email"]):
             guess = "media_list"
 
         # 4) Coverage-tracker schema cues
-        elif any(k in hay for k in ["coverage", "headline", "link", "status", "published", "url"]):
+        elif any(k in hay for k in [
+            "coverage", "headline", "link", "status", "published", "url", "earned media"
+        ]):
             guess = "coverage_tracker"
 
         # 5) Speaking/CFP trackers
@@ -406,14 +435,15 @@ def enforce_extract_constraints(data, extract_type, hay, filename: str = ""):
             guess = "media_list"
 
     elif extract_type == "slides":
-        # If we ever need to disambiguate, we can peek at keywords; default to training materials
+        # Keep your disambiguation; default to training materials
         if any(k in hay for k in ["analysis", "findings", "insights", "kpi"]):
             guess = "deck|analysis_report" if "deck|analysis_report" in allowed else None
         else:
             guess = "deck|training_materials" if "deck|training_materials" in allowed else None
 
-    # Apply the guess if valid for this extract_type, lower confidence ceiling a bit
+    # Apply the guess if valid for this extract_type, mark audit field, and lower confidence ceiling a bit
     if guess and guess in allowed:
+        data["_extract_constraint_adjusted_from"] = data.get("doc_type")  # <-- audit marker for triage
         data["doc_type"] = guess
         try:
             cur = float(data.get("confidence", 0.0))
@@ -422,11 +452,10 @@ def enforce_extract_constraints(data, extract_type, hay, filename: str = ""):
         data["confidence"] = min(cur, 0.85)
 
     return data
-
-
+    
 def main(campaign_root: str, model: str = None):
     if not os.getenv("OPENAI_API_KEY"):
-        print("[classify_llm] ERROR: OPENAI_API_KEY not set in environment (.env).")
+        print("[ingest_campaign_llm] ERROR: OPENAI_API_KEY not set in environment (.env).")
         sys.exit(1)
 
     client = OpenAI()
@@ -437,58 +466,139 @@ def main(campaign_root: str, model: str = None):
     labels = taxonomy.get("labels", []) or []
     synonyms_map = taxonomy.get("synonyms", {}) or {}
 
+    # >>> NEW: allow processed root override <<<
+    processed_root = Path(os.getenv("CLASSIFY_PROCESSED_ROOT", "data/processed"))
+
     camp = Path(campaign_root).name
-    extracted = Path("data/processed") / camp / "extracted.jsonl"
-    out = Path("data/processed") / camp / "classified.csv"
+    extracted = processed_root / camp / "extracted.jsonl"
+    out = processed_root / camp / "classified.csv"
+    triage_out = processed_root / camp / "triage_needs_review.csv"
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    # >>> NEW: early check for inputs <<<
+    if not extracted.exists():
+        print(f"[ingest_campaign_llm] ERROR: missing input {extracted}. "
+            f"Run crawl/extract first for '{camp}'.")
+        sys.exit(1)
+
+    # --- Resume support: skip rows whose sha256 is already in classified.csv ---
+    seen_shas = set()
+    existing_rows = []
+    if out.exists():
+        try:
+            df_prev = pd.read_csv(out, dtype=str)
+            if "sha256" in df_prev.columns:
+                seen_shas = set(df_prev["sha256"].astype(str).tolist())
+            existing_rows = df_prev.to_dict(orient="records")
+            print(f"[classify_llm] RESUME mode: {len(seen_shas)} previously classified entries will be skipped.")
+        except Exception as e:
+            print(f"[classify_llm] WARN: Could not read existing {out}: {e}")
 
     label_hints = build_label_hints(labels, synonyms_map, patterns_map)
 
-    rows = []
+    rows = list(existing_rows)  # start from prior results
+    triage_rows = []
     total = 0
+    newly_processed = 0
+
     with open(extracted, encoding="utf-8") as f:
         for line in f:
             r = json.loads(line)
+            sha = str(r.get("sha256", ""))
+            if sha and sha in seen_shas:
+                total += 1
+                continue  # skip already classified
+
             ekind = (r.get("extract", {}) or {}).get("type")
             spath = r.get("source_path", "")
             name = Path(spath).name
             sample = build_sample(ekind, r.get("extract", {}) or {}, SAMPLE_CHARS)
+
             try:
-                data = classify_sample(client, model, labels, name, spath, ekind, sample, label_hints)
-                data = coerce_to_allowed(data, labels)
+                raw_data = classify_sample(client, model, labels, name, spath, ekind, sample, label_hints)
+                data = coerce_to_allowed(raw_data, labels, unknown_label=UNKNOWN_LABEL)
                 data = soft_override(data, spath, ekind, sample, synonyms_map, patterns_map, labels)
-                
+
                 hay = " ".join([spath or "", str(data.get("doc_subtype","")) or "", sample or ""]).lower()
-                data = enforce_extract_constraints(data, ekind, hay, name)  # pass filename too
-                
-                doc_type = data.get("doc_type", "messaging_one_pager")
+                data = enforce_extract_constraints(data, ekind, hay, name)
+
+                doc_type = data.get("doc_type", UNKNOWN_LABEL)
                 doc_subtype = data.get("doc_subtype", "")
                 conf = float(data.get("confidence", 0.5))
             except Exception as e:
                 print(f"[classify_llm] ERROR classifying '{spath}' (extract_type={ekind}): {e}")
-                doc_type = "messaging_one_pager"
+                doc_type = UNKNOWN_LABEL
                 doc_subtype = "unknown"
                 conf = 0.3
+                raw_data = {"evidence": [], "_error": str(e)}
 
+            # --- Core row kept minimal & stable ---
             rows.append({
                 "source_path": spath,
-                "sha256": r.get("sha256", ""),
+                "sha256": sha,
                 "doc_type": doc_type,
                 "doc_subtype": doc_subtype,
                 "clf_confidence": round(conf, 2),
                 "extract_type": ekind
             })
+
+            # --- TRIAGE queue conditions ---
+            triage_reasons = []
+            if data.get("_coerced"):
+                triage_reasons.append("suggested_label_not_in_taxonomy")
+            if conf <= LOW_CONF_THRESHOLD:
+                triage_reasons.append("low_confidence")
+            if data.get("_extract_constraint_adjusted_from"):
+                triage_reasons.append("extract_constraint_adjustment")
+
+            if triage_reasons:
+                triage_rows.append({
+                    "source_path": spath,
+                    "sha256": sha,
+                    "extract_type": ekind,
+                    "final_doc_type": doc_type,
+                    "model_doc_type": data.get("_model_doc_type", ""),
+                    "proposed_new_label": data.get("_proposed_new_label", ""),
+                    "uncertainty_reason": data.get("_uncertainty_reason", ""),
+                    "clf_confidence": round(conf, 2),
+                    "evidence": " | ".join((data.get("evidence") or [])[:4]),
+                    "triage_reasons": ",".join(triage_reasons)
+                })
+
+            newly_processed += 1
             total += 1
             if total % 25 == 0:
                 print(f"[classify_llm] processed {total} files...")
 
+    # --- Write outputs ---
     df = pd.DataFrame(rows)
     df.to_csv(out, index=False)
-    print(f"[classify_llm] wrote {out} ({len(rows)} rows)")
+    print(f"[classify_llm] wrote {out} ({len(rows)} rows; new={newly_processed})")
 
-if __name__ == "__main__":
-    if len(sys.argv) >= 3:
-        main(sys.argv[1], sys.argv[2])
+    if triage_rows:
+        df_t = pd.DataFrame(triage_rows)
+        df_t.to_csv(triage_out, index=False)
+        print(f"[classify_llm] wrote TRIAGE queue: {triage_out} ({len(triage_rows)} rows)")
     else:
-        main(sys.argv[1])
+        print("[classify_llm] TRIAGE queue: none needed")
+        
+    
+    if __name__ == "__main__":
+        import argparse
+
+        ap = argparse.ArgumentParser(description="LLM classification for a single campaign")
+        ap.add_argument("campaign_folder", help="Path to the campaign folder (the same path you pass to crawl/extract)")
+        ap.add_argument("--processed-root", default="data/processed",
+                        help="Root folder where processed outputs live (default: data/processed)")
+        ap.add_argument("--model", default=None, help="Optional model override (else uses env CLASSIFY_MODEL)")
+        args = ap.parse_args()
+
+        # Make processed root visible to main via env (so you don’t change a bunch of code)
+        os.environ["CLASSIFY_PROCESSED_ROOT"] = args.processed_root
+
+        # Call your existing main with (campaign_folder, model)
+        main(args.campaign_folder, args.model)
+
 
 

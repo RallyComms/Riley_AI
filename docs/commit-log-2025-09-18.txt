@@ -1,0 +1,1 @@
+﻿dda222c 2025-09-18 Anova Baseline: classifier rules, constraints, pitch override + lock semantics
