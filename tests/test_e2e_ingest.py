@@ -1,7 +1,7 @@
 import json
-from pathlib import Path
 import subprocess
 import sys
+
 
 def test_smoke_ingest(sample_campaign, ci_out):
     cmd = [
@@ -26,7 +26,7 @@ def test_smoke_ingest(sample_campaign, ci_out):
 
     labels = set()
     with open(chunks, encoding="utf-8") as f:
-        lines = [json.loads(l) for l in f if l.strip()]
+        lines = [json.loads(line) for line in f if line.strip()]
     assert len(lines) >= 4
     for rec in lines:
         assert "doc_id" in rec and "text" in rec and "taxonomy_label" in rec
@@ -35,4 +35,7 @@ def test_smoke_ingest(sample_campaign, ci_out):
         pii = rec.get("pii", {})
         assert all(k in pii for k in ("emails", "phones", "addresses"))
 
-    assert len(labels.intersection({"Fundraising", "Comms", "Field", "Policy", "General"})) >= 2
+    assert (
+        len(labels.intersection({"Fundraising", "Comms", "Field", "Policy", "General"}))
+        >= 2
+    )

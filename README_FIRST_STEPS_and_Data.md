@@ -1,39 +1,62 @@
-# Rally KB — Starter (v3, LLM-powered classification)
+# Rally KB — Starter (v3, LLM-Powered Classification)
 
-This version adds **GPT-powered classification** so we don't need to predefine every label.
-- The model picks a **coarse `doc_type`** from our stable list (used for chunking/privacy).
-- It also proposes a **free-text `doc_subtype`** for new/unknown types.
-- We keep the same **privacy** and **chunking** rules as v2.
+This repository implements a campaign knowledge-base ingestion pipeline with **GPT-powered classification**, privacy handling, and chunking.
 
-## 0) Open in VS Code
-Unzip, then **File → Open Folder…** and select this folder.
+---
 
-## 1) Create & activate a Python environment
+## 🔑 What’s New in v2
+
+* Adds **LLM-based classification**:
+
+  * Model selects a stable `doc_type` (for chunking & privacy).
+  * Also proposes a free-text `doc_subtype` for novel types.
+* Preserves the **privacy** and **chunking** logic from v2.
+* Introduces **schema evolution loop**: unmapped or low-confidence docs are triaged but the pipeline continues.
+
+---
+
+## 🚀 Quickstart
+
+### 0. Open in VS Code
+
+* Unzip this repo.
+* **File → Open Folder…** and select the repo root.
+
+### 1. Create & activate a Python environment
+
 **Windows (PowerShell):**
+
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-# If blocked, run once: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+# If blocked, run once:
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 ```
 
 **macOS / Linux / WSL:**
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 ```
 
-## 2) Install requirements
+### 2. Install requirements
+
 ```bash
 pip install -r requirements.txt
 ```
 
-## 3) Add your OpenAI key
+### 3. Add your OpenAI key
+
 ```bash
 cp .env.example .env
-# this is the fi;e where you would paste open ai key
+# Paste your OpenAI API key into the new .env file
 ```
 
-## 4) Put a campaign under data/raw/
+### 4. Add campaign data
+
+Place your campaign folder under `data/raw/`:
+
 ```
 data/
   raw/
@@ -41,10 +64,16 @@ data/
       (your .docx / .pdf / .pptx / .xlsx files)
 ```
 
-## 5) Run the pipeline (LLM classifier)
-**VS Code Task:** Ctrl/Cmd+Shift+P → Run Task → **"Ingest: Single Campaign (LLM classify)"** → enter `data/raw/211 LA`
+### 5. Run the pipeline (LLM classifier)
+
+**VS Code task:**
+
+* Press Ctrl/Cmd+Shift+P → **Run Task**
+* Choose **"Ingest: Single Campaign (LLM classify)"**
+* Enter the path: `data/raw/211 LA`
 
 **Or manual commands:**
+
 ```bash
 python -m pipeline.crawl "data/raw/211 LA"
 python -m pipeline.extract "data/raw/211 LA"
@@ -54,82 +83,71 @@ python -m pipeline.chunk "data/raw/211 LA"
 python -m pipeline.catalog "data/raw/211 LA"
 ```
 
-## 6) Check outputs
-- `data/processed/<Campaign>/classified.csv` now includes **doc_subtype** + **clf_confidence**.
-- `catalog/master_catalog.csv` includes those columns too (added automatically).
+### 6. Check outputs
 
-## Optional: Rules-only classifier
-A second task **"Ingest: Single Campaign (rules-only)"** runs the old heuristic classifier.
-----------------------------------------------------------------------------------------------------------
-----------------------------------------------------------------------------------------------------------
-09/22/2025
+* `data/processed/<Campaign>/classified.csv` → contains `doc_subtype` + `clf_confidence`.
+* `catalog/master_catalog.csv` → includes those new columns automatically.
 
-## Main Bulk Data Ingestion Pipeline
-  **Strategy Implemented*
+---
 
-Classify everything, but:
+## ⚙️ Optional: Rules-Only Classifier
 
-  1. If the model suggests a label that’s not in the current taxonomy, do not error.
+You can also run the legacy heuristic classifier via task **"Ingest: Single Campaign (rules-only)"**.
 
-  2. Route it to a triage file with the model’s suggested label + evidence, while assigning a safe working label (unmapped_other) so the rest of the pipeline can proceed.
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+(09/22/2025)
 
-  3. Also triage low‑confidence items (e.g., ≤ 0.65) regardless of label.
+## 🛠️ Bulk Ingestion Strategy 
 
-  4. Chunk everything, including unmapped_other using conservative chunk rules.
+* Classify everything, but:
 
-  5. After each batch, you review triage_needs_review.csv, decide on new labels or rules, update configs/taxonomy.yaml / heuristics, and re‑run. The runner skips already‑handled files by SHA.
+  1. If model suggests a label not in taxonomy → **triage** it with evidence + assign `unmapped_other`.
+  2. Triage any **low-confidence** results (≤ 0.65).
+  3. Chunk everything (including `unmapped_other`) with conservative rules.
+  4. After each batch: review `triage_needs_review.csv`, update `configs/taxonomy.yaml` or rules, and re-run.
+     The runner skips already-handled files by SHA.
+* **Result:** Schema evolves continuously without blocking automation.
 
-This gives you a schema‑evolution loop without stopping the automation.
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+(09/24/2025)
 
-----------------------------------------------------------------------------------------------------------
-----------------------------------------------------------------------------------------------------------
-09/24/2025
+## 🗂️ Filename Sanitization
 
-### Filename Sanitization in Nested Ingest
-Some campaigns include folders/files with trailing spaces or other
-characters that are invalid on Windows (e.g. `"Design "` or `"Assets "`).
-To prevent extraction errors, `ingest_from_nested_zip.py` now sanitizes
-all names:
-- Trailing spaces/dots are removed
-- Backslashes are replaced with `_`
-- Colons are replaced with `_`
+* Nested ZIP campaigns sometimes include invalid Windows filenames (`"Design "`, `"Assets "`, etc.).
+* The pipeline sanitizes temporary extracted paths:
 
-This affects only the *temporary extracted paths*; metadata inside
-catalog outputs still retains the original filenames where possible.
+  * Trailing spaces/dots removed
+  * Backslashes → `_`
+  * Colons → `_`
+* Catalog metadata retains original names when possible.
 
--------------------------------------------------------------------------------------------------------------
--------------------------------------------------------------------------------------------------------------
-09/25/2025
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+(09/25/2025)
 
-### Flatten & Deduplicate Campaigns (zip-of-zips → unique folders)
+## 📦 Flatten & Deduplicate 
 
-Some exports arrive as a “zip-of-zips”: a mega ZIP containing ~18 inner ZIPs, each with
-a `Complete Campaigns/` folder and 18–35 campaign subfolders. We normalize this into a
-flat corpus of unique campaign folders, with safe filenames and no duplicate files.
+Some exports arrive as “zip-of-zips”: a mega ZIP with ~18 inner ZIPs, each containing campaigns.
+We normalize this to a flat corpus of unique, safe campaign folders.
 
-**Steps**
+**Steps:**
 
-1. **Stage inner ZIPs**  
-   The helper copies all inner ZIPs to `data/_nested_staging/inner_zips/`.
+1. Stage inner ZIPs → `data/_nested_staging/inner_zips/`
+2. Extract long-path-safe with sanitization → `data/_nested_staging/extracted/<part>/`
+3. Flatten into `data/raw/<Campaign Name>/`
 
-2. **Long-path-safe extraction with sanitization**  
-   Each inner ZIP is extracted to `data/_nested_staging/extracted/<part>/`, sanitizing every
-   path component (remove trailing spaces/dots; replace illegal characters) to avoid Windows
-   filesystem errors.
+   * Collisions → suffixed (`__1`, `__2`)
+4. Deduplicate into `data/raw_dedup/` by SHA-256
 
-3. **Flatten to `data/raw/`**  
-   Every immediate subfolder in `Complete Campaigns/` is treated as a campaign and copied to
-   `data/raw/<Campaign Name>/`. Name collisions are preserved as `<name>__1`, `<name>__2`, … rather
-   than overwritten.
+   * Keeps one canonical folder per campaign
+   * Leaves `data/raw/` intact
 
-4. **Hybrid deduplication → `data/raw_dedup/`**  
-   We collapse suffixed copies into a single canonical folder per campaign and deduplicate files
-   by SHA-256. Filenames are sanitized for Windows safety. The original `data/raw/` is left intact.
-
-**Commands**
+**Commands:**
 
 ```bash
-# Flatten from mega ZIP to data/raw
+# Flatten mega ZIP into data/raw
 python scripts/extract_all_inner_zips.py \
   --mega "C:\path\Complete Campaigns_Mega Zip.zip" \
   --inner-zips data/_nested_staging/inner_zips \
@@ -139,3 +157,37 @@ python scripts/extract_all_inner_zips.py \
 
 # Deduplicate into data/raw_dedup
 python scripts/dedup_raw_campaigns.py
+```
+
+-------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+(09/29/2025)
+
+## 🔒 Privacy Pipeline Notes 
+
+**Improvements:**
+
+* **Address regex** detects common US-style street names (e.g., `"123 Main Street"`).
+  (Doesn’t yet cover PO Boxes or exotic suffixes.)
+* `detect_pii()` and `redact_text()` added for CI/CD.
+* **Redaction order** is deterministic: emails → phones → addresses.
+* Redaction tokens are configurable (`[EMAIL]`, `[PHONE]`, `[ADDR]`).
+* Legacy `decide_index_mode()` + `main()` remain for `privacy.csv`.
+
+## 📑 Extract Pipeline Notes 
+
+**Key Improvements:**
+
+* `read_*` functions wrap in `try/except` → always return strings.
+* `sniff_and_read` handles XLSX schemas as JSON string → safe for audits.
+* `main()` now:
+
+  * Guards against missing/empty inventories.
+  * Covers `.txt` and `.md`.
+  * Guarantees output per file (extract or error).
+* CI/CD compatibility:
+
+  * `sniff_and_read` = single universal entry point.
+  * Deterministic, no network calls.
+
+---

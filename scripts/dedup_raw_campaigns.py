@@ -4,20 +4,26 @@
 #   3. Deduplicate by SHA256 hash inside each merged campaign.
 #   4. Sanitize filenames/paths for Windows safety.
 
-import argparse, hashlib, shutil, os
+import argparse
+import hashlib
+import shutil
+import os
 from pathlib import Path
 
 RAW = Path("data/raw")
 DEDUP = Path("data/raw_dedup")
 
-def log(msg): 
+
+def log(msg):
     print(msg, flush=True)
+
 
 def sanitize_filename(name: str) -> str:
     """Sanitize a filename or folder component for Windows/NTFS."""
     invalid = '<>:"/\\|?*'
     safe = "".join(c for c in name if c not in invalid)
     return safe.rstrip(" .")  # strip trailing spaces/dots
+
 
 def file_hash(path, block_size=65536):
     """Compute SHA256 hash for deduplication."""
@@ -26,6 +32,7 @@ def file_hash(path, block_size=65536):
         for chunk in iter(lambda: f.read(block_size), b""):
             h.update(chunk)
     return h.hexdigest()
+
 
 def dedup_campaigns(src_root: Path, out_root: Path, dry_run=False):
     out_root.mkdir(parents=True, exist_ok=True)
@@ -39,7 +46,9 @@ def dedup_campaigns(src_root: Path, out_root: Path, dry_run=False):
         groups.setdefault(base, []).append(d)
 
     total_campaigns = len(groups)
-    log(f"[plan] Found {len(list(src_root.iterdir()))} raw folders → {total_campaigns} unique campaigns")
+    log(
+        f"[plan] Found {len(list(src_root.iterdir()))} raw folders → {total_campaigns} unique campaigns"
+    )
 
     for base, dirs in groups.items():
         out_dir = out_root / sanitize_filename(base)
@@ -77,18 +86,30 @@ def dedup_campaigns(src_root: Path, out_root: Path, dry_run=False):
                             continue
                     merged_files += 1
 
-        log(f"[dedup] {base}: merged {merged_files} files (skipped {skipped} dups) from {len(dirs)} folders")
+        log(
+            f"[dedup] {base}: merged {merged_files} files (skipped {skipped} dups) from {len(dirs)} folders"
+        )
 
     log(f"[done] Deduplicated {total_campaigns} campaigns into {out_root}")
 
+
 def main():
     ap = argparse.ArgumentParser(description="Deduplicate raw campaign folders")
-    ap.add_argument("--src", default=str(RAW), help="Source raw campaigns folder (default=data/raw)")
-    ap.add_argument("--out", default=str(DEDUP), help="Output deduplicated folder (default=data/raw_dedup)")
-    ap.add_argument("--dry-run", action="store_true", help="Show plan only, don’t copy files")
+    ap.add_argument(
+        "--src", default=str(RAW), help="Source raw campaigns folder (default=data/raw)"
+    )
+    ap.add_argument(
+        "--out",
+        default=str(DEDUP),
+        help="Output deduplicated folder (default=data/raw_dedup)",
+    )
+    ap.add_argument(
+        "--dry-run", action="store_true", help="Show plan only, don’t copy files"
+    )
     args = ap.parse_args()
 
     dedup_campaigns(Path(args.src), Path(args.out), dry_run=args.dry_run)
+
 
 if __name__ == "__main__":
     main()

@@ -4,7 +4,10 @@
 # 2. safe_print prevents encoding crashes on Windows consoles.
 # 3. Dual-mode CLI makes my tests happy (--input/--out) and keeps backward compatibility ("data/raw/<Campaign>").
 # 4. Uses my existing pipeline pieces (sniff_and_read, detect_pii, chunk_text, classify) in smoke mode, so it’s consistent with CI.
+# ruff: noqa: E402
+
 """
+
 Riley ingest runner with two modes:
 
 1) Smoke mode (used by CI and tests):
@@ -28,12 +31,18 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+
 def safe_print(*args, **kwargs):
     try:
         print(*args, **kwargs)
     except UnicodeEncodeError:
         msg = " ".join(str(a) for a in args)
-        sys.stdout.write(msg.encode(sys.stdout.encoding, errors="replace").decode(sys.stdout.encoding) + "\n")
+        sys.stdout.write(
+            msg.encode(sys.stdout.encoding, errors="replace").decode(
+                sys.stdout.encoding
+            )
+            + "\n"
+        )
 
 
 # Ensure repo root is on sys.path
@@ -45,6 +54,7 @@ import argparse
 import csv
 import json
 import time
+
 ...
 
 
@@ -52,6 +62,7 @@ import time
 from pipeline.extract import sniff_and_read
 from pipeline.privacy import detect_pii, redact_text
 from pipeline.chunk import chunk_text
+
 try:
     # heuristic fallback we added earlier
     from pipeline.classify_llm import classify
@@ -63,9 +74,15 @@ except Exception:
             return "Fundraising"
         if any(k in tl for k in ("press", "media", "announce", "statement", "release")):
             return "Comms"
-        if any(k in tl for k in ("volunteer", "door knock", "canvass", "phonebank", "rally")):
+        if any(
+            k in tl
+            for k in ("volunteer", "door knock", "canvass", "phonebank", "rally")
+        ):
             return "Field"
-        if any(k in tl for k in ("policy", "plan", "healthcare", "education", "tax", "climate")):
+        if any(
+            k in tl
+            for k in ("policy", "plan", "healthcare", "education", "tax", "climate")
+        ):
             return "Policy"
         return "General"
 
@@ -75,7 +92,10 @@ ALLOWED = {".pdf", ".docx", ".pptx", ".txt", ".md", ".xls", ".xlsx"}
 
 # ------------------ Smoke mode (CI/test) ------------------
 
-def run_smoke(input_dir: Path, out_dir: Path, max_tokens: int = 400, overlap_tokens: int = 40) -> None:
+
+def run_smoke(
+    input_dir: Path, out_dir: Path, max_tokens: int = 400, overlap_tokens: int = 40
+) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     artifacts = out_dir / "artifacts"
     artifacts.mkdir(exist_ok=True)
@@ -114,7 +134,7 @@ def run_smoke(input_dir: Path, out_dir: Path, max_tokens: int = 400, overlap_tok
         rel = str(p.relative_to(input_dir))
         try:
             raw = sniff_and_read(p)
-        except Exception as e:
+        except Exception:
             # record an empty row so we can see failures in the manifest
             mw.writerow(
                 {
@@ -188,8 +208,8 @@ def run_smoke(input_dir: Path, out_dir: Path, max_tokens: int = 400, overlap_tok
     safe_print(f"[smoke] processed={processed} → {out_dir} in {dur}s")
 
 
-
 # ------------------ Legacy orchestrator mode ------------------
+
 
 def run_legacy_orchestrator(campaign_root: str) -> None:
     camp = campaign_root
@@ -210,27 +230,34 @@ def run_legacy_orchestrator(campaign_root: str) -> None:
     for s in steps:
         print("\n>>", " ".join(s))
         # If any step fails, bubble up
-        rc = 0
         try:
-            rc = sys.modules.get("subprocess").run(s, check=True).returncode  # type: ignore[attr-defined]
+            # use the already-loaded module if available
+            sys.modules.get("subprocess").run(s, check=True)  # type: ignore[attr-defined]
         except Exception:
-            # Fall back to normal import since we used a trick above
-            import subprocess as sp  # noqa: WPS433 (module import inside function)
+            # fallback import (very defensive)
+            import subprocess as sp  # noqa: E402
 
             sp.run(s, check=True)
 
-    print("\nDONE ✓")
+    safe_print("\nDONE")  # <-- after the loop, prints once
 
 
 # ------------------ CLI ------------------
 
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description="Riley ingest runner (smoke + legacy modes)")
-    ap.add_argument("--input", type=Path, help="Input folder (campaign root) for smoke mode")
+    ap = argparse.ArgumentParser(
+        description="Riley ingest runner (smoke + legacy modes)"
+    )
+    ap.add_argument(
+        "--input", type=Path, help="Input folder (campaign root) for smoke mode"
+    )
     ap.add_argument("--out", type=Path, help="Output folder for smoke mode")
     ap.add_argument("--max_tokens", type=int, default=400)
     ap.add_argument("--overlap_tokens", type=int, default=40)
-    ap.add_argument("legacy_campaign", nargs="?", help="Legacy mode: data/raw/<Campaign Name>")
+    ap.add_argument(
+        "legacy_campaign", nargs="?", help="Legacy mode: data/raw/<Campaign Name>"
+    )
     return ap.parse_args(argv)
 
 
@@ -238,7 +265,12 @@ def main() -> None:
     args = parse_args(sys.argv[1:])
     # Smoke mode if both flags present
     if args.input and args.out:
-        run_smoke(args.input, args.out, max_tokens=args.max_tokens, overlap_tokens=args.overlap_tokens)
+        run_smoke(
+            args.input,
+            args.out,
+            max_tokens=args.max_tokens,
+            overlap_tokens=args.overlap_tokens,
+        )
         return
 
     # Legacy mode: one positional argument
@@ -247,9 +279,11 @@ def main() -> None:
         return
 
     # Otherwise show usage similar to your old script
-    print('Usage:\n'
-            '  Smoke:  python scripts/ingest_campaign.py --input <folder> --out <outdir> [--max_tokens N --overlap_tokens M]\n'
-            '  Legacy: python scripts/ingest_campaign.py "data/raw/<Campaign Name>"')
+    print(
+        "Usage:\n"
+        "  Smoke:  python scripts/ingest_campaign.py --input <folder> --out <outdir> [--max_tokens N --overlap_tokens M]\n"
+        '  Legacy: python scripts/ingest_campaign.py "data/raw/<Campaign Name>"'
+    )
     sys.exit(1)
 
 

@@ -2,7 +2,14 @@
 # Process a "zip-of-zips" archive: one mega ZIP that contains many inner ZIPs.
 # For each inner ZIP, find the campaign folder root and run your per-campaign ingester.
 
-import argparse, json, sys, zipfile, shutil, fnmatch, shlex, os
+import argparse
+import json
+import sys
+import zipfile
+import shutil
+import fnmatch
+import shlex
+import os
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -24,7 +31,11 @@ def copy_inner_zips_from_mega(mega_zip: Path, out_dir: Path):
     """Copy *.zip files OUT of the mega zip as files (no decompression)."""
     ensure_dir(out_dir)
     with zipfile.ZipFile(mega_zip, "r") as z:
-        inner = [i for i in z.infolist() if (not i.is_dir()) and i.filename.lower().endswith(".zip")]
+        inner = [
+            i
+            for i in z.infolist()
+            if (not i.is_dir()) and i.filename.lower().endswith(".zip")
+        ]
         if not inner:
             log(f"[warn] No inner .zip files found in {mega_zip.name}")
         for i in inner:
@@ -45,7 +56,9 @@ def discover_inner_zip_files(source: Path, staging_zips: Path):
         copy_inner_zips_from_mega(source, staging_zips)
         return sorted([p for p in staging_zips.glob("*.zip")])
     else:
-        raise SystemExit(f"[error] Source must be a .zip or a folder with .zip files: {source}")
+        raise SystemExit(
+            f"[error] Source must be a .zip or a folder with .zip files: {source}"
+        )
 
 
 def load_resume(path: Path):
@@ -54,7 +67,12 @@ def load_resume(path: Path):
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             pass
-    return {"started_at": None, "completed_inner": [], "completed_campaigns": [], "failed": []}
+    return {
+        "started_at": None,
+        "completed_inner": [],
+        "completed_campaigns": [],
+        "failed": [],
+    }
 
 
 def save_resume(path: Path, data: dict):
@@ -66,6 +84,7 @@ def save_resume(path: Path, data: dict):
 
 # --- Windows long-path helpers ------------------------------------------------
 
+
 def _win_long_path(s: str) -> str:
     """Return a Windows extended-length path (\\?\...) if needed."""
     if os.name != "nt":
@@ -76,6 +95,7 @@ def _win_long_path(s: str) -> str:
     if s.startswith("\\\\"):  # UNC
         return "\\\\?\\UNC\\" + s.lstrip("\\")
     return "\\\\?\\" + s
+
 
 def _sanitize_name(name: str) -> str:
     """
@@ -89,6 +109,7 @@ def _sanitize_name(name: str) -> str:
     # Remove common bidi/invisible marks that can sneak into names
     name = name.replace("\u202a", "").replace("\u202c", "").replace("\ufeff", "")
     return name
+
 
 def _safe_extract(zf: zipfile.ZipFile, dest: Path):
     """
@@ -123,6 +144,7 @@ def _safe_extract(zf: zipfile.ZipFile, dest: Path):
 
 # --- Per-campaign runner (no shell; robust quoting) ---------------------------
 
+
 def run_per_campaign(campaign_dir: Path, cmd_template: str) -> int:
     """
     Run the per-campaign command robustly (no shell) so spaces/&/() don't break on Windows.
@@ -132,15 +154,17 @@ def run_per_campaign(campaign_dir: Path, cmd_template: str) -> int:
     "python -m pipeline.classify \"{campaign_dir}\""
     """
     import subprocess  # local import to avoid "unused import" lint at module level
+
     filled = cmd_template.format(campaign_dir=str(campaign_dir))
-    argv = shlex.split(filled, posix=False)   # keep Windows backslashes
+    argv = shlex.split(filled, posix=False)  # keep Windows backslashes
     if argv and argv[0].lower() == "python":
-        argv[0] = sys.executable            # run with current venv/python
+        argv[0] = sys.executable  # run with current venv/python
     log(f"  [run] {' '.join(argv)}")
     return subprocess.run(argv, shell=False).returncode
 
 
 # --- Utility to locate the campaign root inside an inner ZIP ------------------
+
 
 def find_campaign_root(extracted_dir: Path, preferred_name: str) -> Path:
     """
@@ -162,21 +186,67 @@ def find_campaign_root(extracted_dir: Path, preferred_name: str) -> Path:
 
 # --- Main ---------------------------------------------------------------------
 
+
 def main():
-    ap = argparse.ArgumentParser(description="Ingest campaigns from a mega zip that contains inner zip parts.")
-    ap.add_argument("--source", required=True, help="Path to the mega zip (or a folder that contains the inner zip parts).")
-    ap.add_argument("--staging", default="data/_nested_staging", help="Working directory used for inner zips and extraction.")
-    ap.add_argument("--resume-file", default="data/reports/nested_resume.json", help="Where progress is stored (safe to keep across runs).")
-    ap.add_argument("--campaign-root-name", default="Complete Campaigns", help="Folder name inside each inner zip that contains the campaign folders.")
-    ap.add_argument("--include", default="*", help="Glob of campaign folder names to include (default: all)")
-    ap.add_argument("--exclude", default="", help="Comma-separated globs to exclude (e.g., 'Archive*,_old*')")
-    ap.add_argument("--batch-size", type=int, default=0, help="If >0, limit number of campaign folders processed per inner zip in this run.")
-    ap.add_argument("--max-campaigns", type=int, default=0, help="If >0, stop after processing this many campaigns in total.")
-    ap.add_argument("--delete-extracted", action="store_true", help="Delete extracted inner zip folder after processing (reclaims disk).")
-    ap.add_argument("--dry-run", action="store_true", help="Plan only; do not run the ingester.")
-    ap.add_argument("--campaign-cmd", required=True,
-                    help='Per-campaign command (REQUIRED). Use {campaign_dir} where the folder path should go. '
-                        'Example: "python scripts/ingest_campaign_rules.py \\"{campaign_dir}\\""')
+    ap = argparse.ArgumentParser(
+        description="Ingest campaigns from a mega zip that contains inner zip parts."
+    )
+    ap.add_argument(
+        "--source",
+        required=True,
+        help="Path to the mega zip (or a folder that contains the inner zip parts).",
+    )
+    ap.add_argument(
+        "--staging",
+        default="data/_nested_staging",
+        help="Working directory used for inner zips and extraction.",
+    )
+    ap.add_argument(
+        "--resume-file",
+        default="data/reports/nested_resume.json",
+        help="Where progress is stored (safe to keep across runs).",
+    )
+    ap.add_argument(
+        "--campaign-root-name",
+        default="Complete Campaigns",
+        help="Folder name inside each inner zip that contains the campaign folders.",
+    )
+    ap.add_argument(
+        "--include",
+        default="*",
+        help="Glob of campaign folder names to include (default: all)",
+    )
+    ap.add_argument(
+        "--exclude",
+        default="",
+        help="Comma-separated globs to exclude (e.g., 'Archive*,_old*')",
+    )
+    ap.add_argument(
+        "--batch-size",
+        type=int,
+        default=0,
+        help="If >0, limit number of campaign folders processed per inner zip in this run.",
+    )
+    ap.add_argument(
+        "--max-campaigns",
+        type=int,
+        default=0,
+        help="If >0, stop after processing this many campaigns in total.",
+    )
+    ap.add_argument(
+        "--delete-extracted",
+        action="store_true",
+        help="Delete extracted inner zip folder after processing (reclaims disk).",
+    )
+    ap.add_argument(
+        "--dry-run", action="store_true", help="Plan only; do not run the ingester."
+    )
+    ap.add_argument(
+        "--campaign-cmd",
+        required=True,
+        help="Per-campaign command (REQUIRED). Use {campaign_dir} where the folder path should go. "
+        'Example: "python scripts/ingest_campaign_rules.py \\"{campaign_dir}\\""',
+    )
     args = ap.parse_args()
 
     source = Path(args.source)
@@ -189,7 +259,9 @@ def main():
     resume_path = Path(args.resume_file)
     state = load_resume(resume_path)
     if state["started_at"] is None:
-        state["started_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        state["started_at"] = (
+            datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        )
         save_resume(resume_path, state)
 
     # 1) Find inner zips
@@ -204,7 +276,9 @@ def main():
     include_glob = args.include
     exclude_globs = [g.strip() for g in args.exclude.split(",") if g.strip()]
 
-    log(f"[plan] inner zips found: {len(inner_zips)} (skipping {len(completed_inner)} already done)")
+    log(
+        f"[plan] inner zips found: {len(inner_zips)} (skipping {len(completed_inner)} already done)"
+    )
     for inner in inner_zips:
         if inner.name in completed_inner:
             log(f"[skip] inner zip already processed: {inner.name}")
@@ -221,7 +295,9 @@ def main():
         # Find the campaign root inside
         campaign_root = find_campaign_root(extracted_dir, args.campaign_root_name)
         if not campaign_root.exists():
-            log(f"[warn] campaign root not found in {inner.name}; using {extracted_dir}")
+            log(
+                f"[warn] campaign root not found in {inner.name}; using {extracted_dir}"
+            )
             campaign_root = extracted_dir
 
         # List campaign folders (immediate children)
@@ -238,7 +314,7 @@ def main():
 
         # Apply per-run batch cap for this inner zip
         if args.batch_size > 0:
-            campaigns = campaigns[:args.batch_size]
+            campaigns = campaigns[: args.batch_size]
 
         if not campaigns:
             log(f"[warn] no campaigns matched in {inner.name}")
@@ -278,13 +354,17 @@ def main():
                 state["completed_campaigns"].append(key)
                 total_done += 1
             else:
-                state["failed"].append({
-                    "inner_zip": inner.name,
-                    "campaign": cdir.name,
-                    "path": key,
-                    "code": rc,
-                    "ts": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-                })
+                state["failed"].append(
+                    {
+                        "inner_zip": inner.name,
+                        "campaign": cdir.name,
+                        "path": key,
+                        "code": rc,
+                        "ts": datetime.now(timezone.utc)
+                        .isoformat()
+                        .replace("+00:00", "Z"),
+                    }
+                )
             save_resume(resume_path, state)
 
         # 4) Mark inner zip done

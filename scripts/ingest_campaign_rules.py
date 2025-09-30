@@ -2,6 +2,7 @@ import sys
 import subprocess as sp
 from pathlib import Path
 
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: python {sys.argv[0]} <campaign_folder_path>")
@@ -12,7 +13,9 @@ def main():
 
     camp_path = Path(camp)
     if not camp_path.exists() or not camp_path.is_dir():
-        print(f"[ingest_campaign_rules] ERROR: Path not found or not a directory: {camp_path}")
+        print(
+            f"[ingest_campaign_rules] ERROR: Path not found or not a directory: {camp_path}"
+        )
         sys.exit(1)
 
     py = sys.executable
@@ -33,6 +36,6 @@ def main():
 
     print(f"\n[ingest_campaign_rules] DONE ✓  ({camp_path})")
 
+
 if __name__ == "__main__":
     main()
-
