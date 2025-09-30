@@ -1,6 +1,50 @@
-﻿data/
-*.env
+﻿# --- Python / venv ---
+.venv/
+venv/
+env/
 __pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.pickle
+*.pkl
+
+# --- Editors / IDEs ---
+.vscode/
+.idea/
+
+# --- Test / tooling caches ---
+.pytest_cache/
+.coverage*
+.mypy_cache/
+.ruff_cache/
+
+# --- Notebooks ---
 .ipynb_checkpoints/
+
+# --- Build / dist / packaging ---
+build/
+dist/
+*.egg-info/
+
+# --- Logs ---
+*.log
+logs/
+
+# --- Local env / secrets (keep in .env.example) ---
+*.env
 *.key
 *.pem
+
+# --- Project outputs / data (generated or large) ---
+.runs/
+artifacts/
+data/
+
+# keep placeholder, we want the data folder in Git:
+!data/.gitkeep
+!artifacts/.gitkeep
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
