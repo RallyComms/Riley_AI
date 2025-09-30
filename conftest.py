@@ -1,6 +1,7 @@
-## this is ignore logic, it tells pytest to stop going into the data and artifacts folders
+# this is ignore logic, it tells pytest to stop going into the data and artifacts folders
 
 from __future__ import annotations
+
 
 def pytest_ignore_collect(path, config):  # type: ignore[override]
     """
