@@ -52,10 +52,3 @@ jobs:
       - name: Run tests
         run: |
           pytest -q --maxfail=1 --disable-warnings --cov --cov-report=term-missing
-
-      - name: Upload coverage (artifact)
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-${{ github.run_id }}
-          path: ./.coverage*
