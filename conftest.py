@@ -1,10 +1,9 @@
-# this is ignore logic, it tells pytest to stop going into the data and artifacts folders
-
 from __future__ import annotations
 
 from pathlib import Path
 
 _BLOCK_TOP = {"data", "artifacts", ".runs", ".venv"}
+
 
 def pytest_ignore_collect(path, config):  # type: ignore[override]
     """
@@ -22,5 +21,3 @@ def pytest_ignore_collect(path, config):  # type: ignore[override]
     parts = [part.lower() for part in rel.parts]
     # Block only if the first segment is a blocked folder
     return bool(parts) and parts[0] in _BLOCK_TOP
-
-
