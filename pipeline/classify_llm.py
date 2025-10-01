@@ -80,20 +80,37 @@ def tail(text: str, n: int) -> str:
 
 def build_sample(extract_type: str, extract_obj: dict, max_chars: int) -> str:
     if extract_type == "text":
-        t = extract_obj.get("text", "")
-        a = head(t, int(max_chars * 0.7))
-        b = tail(t, int(max_chars * 0.3))
-        return (a + "\n...\n" + b)[:max_chars]
+        t = extract_obj.get("text", "") or ""
+        if len(t) <= max_chars:
+            return t
+        # split budget: 70% head, 30% tail, with a joiner
+        joiner = "\n...\n"
+        head_budget = int(max_chars * 0.7)
+        tail_budget = max_chars - head_budget - len(joiner)
+        if tail_budget < 0:  # extreme small budgets
+            head_budget = max_chars
+            tail_budget = 0
+            joiner = ""
+        head = t[:head_budget]
+        tail = t[-tail_budget:] if tail_budget > 0 else ""
+        return f"{head}{joiner}{tail}"
     if extract_type == "slides":
         slides = extract_obj.get("slides", {}) or {}
         parts = []
+        # take up to first 3 slides
         for i in (1, 2, 3):
             si = slides.get(i, {})
-            parts.append(f"[Slide {i}] {si.get('title','')}\n{si.get('body','')}")
+            title = si.get("title", "")
+            body = si.get("body", "")
+            if not title and not body:
+                continue
+            parts.append(f"[Slide {i}] {title}\n{body}")
         return "\n\n".join(parts)[:max_chars]
+
     if extract_type == "xlsx_schema":
         schema = extract_obj.get("schema", {}) or {}
         return json.dumps(schema)[:max_chars]
+
     return ""
 
 
