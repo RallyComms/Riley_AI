@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pathlib import Path
 
 import pytest
@@ -41,7 +43,12 @@ def _make_pdf(path: Path, text: str) -> None:
 
 @pytest.fixture(scope="session")
 def sample_campaign(tmp_path_factory):
+    """
+    Build a tiny synthetic 'campaign' folder with a few file types,
+    used by smoke tests and unit tests.
+    """
     root = tmp_path_factory.mktemp("sample_campaign")
+
     _make_docx(
         root / "fundraising_memo.docx",
         "Urgent: Small-dollar fundraising push.\nDonate at donate@example.org\nCall +1 202 555 0134",
@@ -61,11 +68,15 @@ def sample_campaign(tmp_path_factory):
         "Volunteer to canvass and phonebank this weekend!\nMeet at 123 Main Street.",
         encoding="utf-8",
     )
+
     return root
 
 
 @pytest.fixture
-def ci_out(tmp_path):
+def ci_out(tmp_path: Path) -> Path:
+    """
+    CI output directory for test results.
+    """
     out = tmp_path / ".ci_out"
     out.mkdir()
     return out
