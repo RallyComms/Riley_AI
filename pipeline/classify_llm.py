@@ -668,7 +668,9 @@ def main(campaign_root: str, model: str = None):
 
     # Only require the real key if not in mocked mode
     if not os.getenv("OPENAI_API_KEY") and not use_mock:
-        print("[ingest_campaign_llm] ERROR: OPENAI_API_KEY not set in environment (.env).")
+        print(
+            "[ingest_campaign_llm] ERROR: OPENAI_API_KEY not set in environment (.env)."
+        )
         sys.exit(1)
 
     # Only instantiate the OpenAI client if we aren't mocking
