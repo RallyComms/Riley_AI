@@ -52,7 +52,9 @@ jobs:
       - name: Run tests
         run: |
           export PYTHONPATH=$PYTHONPATH:$(pwd)
-          pytest -q --maxfail=1 --disable-warnings --cov=pipeline --cov=scripts --cov-report=term-missing --cov-fail-under=0
+          pytest -q --maxfail=1 --disable-warnings \
+              --cov=pipeline --cov=scripts --cov-report=term-missing --cov-fail-under=0
+
 
 
 
