@@ -664,13 +664,15 @@ def enforce_extract_constraints(data, extract_type, hay, filename: str = ""):
 
 
 def main(campaign_root: str, model: str = None):
-    if not os.getenv("OPENAI_API_KEY"):
-        print(
-            "[ingest_campaign_llm] ERROR: OPENAI_API_KEY not set in environment (.env)."
-        )
+    use_mock = os.getenv("MOCK_LLM") == "1"
+
+    # Only require the real key if not in mocked mode
+    if not os.getenv("OPENAI_API_KEY") and not use_mock:
+        print("[ingest_campaign_llm] ERROR: OPENAI_API_KEY not set in environment (.env).")
         sys.exit(1)
 
-    client = OpenAI()
+    # Only instantiate the OpenAI client if we aren't mocking
+    client = OpenAI() if not use_mock else object()
     model = model or CLASSIFY_MODEL
 
     taxonomy = load_yaml("configs/taxonomy.yaml")
