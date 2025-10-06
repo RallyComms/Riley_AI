@@ -1,11 +1,30 @@
-openai>=1.40.0
-python-dotenv>=1.0.1
-pydantic>=2.7.0
-pandas>=2.2.2
-python-docx>=1.1.2
-pdfplumber>=0.11.0
-python-pptx>=0.6.23
-openpyxl>=3.1.3
-PyYAML>=6.0.1
-regex>=2024.5.15
-tiktoken>=0.7.0
+# --- Core runtime for Riley pipeline (ingest/extract/classify/chunk/embed) ---
+
+# OpenAI client (embeddings + LLM classify)
+openai==1.107.1
+python-dotenv==1.1.1
+
+# Dataframes & storage
+pandas==2.3.2
+numpy==2.3.3
+pyarrow==16.1.0
+
+# Document parsing
+pdfplumber==0.11.7
+pdfminer.six==20250506
+python-docx==1.2.0
+python-pptx==1.0.2
+openpyxl==3.1.5
+lxml==6.0.1
+pillow==11.3.0
+
+# YAML configs
+PyYAML==6.0.2
+
+# Tokenization for chunking
+tiktoken==0.11.0
+
+# Helpers
+requests==2.32.5
+regex==2025.9.1
+tqdm==4.67.1
