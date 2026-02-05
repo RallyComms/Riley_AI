@@ -1,50 +1,24 @@
-﻿# --- Python / venv ---
+# ===== Python =====
 .venv/
 venv/
-env/
 __pycache__/
-*.py[cod]
-*.pyd
-*.pyo
-*.pickle
-*.pkl
+*.pyc
 
-# --- Editors / IDEs ---
-.vscode/
-.idea/
-
-# --- Test / tooling caches ---
-.pytest_cache/
-.coverage*
-.mypy_cache/
-.ruff_cache/
-
-# --- Notebooks ---
-.ipynb_checkpoints/
-
-# --- Build / dist / packaging ---
-build/
+# ===== Node / Frontend =====
+node_modules/
+.next/
 dist/
-*.egg-info/
 
-# --- Logs ---
-*.log
-logs/
-
-# --- Local env / secrets (keep in .env.example) ---
-*.env
+# ===== Environment / Secrets =====
+.env
+.env.local
+.env.*
+env.yaml
+gcp-key.json
 *.key
 *.pem
+*.json
 
-# --- Project outputs / data (generated or large) ---
-.runs/
-artifacts/
-data/
-
-# keep placeholder, we want the data folder in Git:
-!data/.gitkeep
-!artifacts/.gitkeep
-
-# --- OS cruft ---
+# ===== OS / Editor =====
 .DS_Store
-Thumbs.db
+.vscode/

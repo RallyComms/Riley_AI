@@ -1,0 +1,176 @@
+@import "tailwindcss";
+
+@theme {
+  --color-zinc-950: #09090b;
+  --color-zinc-900: #18181b;
+  --color-zinc-800: #27272a;
+  --color-zinc-100: #f4f4f5;
+  --color-amber-400: #facc15;
+}
+
+:root {
+  --background: #020617; /* Deep Navy (Slate 950) - No Black */
+  --foreground: #f4f4f5;
+  --card: #0f172a; /* Slate 900 */
+  --popover: #0f172a; /* Slate 900 */
+}
+
+/* Dark Mode - Clean Background (Grid handled by CSS) */
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), system-ui, sans-serif;
+  position: relative;
+  overflow-x: hidden;
+  min-height: 100vh;
+}
+
+/* Light Mode - Ceramic (Physical Paper Documents) */
+.light {
+  --background: #f2f2f2; /* Off-white */
+  --card-bg: #ffffff;
+  --text-primary: #0a0a0a; /* Stark black */
+  --foreground: var(--text-primary);
+  background-color: var(--background);
+  color: var(--foreground);
+  /* No shadows, strictly black borders */
+  border-color: #e5e5e5;
+}
+
+/* Utility to hide scrollbars but keep functionality */
+.scrollbar-hide {
+  -ms-overflow-style: none;  /* IE and Edge */
+  scrollbar-width: none;  /* Firefox */
+}
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;  /* Chrome, Safari and Opera */
+}
+
+/* Thin scrollbar styling */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.1) transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.2);
+}
+
+/* DocViewer Dark Theme Overrides */
+.react-doc-viewer {
+  background: transparent !important;
+}
+
+.react-doc-viewer .rdv-viewer {
+  background: transparent !important;
+}
+
+.react-doc-viewer iframe {
+  background: transparent !important;
+}
+
+/* Ensure DocViewer content is visible in dark theme */
+.react-doc-viewer * {
+  color: rgb(244, 244, 245) !important;
+}
+
+/* ============================================
+   "EXPENSIVE" CSS DESIGN SYSTEM - ONYX & CERAMIC
+   ============================================ */
+
+/* Glass Panel - Hardware-accelerated backdrop blur */
+.glass-panel {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  background: rgba(10, 10, 12, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+  will-change: transform;
+  transform: translateZ(0); /* Force GPU acceleration */
+}
+
+/* Text Glow - Amber glow effect */
+.text-glow {
+  text-shadow: 0 0 20px rgba(251, 191, 36, 0.5);
+  will-change: text-shadow;
+}
+
+/* Border Glow - Animated gradient border effect */
+.border-glow {
+  position: relative;
+  background: transparent;
+  border: 1px solid transparent;
+}
+
+.border-glow::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    45deg,
+    rgba(251, 191, 36, 0.3),
+    rgba(251, 191, 36, 0.1),
+    rgba(251, 191, 36, 0.3)
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: border-glow-pulse 3s ease-in-out infinite;
+  will-change: opacity;
+}
+
+@keyframes border-glow-pulse {
+  0%, 100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* Spotlight Blob - Breathing animation for depth */
+@keyframes spotlight-breathe {
+  0%, 100% {
+    transform: scale(1) translate(0, 0);
+    opacity: 0.15;
+  }
+  50% {
+    transform: scale(1.2) translate(10px, 10px);
+    opacity: 0.25;
+  }
+}
+
+@keyframes spotlight-pulse {
+  0%, 100% {
+    opacity: 0.15;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.3;
+    transform: scale(1.1);
+  }
+}
+
+.spotlight-blob {
+  position: fixed;
+  width: 600px;
+  height: 600px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(251, 191, 36, 0.2) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+  will-change: transform, opacity;
+  transform: translate(-50%, -50%) translateZ(0); /* Center the blob, force GPU acceleration */
+}

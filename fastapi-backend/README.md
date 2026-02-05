@@ -1,0 +1,1 @@
+This readme is a deployment test to confirm that qdrant and our system are hooked to google api correctly. remember the errors we were getting?

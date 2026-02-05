@@ -1,0 +1,39 @@
+Here is the boot sequence to bring the platform back online. You need Two Terminals.
+
+TERMINAL 1: The Brain (Backend) 🧠
+
+This runs the FastAPI Python server.
+
+Navigate to the folder:
+
+cd ~/riley-platform/fastapi-backend
+
+Turn on the Virtual Environment:
+
+source venv/bin/activate
+
+(Check: You should see (venv) appear on the left side of the prompt).
+
+Start the Server:
+
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+Wait for: Application startup complete.
+
+TERMINAL 2: The Face (Frontend) 💅
+
+This runs the Next.js Dashboard.
+(Click the + button in the Cursor terminal panel to open a new one).
+
+Navigate to the folder:
+
+cd ~/riley-platform/next-frontend
+
+Start the App:
+
+npm run dev
+
+Wait for: Ready in ... and Local: http://localhost:3000.
+
+Once both are running:
+👉 Open your browser to http://localhost:3000
