@@ -1,0 +1,24 @@
+# ===== Python =====
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# ===== Node / Frontend =====
+node_modules/
+.next/
+dist/
+
+# ===== Environment / Secrets =====
+.env
+.env.local
+.env.*
+env.yaml
+gcp-key.json
+*.key
+*.pem
+*.json
+
+# ===== OS / Editor =====
+.DS_Store
+.vscode/
