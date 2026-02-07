@@ -251,7 +251,8 @@ def extract_tenant_id(request: Request) -> Optional[str]:
     Priority order:
     1. Query parameter: request.query_params.get("tenant_id")
     2. Path parameter: request.path_params.get("tenant_id")
-    3. JSON body: Attempt to parse request body (only if not already consumed)
+    3. Path parameter: request.path_params.get("id") (for /campaigns/{id}/... routes)
+    4. JSON body: Attempt to parse request body (only if not already consumed)
     
     Note: For JSON body extraction, this function tries to read the body stream.
     If the body has already been consumed by FastAPI's automatic parsing, it may not
@@ -269,8 +270,13 @@ def extract_tenant_id(request: Request) -> Optional[str]:
     if tenant_id:
         return tenant_id
     
-    # Priority 2: Path parameter
+    # Priority 2: Path parameter "tenant_id"
     tenant_id = request.path_params.get("tenant_id")
+    if tenant_id:
+        return tenant_id
+    
+    # Priority 3: Path parameter "id" (for /campaigns/{id}/... routes)
+    tenant_id = request.path_params.get("id")
     if tenant_id:
         return tenant_id
     

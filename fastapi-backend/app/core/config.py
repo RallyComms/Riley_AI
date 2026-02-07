@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     # Either CLERK_JWKS_URL (direct JWKS endpoint) or CLERK_ISSUER (to derive JWKS URL)
     CLERK_JWKS_URL: Optional[str] = None
     CLERK_ISSUER: Optional[str] = None
+    
+    # Clerk Backend API secret key (for user directory lookups)
+    CLERK_SECRET_KEY: Optional[str] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

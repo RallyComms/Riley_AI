@@ -604,6 +604,123 @@ class GraphService:
             messages.reverse()
             return messages
 
+    async def get_member_role(self, user_id: str, campaign_id: str) -> Optional[str]:
+        """Get the role of a user in a campaign.
+        
+        Args:
+            user_id: ID of the user
+            campaign_id: ID of the campaign
+            
+        Returns:
+            Role string ("Lead" or "Member") if user is a member, None otherwise
+        """
+        async with self._driver.session() as session:
+            query = """
+            MATCH (u:User {id: $user_id})-[r:MEMBER_OF]->(c:Campaign {id: $campaign_id})
+            RETURN r.role as role
+            """
+            
+            result = await session.run(query, user_id=user_id, campaign_id=campaign_id)
+            record = await result.single()
+            
+            return record["role"] if record else None
+
+    async def list_campaign_members(self, campaign_id: str) -> List[Dict[str, Any]]:
+        """List all members of a campaign.
+        
+        Args:
+            campaign_id: ID of the campaign
+            
+        Returns:
+            List of member dictionaries: [{id, email, role}, ...]
+        """
+        async with self._driver.session() as session:
+            query = """
+            MATCH (u:User)-[r:MEMBER_OF]->(c:Campaign {id: $campaign_id})
+            RETURN u.id as id, u.email as email, r.role as role
+            ORDER BY r.role DESC, u.email ASC
+            """
+            
+            result = await session.run(query, campaign_id=campaign_id)
+            
+            members = []
+            async for record in result:
+                members.append({
+                    "id": record["id"],
+                    "email": record.get("email", ""),
+                    "role": record["role"]
+                })
+            
+            return members
+
+    async def add_campaign_member(
+        self, campaign_id: str, target_user_id: str, target_email: str, role: str
+    ) -> None:
+        """Add a user as a member to a campaign.
+        
+        Creates or updates the User node and creates/updates the MEMBER_OF relationship.
+        
+        Args:
+            campaign_id: ID of the campaign
+            target_user_id: ID of the user to add
+            target_email: Email of the user to add
+            role: Role to assign ("Lead" or "Member")
+            
+        Raises:
+            ValueError: If campaign doesn't exist
+        """
+        async with self._driver.session() as session:
+            # First verify campaign exists
+            check_query = """
+            MATCH (c:Campaign {id: $campaign_id})
+            RETURN c.id as id
+            """
+            check_result = await session.run(check_query, campaign_id=campaign_id)
+            if not await check_result.single():
+                raise ValueError(f"Campaign {campaign_id} not found")
+            
+            # Add or update member
+            query = """
+            MERGE (u:User {id: $target_user_id})
+            SET u.email = $target_email
+            MATCH (c:Campaign {id: $campaign_id})
+            MERGE (u)-[r:MEMBER_OF]->(c)
+            SET r.role = $role, r.added_at = datetime()
+            """
+            
+            await session.run(
+                query,
+                campaign_id=campaign_id,
+                target_user_id=target_user_id,
+                target_email=target_email,
+                role=role
+            )
+
+    async def remove_campaign_member(self, campaign_id: str, target_user_id: str) -> None:
+        """Remove a user from a campaign.
+        
+        Deletes the MEMBER_OF relationship between the user and campaign.
+        
+        Args:
+            campaign_id: ID of the campaign
+            target_user_id: ID of the user to remove
+            
+        Raises:
+            ValueError: If the membership relationship doesn't exist
+        """
+        async with self._driver.session() as session:
+            query = """
+            MATCH (u:User {id: $target_user_id})-[r:MEMBER_OF]->(c:Campaign {id: $campaign_id})
+            DELETE r
+            RETURN count(r) as deleted_count
+            """
+            
+            result = await session.run(query, campaign_id=campaign_id, target_user_id=target_user_id)
+            record = await result.single()
+            
+            if not record or record["deleted_count"] == 0:
+                raise ValueError(f"User {target_user_id} is not a member of campaign {campaign_id}")
+
 
 # Global service instance that can be imported by routers.
 # Note: This will be initialized in main.py startup event.
