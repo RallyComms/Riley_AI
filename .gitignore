@@ -22,3 +22,5 @@ gcp-key.json
 # ===== OS / Editor =====
 .DS_Store
 .vscode/
+
+fastapi-backend/static/
