@@ -372,45 +372,43 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
             {/* Column 1: Preview (2/3) - Isolated from comment state */}
             <div className="flex-[2] flex flex-col overflow-hidden border-r border-zinc-800 bg-zinc-950 isolate">
               {/* Custom Toolbar with Zoom and Download Controls */}
-              {!showLocalhostWarning && (
-                <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2 bg-zinc-900/50 flex-shrink-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-zinc-400 font-medium">Zoom: {Math.round(zoom * 100)}%</span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {/* Zoom Out */}
-                    <button
-                      type="button"
-                      onClick={handleZoomOut}
-                      disabled={zoom <= 0.5}
-                      className="inline-flex items-center justify-center rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed"
-                      aria-label="Zoom Out"
-                    >
-                      <ZoomOut className="h-4 w-4" />
-                    </button>
-                    {/* Zoom In */}
-                    <button
-                      type="button"
-                      onClick={handleZoomIn}
-                      disabled={zoom >= 3}
-                      className="inline-flex items-center justify-center rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed"
-                      aria-label="Zoom In"
-                    >
-                      <ZoomIn className="h-4 w-4" />
-                    </button>
-                    {/* Download */}
-                    <button
-                      type="button"
-                      onClick={handleDownload}
-                      className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100 border border-zinc-700"
-                      aria-label="Download"
-                    >
-                      <Download className="h-3.5 w-3.5" />
-                      <span>Download</span>
-                    </button>
-                  </div>
+              <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-2 bg-zinc-900/50 flex-shrink-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-400 font-medium">Zoom: {Math.round(zoom * 100)}%</span>
                 </div>
-              )}
+                <div className="flex items-center gap-2">
+                  {/* Zoom Out */}
+                  <button
+                    type="button"
+                    onClick={handleZoomOut}
+                    disabled={zoom <= 0.5}
+                    className="inline-flex items-center justify-center rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                    aria-label="Zoom Out"
+                  >
+                    <ZoomOut className="h-4 w-4" />
+                  </button>
+                  {/* Zoom In */}
+                  <button
+                    type="button"
+                    onClick={handleZoomIn}
+                    disabled={zoom >= 3}
+                    className="inline-flex items-center justify-center rounded-lg p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                    aria-label="Zoom In"
+                  >
+                    <ZoomIn className="h-4 w-4" />
+                  </button>
+                  {/* Download */}
+                  <button
+                    type="button"
+                    onClick={handleDownload}
+                    className="inline-flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-zinc-100 border border-zinc-700"
+                    aria-label="Download"
+                  >
+                    <Download className="h-3.5 w-3.5" />
+                    <span>Download</span>
+                  </button>
+                </div>
+              </div>
               {/* Main viewer area: image, PDF (original or preview), or fallback */}
               <div className="flex-1 overflow-auto bg-zinc-950">
                 {file.type === "img" ? (
