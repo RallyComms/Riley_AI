@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
 import "@app/styles/globals.css";
 import { cn } from "@app/lib/utils";
 import { Providers } from "./providers";
@@ -7,16 +6,6 @@ import { GlobalRileyOrb } from "@app/components/layout/GlobalRileyOrb";
 import { GridBackground } from "@app/components/layout/GridBackground";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
-
-const fontSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const fontMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
 
 export const metadata: Metadata = {
   title: "RILEY | Collaborative Intelligence",
@@ -32,9 +21,7 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body
         className={cn(
-          "min-h-screen font-sans antialiased selection:bg-zinc-800",
-          fontSans.variable,
-          fontMono.variable
+          "min-h-screen font-sans antialiased selection:bg-zinc-800"
         )}
       >
         <GridBackground />

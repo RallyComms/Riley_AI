@@ -4,9 +4,18 @@ import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useClerk } from "@clerk/nextjs";
 import { useTheme } from "next-themes";
-import { Menu, Bell, User, Sparkles, LogOut, X, Sun, Moon } from "lucide-react";
+import { Menu, Bell, User, Sparkles, LogOut, X, Sun, Moon, LucideIcon } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
+
+interface MenuItem {
+  icon: LucideIcon;
+  label: string;
+  onClick: () => void;
+  isDestructive?: boolean;
+  isDisabled?: boolean;
+  suffix?: string;
+}
 
 export function GlobalMenu() {
   const [isOpen, setIsOpen] = useState(false);
@@ -35,7 +44,7 @@ export function GlobalMenu() {
     }
   }, [isOpen]);
 
-  const menuItems = [
+  const menuItems: MenuItem[] = [
     {
       icon: Bell,
       label: "Notification Center",

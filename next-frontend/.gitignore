@@ -49,3 +49,4 @@ __pycache__/
 *.key
 *.pem
 *.json
+!tsconfig.json

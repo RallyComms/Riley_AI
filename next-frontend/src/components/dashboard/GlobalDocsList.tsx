@@ -5,7 +5,7 @@ import { useAuth } from "@clerk/nextjs";
 import { FileText, FileType2, Table, Presentation, Image as ImageIcon, Search, Eye, Trophy } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { DocumentViewer } from "@app/components/ui/DocumentViewer";
-import { Asset } from "@app/lib/types";
+import { Asset, AssetTag } from "@app/lib/types";
 
 interface GlobalFile {
   id: string;
@@ -109,6 +109,14 @@ export function GlobalDocsList({ onViewDocument }: GlobalDocsListProps) {
     );
   }, [files, searchQuery]);
 
+  // Convert string[] tags to AssetTag[]
+  const convertTags = (tags: string[]): AssetTag[] => {
+    const validTags: AssetTag[] = ["Messaging", "Research", "Strategy", "Media", "Pitch", "Other"];
+    return tags
+      .filter((tag): tag is AssetTag => validTags.includes(tag as AssetTag))
+      .map((tag) => tag as AssetTag);
+  };
+
   // Convert GlobalFile to Asset for DocumentViewer
   const convertToAsset = (file: GlobalFile): Asset => {
     return {
@@ -116,7 +124,7 @@ export function GlobalDocsList({ onViewDocument }: GlobalDocsListProps) {
       name: file.name,
       type: file.type as Asset["type"],
       url: file.url,
-      tags: file.tags,
+      tags: convertTags(file.tags),
       uploadDate: file.date.split("T")[0],
       uploader: "Firm Archive",
       size: file.size,
