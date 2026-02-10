@@ -203,17 +203,6 @@ export default function PitchIntakePage() {
           status: newAssetStatus,
         },
       });
-
-      if (!response.ok) {
-        // Revert on error
-        setAssets(previousAssets);
-        const errorData = await response.json().catch(() => ({
-          detail: "Failed to update status",
-        }));
-        throw new Error(
-          errorData.detail || `Failed to update status: ${response.status}`
-        );
-      }
     } catch (error) {
       console.error("Failed to update status:", error);
       // Revert optimistic update

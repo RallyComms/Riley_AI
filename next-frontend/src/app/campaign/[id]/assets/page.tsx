@@ -218,62 +218,50 @@ export default function CampaignAssetsPage() {
     formData.append("tenant_id", campaignId); // Use actual campaign ID from URL
     formData.append("tags", ""); // Empty tags - user will add tags via UI
 
-    const uploadFile = async (overwrite: boolean = false) => {
+    const uploadFile = async (overwrite: boolean = false): Promise<{ id: string; url: string; filename: string; type?: string }> => {
       const token = await getToken();
       if (!token) {
         throw new Error("Authentication required");
       }
       
       const path = `/api/v1/upload${overwrite ? "?overwrite=true" : ""}`;
-      try {
-        const result = await apiFetch(path, {
-          token,
-          method: "POST",
-          body: formData,
-        });
-        return { ok: true, json: async () => result, status: 200 };
-      } catch (error) {
-        // Convert apiFetch error to response-like object for compatibility
-        const errorMessage = error instanceof Error ? error.message : "Upload failed";
-        if (errorMessage.includes("409")) {
-          return { ok: false, status: 409, json: async () => ({ detail: "File exists" }) };
-        }
-        const statusMatch = errorMessage.match(/HTTP (\d+)/);
-        const status = statusMatch ? parseInt(statusMatch[1]) : 500;
-        return { ok: false, status, json: async () => ({ detail: errorMessage }) };
-      }
+      const result = await apiFetch<{ id: string; url: string; filename: string; type?: string }>(path, {
+        token,
+        method: "POST",
+        body: formData,
+      });
+      return result;
     };
 
     try {
       // Try upload
-      let response = await uploadFile(false);
-
-      // Handle 409 Conflict (file exists)
-      if (response.status === 409) {
-        const errorData = await response.json().catch(() => ({ detail: "File exists" }));
-        const shouldOverwrite = window.confirm(
-          `File "${file.name}" already exists. Overwrite?`
-        );
-        
-        if (shouldOverwrite) {
-          // Retry with overwrite=true
-          response = await uploadFile(true);
-        } else {
-          setIsUploading(false);
-          if (fileInputRef.current) {
-            fileInputRef.current.value = "";
+      let result: { id: string; url: string; filename: string; type?: string };
+      
+      try {
+        result = await uploadFile(false);
+      } catch (error) {
+        // Handle 409 Conflict (file exists)
+        const errorMessage = error instanceof Error ? error.message : "Upload failed";
+        if (errorMessage.includes("409")) {
+          const shouldOverwrite = window.confirm(
+            `File "${file.name}" already exists. Overwrite?`
+          );
+          
+          if (shouldOverwrite) {
+            // Retry with overwrite=true
+            result = await uploadFile(true);
+          } else {
+            setIsUploading(false);
+            if (fileInputRef.current) {
+              fileInputRef.current.value = "";
+            }
+            return;
           }
-          return;
+        } else {
+          // Re-throw any other error
+          throw error;
         }
       }
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ detail: "Upload failed" }));
-        throw new Error(errorData.detail || `Upload failed with status ${response.status}`);
-      }
-
-      // Get the response data
-      const result = await response.json();
       
       // Fetch the file from the list endpoint to get full metadata including tags
       // This ensures we have the correct tags that were saved to Qdrant
