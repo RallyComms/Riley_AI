@@ -8,6 +8,8 @@ __pycache__/
 node_modules/
 .next/
 dist/
+package-lock.json   # ignore ROOT lockfile only
+
 
 # ===== Environment / Secrets =====
 .env
@@ -17,7 +19,6 @@ env.yaml
 gcp-key.json
 *.key
 *.pem
-*.json
 
 # ===== OS / Editor =====
 .DS_Store
