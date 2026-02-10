@@ -2,12 +2,14 @@
 
 import { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
+import { useAuth } from "@clerk/nextjs";
 import { Sparkles, X } from "lucide-react";
 import { RileyContextChat, getRileyTitle } from "@app/components/campaign/RileyContextChat";
 import { KanbanBoard } from "@app/components/campaign/KanbanBoard";
 import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { AssignmentModal } from "@app/components/campaign/AssignmentModal";
 import { Asset, KanbanCard, KanbanStatus } from "@app/lib/types";
+import { apiFetch } from "@app/lib/api";
 
 // Helper functions
 function getFileTypeFromExtension(filename: string): Asset["type"] {
@@ -205,12 +207,8 @@ export default function StrategyPage() {
       // Revert on error
       setAssets(previousAssets);
       const errorMessage = error instanceof Error ? error.message : "Failed to update status";
-      throw new Error(errorMessage);
-    } catch (error) {
       console.error("Failed to update status:", error);
-      // Revert optimistic update
-      setAssets(previousAssets);
-      alert("Failed to save status change. Please try again.");
+      alert(`Failed to save status change: ${errorMessage}`);
     }
   };
 

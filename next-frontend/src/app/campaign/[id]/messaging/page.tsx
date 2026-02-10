@@ -210,18 +210,9 @@ export default function MessagingPage() {
     } catch (error) {
       // Revert on error
       setAssets(previousAssets);
-        const errorData = await response.json().catch(() => ({
-          detail: "Failed to update status",
-        }));
-        throw new Error(
-          errorData.detail || `Failed to update status: ${response.status}`
-        );
-      }
-    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "Failed to update status";
       console.error("Failed to update status:", error);
-      // Revert optimistic update
-      setAssets(previousAssets);
-      alert("Failed to save status change. Please try again.");
+      alert(`Failed to save status change: ${errorMessage}`);
     }
   };
 

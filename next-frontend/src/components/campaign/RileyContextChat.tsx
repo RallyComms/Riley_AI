@@ -135,13 +135,14 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
           ]);
         } else {
           console.error("Failed to load chat history:", error);
-        setMessages([
-          {
-            id: "system-1",
-            role: "system",
-            content: getSystemMessage(),
-          },
-        ]);
+          setMessages([
+            {
+              id: "system-1",
+              role: "system",
+              content: getSystemMessage(),
+            },
+          ]);
+        }
       }
     }
 

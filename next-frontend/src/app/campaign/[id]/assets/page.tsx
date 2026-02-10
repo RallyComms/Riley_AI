@@ -321,10 +321,6 @@ export default function CampaignAssetsPage() {
           console.error("Error fetching uploaded file metadata:", err);
         }
       }
-      setIsUploading(false);
-          return;
-        }
-      }
       
       // Fallback if we can't fetch from list (shouldn't happen, but handle gracefully)
       const newAsset: Asset = {
@@ -401,15 +397,6 @@ export default function CampaignAssetsPage() {
           method: "PATCH",
           body: { tag: "*" }, // "*" means clear all tags
         });
-
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({
-            detail: "Untag failed",
-          }));
-          throw new Error(
-            errorData.detail || `Untag failed with status ${response.status}`
-          );
-        }
 
         // Update local state to clear all tags
         setAssets((prev) =>
