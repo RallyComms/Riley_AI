@@ -156,12 +156,8 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
       // Revert on error
       onTagChange(asset.id, asset.tags);
       const errorMessage = error instanceof Error ? error.message : "Failed to update tags";
-      throw new Error(errorMessage);
-    } catch (error) {
       console.error("Failed to update tags:", error);
-      // Revert optimistic update
-      onTagChange(asset.id, asset.tags);
-      alert("Failed to save tags. Please try again.");
+      alert(`Failed to save tags: ${errorMessage}`);
     } finally {
       setIsUpdatingTags(false);
     }
