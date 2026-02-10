@@ -1,8 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useAuth } from "@clerk/nextjs";
 import { FileText, FileType2, Table, Presentation, Image as ImageIcon, File, Loader2 } from "lucide-react";
 import { cn } from "@app/lib/utils";
+import { apiFetch } from "@app/lib/api";
 
 type FileItem = {
   id: string;
@@ -79,6 +81,7 @@ interface KnowledgeBasketProps {
 }
 
 export function KnowledgeBasket({ tenantId }: KnowledgeBasketProps) {
+  const { getToken } = useAuth();
   const [files, setFiles] = useState<FileItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -89,13 +92,15 @@ export function KnowledgeBasket({ tenantId }: KnowledgeBasketProps) {
       setError(null);
 
       try {
-        const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/files/${tenantId}`);
-        
-        if (!res.ok) {
-          throw new Error(`Failed to fetch files: ${res.status}`);
+        const token = await getToken();
+        if (!token) {
+          throw new Error("Authentication required");
         }
 
-        const data = await res.json();
+        const data = await apiFetch<{ files: FileItem[] }>(`/api/v1/files/${tenantId}`, {
+          token,
+          method: "GET",
+        });
         setFiles(data.files || []);
       } catch (e) {
         setError(e instanceof Error ? e.message : "Failed to load files");
@@ -106,7 +111,7 @@ export function KnowledgeBasket({ tenantId }: KnowledgeBasketProps) {
     }
 
     fetchFiles();
-  }, [tenantId]);
+  }, [tenantId, getToken]);
 
   return (
     <div className="h-full overflow-y-auto p-6">

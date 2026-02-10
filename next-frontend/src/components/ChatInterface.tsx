@@ -1,10 +1,12 @@
 "use client";
 
 import { useRef, useState, useEffect } from "react";
+import { useAuth } from "@clerk/nextjs";
 import { Loader2, Send, Zap, Brain } from "lucide-react";
 import { TypewriterMarkdown } from "@app/components/TypewriterMarkdown";
 import { cn } from "@app/lib/utils";
 import { detectPersona } from "@app/lib/personas";
+import { apiFetch } from "@app/lib/api";
 
 type Message = {
   id: string;
@@ -27,6 +29,7 @@ interface ChatInterfaceProps {
 }
 
 export function ChatInterface({ tenantId = "rally" }: ChatInterfaceProps) {
+  const { getToken } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -55,26 +58,20 @@ export function ChatInterface({ tenantId = "rally" }: ChatInterfaceProps) {
     setIsLoading(true);
 
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/chat`, {
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
+      }
+
+      const data = await apiFetch<ChatResponse>("/api/v1/chat", {
+        token,
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+        body: {
           query: userMessage.content,
           tenant_id: tenantId,
           mode: mode,
-        }),
+        },
       });
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(
-          `Chat failed (${res.status}). ${text ? `Details: ${text}` : ""}`.trim()
-        );
-      }
-
-      const data = (await res.json()) as ChatResponse;
 
       const assistantMessage: Message = {
         id: `assistant-${Date.now()}`,

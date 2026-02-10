@@ -5,6 +5,7 @@ import { useAuth } from "@clerk/nextjs";
 import { X, Shield, CheckCircle } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
+import { apiFetch } from "@app/lib/api";
 
 interface CampaignBucket {
   name: string;
@@ -86,54 +87,50 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
         throw new Error("No authentication token available");
       }
 
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const response = await fetch(`${apiUrl}/api/v1/campaigns`, {
+      const createdCampaign = await apiFetch<{ id: string; name: string; description: string | null }>("/api/v1/campaigns", {
+        token,
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+        body: {
           name: name.trim(),
           description: description.trim() || null,
-        }),
+        },
       });
 
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({
-          detail: "Failed to create campaign",
-        }));
-        throw new Error(
-          errorData.detail || `Failed to create campaign: ${response.status}`
-        );
-      }
-
-      const createdCampaign = await response.json();
-
       // Map backend response to frontend CampaignBucket shape
-      // Use a random index for theme color (will be consistent per campaign ID)
+      // Use a deterministic index for theme color (consistent per campaign ID)
       const colorIndex = Math.abs(
         createdCampaign.id.split("").reduce((acc: number, char: string) => acc + char.charCodeAt(0), 0)
       ) % THEME_COLORS.length;
       const themeColor = THEME_COLORS[colorIndex];
+
+      // Create frontend campaign object
+      const frontendCampaign: CampaignBucket = {
+        name: createdCampaign.name,
+        role: "Lead Strategist", // Creator is always Lead
+        lastActive: "Just now",
+        mentions: 0,
+        pendingRequests: 0,
+        userRole: "Lead",
+        themeColor,
+        campaignId: createdCampaign.id,
+      };
+
+      // Call onCampaignCreated immediately (optimistic update)
+      onCampaignCreated(frontendCampaign);
 
       // Store campaign ID and show invite section
       setCreatedCampaignId(createdCampaign.id);
       
       // Fetch initial members list (includes creator)
       try {
-        const membersResponse = await fetch(`${apiUrl}/api/v1/campaigns/${createdCampaign.id}/members`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        });
-        
-        if (membersResponse.ok) {
-          const membersData = await membersResponse.json();
-          setMembers(membersData.members || []);
-        }
+        const membersData = await apiFetch<{ members: Member[] }>(
+          `/api/v1/campaigns/${createdCampaign.id}/members`,
+          {
+            token,
+            method: "GET",
+          }
+        );
+        setMembers(membersData.members || []);
       } catch (err) {
         // If fetching members fails, continue anyway - user can still add members
         console.error("Error fetching initial members:", err);
@@ -143,9 +140,11 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
       setIsSubmitting(false);
     } catch (err) {
       console.error("Error creating campaign:", err);
-      setSubmitError(
-        err instanceof Error ? err.message : "Failed to create campaign"
-      );
+      // Preserve exact error message from apiFetch (includes status codes if available)
+      const errorMessage = err instanceof Error 
+        ? err.message 
+        : "Failed to create campaign. Please try again.";
+      setSubmitError(errorMessage);
     } finally {
       setIsSubmitting(false);
     }
@@ -174,36 +173,17 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
         throw new Error("No authentication token available");
       }
 
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const response = await fetch(`${apiUrl}/api/v1/campaigns/${createdCampaignId}/members`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email: memberEmail.trim(),
-          role: memberRole,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({
-          detail: "Failed to add member",
-        }));
-        
-        if (response.status === 404) {
-          throw new Error("User not found — ask them to sign up first");
-        } else if (response.status === 403) {
-          throw new Error("Only Lead members can add members to a campaign");
-        } else {
-          throw new Error(
-            errorData.detail || `Failed to add member: ${response.status}`
-          );
+      const data = await apiFetch<{ members: Member[] }>(
+        `/api/v1/campaigns/${createdCampaignId}/members`,
+        {
+          token,
+          method: "POST",
+          body: {
+            email: memberEmail.trim(),
+            role: memberRole,
+          },
         }
-      }
-
-      const data = await response.json();
+      );
       
       // Update members list from response
       setMembers(data.members || []);
@@ -215,9 +195,32 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
       setTimeout(() => setAddMemberSuccess(null), 3000);
     } catch (err) {
       console.error("Error adding member:", err);
-      setAddMemberError(
-        err instanceof Error ? err.message : "Failed to add member"
-      );
+      
+      // Handle specific error cases with user-friendly messages
+      let errorMessage = "Failed to add member";
+      if (err instanceof Error) {
+        const message = err.message;
+        // Check for 404 - User not found (from backend or HTTP status)
+        if (message.includes("404") || 
+            message.toLowerCase().includes("not found") || 
+            message.toLowerCase().includes("user not found")) {
+          errorMessage = "User not found — ask them to sign up first";
+        }
+        // Check for 403 - Only Lead can add members (from backend or HTTP status)
+        else if (message.includes("403") || 
+                 message.toLowerCase().includes("only lead") || 
+                 message.toLowerCase().includes("only campaign leads") ||
+                 message.toLowerCase().includes("permission") ||
+                 message.toLowerCase().includes("access denied")) {
+          errorMessage = "Only Lead members can add members";
+        }
+        // Use the exact error message from API (includes status codes from apiFetch)
+        else {
+          errorMessage = message;
+        }
+      }
+      
+      setAddMemberError(errorMessage);
     } finally {
       setIsAddingMember(false);
     }
@@ -226,27 +229,8 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
   const handleDone = () => {
     if (!createdCampaignId) return;
 
-    // Map backend response to frontend CampaignBucket shape
-    const colorIndex = Math.abs(
-      createdCampaignId.split("").reduce((acc: number, char: string) => acc + char.charCodeAt(0), 0)
-    ) % THEME_COLORS.length;
-    const themeColor = THEME_COLORS[colorIndex];
-
-    const frontendCampaign: CampaignBucket = {
-      name: name,
-      role: "Lead Strategist", // Creator is always Lead
-      lastActive: "Just now",
-      mentions: 0,
-      pendingRequests: 0,
-      userRole: "Lead",
-      themeColor,
-      campaignId: createdCampaignId,
-    };
-
-    // Call onCampaignCreated with the new campaign
-    onCampaignCreated(frontendCampaign);
-
-    // Reset everything and close
+    // Campaign was already added to the list via onCampaignCreated in handleSubmit
+    // Just close the modal and reset state
     setName("");
     setDescription("");
     setSubmitError(null);

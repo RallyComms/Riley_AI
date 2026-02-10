@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { useUser } from "@clerk/nextjs";
+import { useUser, useAuth } from "@clerk/nextjs";
 import { Send, Loader2, Trash2, FileText } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { cn } from "@app/lib/utils";
 import { TypewriterMarkdown } from "@app/components/ui/TypewriterMarkdown";
+import { apiFetch } from "@app/lib/api";
 
 type Message = {
   id: string;
@@ -23,6 +24,7 @@ interface RileyContextChatProps {
 export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: RileyContextChatProps) {
   // All hooks must be called unconditionally before any early returns
   const { user, isLoaded } = useUser();
+  const { getToken } = useAuth();
   
   const getSystemMessage = () => {
     switch (mode) {
@@ -81,12 +83,18 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
 
     async function loadHistory() {
       try {
-        const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/chat/history/${sessionId}`
+        const token = await getToken();
+        if (!token) return;
+        
+        const history = await apiFetch<Array<{ role: string; content: string }>>(
+          `/api/v1/chat/history/${sessionId}`,
+          {
+            token,
+            method: "GET",
+          }
         );
-        if (response.ok) {
-          const history = await response.json();
-          if (history && Array.isArray(history) && history.length > 0) {
+        
+        if (history && Array.isArray(history) && history.length > 0) {
             // Convert history to Message format
             const historyMessages: Message[] = history.map(
               (msg: { role: string; content: string }, idx: number) => ({
@@ -114,7 +122,9 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
               },
             ]);
           }
-        } else if (response.status === 404) {
+      } catch (error) {
+        // If history fetch fails (404 or other), continue with default system message
+        if (error instanceof Error && error.message.includes("404")) {
           // No history exists yet, keep default system message
           setMessages([
             {
@@ -123,10 +133,8 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
               content: getSystemMessage(),
             },
           ]);
-        }
-      } catch (error) {
-        // If history fetch fails, continue with default system message
-        console.error("Failed to load chat history:", error);
+        } else {
+          console.error("Failed to load chat history:", error);
         setMessages([
           {
             id: "system-1",
@@ -163,24 +171,21 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
     setIsLoading(true);
 
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/chat`, {
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
+      }
+
+      const data = await apiFetch<{ response: string }>("/api/v1/chat", {
+        token,
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
+        body: {
           query: userInput,
           tenant_id: campaignId,
           mode: "fast",
           session_id: sessionId,
-        }),
+        },
       });
-
-      if (!response.ok) {
-        throw new Error(`Chat failed: ${response.status}`);
-      }
-
-      const data = await response.json();
 
       const assistantMessage: Message = {
         id: `assistant-${Date.now()}`,
@@ -203,25 +208,24 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
   async function handleClearContext() {
     setIsClearing(true);
     try {
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/chat/history/${sessionId}`,
-        {
-          method: "DELETE",
-        }
-      );
-
-      if (response.ok) {
-        // Reset messages to just the system message
-        setMessages([
-          {
-            id: "system-1",
-            role: "system",
-            content: getSystemMessage(),
-          },
-        ]);
-      } else {
-        throw new Error("Failed to clear history");
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
       }
+      
+      await apiFetch(`/api/v1/chat/history/${sessionId}`, {
+        token,
+        method: "DELETE",
+      });
+      
+      // Reset messages to just the system message
+      setMessages([
+        {
+          id: "system-1",
+          role: "system",
+          content: getSystemMessage(),
+        },
+      ]);
     } catch (error) {
       console.error("Failed to clear chat history:", error);
       // Optionally show a toast/notification to the user

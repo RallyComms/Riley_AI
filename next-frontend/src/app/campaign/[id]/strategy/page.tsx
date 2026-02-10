@@ -84,6 +84,7 @@ function kanbanCardToFile(card: KanbanCard): Asset {
 
 export default function StrategyPage() {
   const params = useParams();
+  const { getToken } = useAuth();
   const campaignId = params.id as string;
   const [assets, setAssets] = useState<Asset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -98,11 +99,18 @@ export default function StrategyPage() {
       if (!campaignId) return;
 
       try {
-        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`);
-        if (!response.ok) {
-          throw new Error("Failed to fetch files");
+        const token = await getToken();
+        if (!token) {
+          throw new Error("Authentication required");
         }
-        const data = await response.json();
+        
+        const data = await apiFetch<{ files: any[] }>(
+          `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
+          {
+            token,
+            method: "GET",
+          }
+        );
 
         const fetchedAssets: Asset[] = data.files
           .filter((file: any) => {
@@ -180,30 +188,24 @@ export default function StrategyPage() {
 
     // API call to persist status change
     try {
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/files/${cardId}/assign`,
-        {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            assignee: "", // Keep existing assignee
-            status: newAssetStatus,
-          }),
-        }
-      );
-
-      if (!response.ok) {
-        // Revert on error
-        setAssets(previousAssets);
-        const errorData = await response.json().catch(() => ({
-          detail: "Failed to update status",
-        }));
-        throw new Error(
-          errorData.detail || `Failed to update status: ${response.status}`
-        );
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
       }
+      
+      await apiFetch(`/api/v1/files/${cardId}/assign`, {
+        token,
+        method: "PATCH",
+        body: {
+          assignee: "", // Keep existing assignee
+          status: newAssetStatus,
+        },
+      });
+    } catch (error) {
+      // Revert on error
+      setAssets(previousAssets);
+      const errorMessage = error instanceof Error ? error.message : "Failed to update status";
+      throw new Error(errorMessage);
     } catch (error) {
       console.error("Failed to update status:", error);
       // Revert optimistic update

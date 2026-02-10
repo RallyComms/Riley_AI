@@ -6,6 +6,7 @@ import { FileText, FileType2, Table, Presentation, Image as ImageIcon, Search, E
 import { cn } from "@app/lib/utils";
 import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { Asset, AssetTag } from "@app/lib/types";
+import { apiFetch } from "@app/lib/api";
 
 interface GlobalFile {
   id: string;
@@ -74,20 +75,13 @@ export function GlobalDocsList({ onViewDocument }: GlobalDocsListProps) {
           throw new Error("Authentication token not available");
         }
 
-        const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/list?tenant_id=global`,
+        const data = await apiFetch<{ files: GlobalFile[] }>(
+          `/api/v1/list?tenant_id=global`,
           {
-            headers: {
-              "Authorization": `Bearer ${token}`,
-            },
+            token,
+            method: "GET",
           }
         );
-        
-        if (!response.ok) {
-          throw new Error(`Failed to fetch global files: ${response.statusText}`);
-        }
-        
-        const data = await response.json();
         setFiles(data.files || []);
       } catch (error) {
         console.error("Error fetching global files:", error);

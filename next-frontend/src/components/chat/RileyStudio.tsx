@@ -7,6 +7,7 @@ import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import { cn } from "@app/lib/utils";
 import { TypewriterMarkdown } from "@app/components/ui/TypewriterMarkdown";
+import { apiFetch } from "@app/lib/api";
 
 type Message = {
   id: string;
@@ -86,17 +87,17 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     async function loadHistory() {
       try {
         const token = await getToken();
-        const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/chat/history/${activeConversationId}`,
+        if (!token) return;
+        
+        const history = await apiFetch<Array<{ role: string; content: string }>>(
+          `/api/v1/chat/history/${activeConversationId}`,
           {
-            headers: {
-              "Authorization": `Bearer ${token}`,
-            },
+            token,
+            method: "GET",
           }
         );
         
-        if (response.ok) {
-          const history = await response.json();
+        if (history && Array.isArray(history) && history.length > 0) {
           if (history && Array.isArray(history) && history.length > 0) {
             const historyMessages: Message[] = history.map(
               (msg: { role: string; content: string }, idx: number) => ({
@@ -185,29 +186,21 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     setIsRenaming(true);
     try {
       const token = await getToken();
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/sessions/${sessionId}`,
-        {
-          method: "PATCH",
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`,
-          },
-          body: JSON.stringify({ title: newTitle }),
-        }
+      if (!token) return;
+      
+      await apiFetch(`/api/v1/sessions/${sessionId}`, {
+        token,
+        method: "PATCH",
+        body: { title: newTitle },
+      });
+      
+      // Update the conversation in the list
+      setConversations((prev) =>
+        prev.map((conv) =>
+          conv.id === sessionId ? { ...conv, title: newTitle } : conv
+        )
       );
-
-      if (response.ok) {
-        // Update the conversation in the list
-        setConversations((prev) =>
-          prev.map((conv) =>
-            conv.id === sessionId ? { ...conv, title: newTitle } : conv
-          )
-        );
-        handleRenameCancel();
-      } else {
-        console.error("Failed to rename session");
-      }
+      handleRenameCancel();
     } catch (error) {
       console.error("Error renaming session:", error);
     } finally {
@@ -343,26 +336,19 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       }
 
       // Step 7: Perform the API call
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/chat`, {
+      const data = await apiFetch<{
+        response: string;
+        sources_count?: number;
+      }>("/api/v1/chat", {
+        token,
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`,
-        },
-        body: JSON.stringify({
+        body: {
           query: userInput,
           tenant_id: tenantId,
           mode: mode,
           session_id: sessionId,
-        }),
+        },
       });
-
-      if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        throw new Error(`Chat failed (${response.status}). ${text ? `Details: ${text}` : ""}`.trim());
-      }
-
-      const data = await response.json();
 
       // Step 8: Create assistant message from response
       const assistantMessage: Message = {
@@ -388,11 +374,17 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         ]);
       }
     } catch (error) {
-      // On error, append error message
+      // On error, append error message with exact details from API (includes status codes)
+      const errorText = error instanceof Error 
+        ? error.message 
+        : "Unknown error occurred";
+      
+      // apiFetch throws errors with format "HTTP <status>: <detail>" or "Network/CORS failure"
+      // Display the exact error message to help with debugging
       const errorMessage: Message = {
         id: `error-${Date.now()}`,
         role: "assistant",
-        content: `Error: ${error instanceof Error ? error.message : "Unknown error occurred"}`,
+        content: `Error: ${errorText}`,
       };
       setMessages((prev) => [...prev, errorMessage]);
     } finally {

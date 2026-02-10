@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { useAuth } from "@clerk/nextjs";
 import {
   File,
   FileText,
@@ -12,6 +13,7 @@ import {
   Table,
 } from "lucide-react";
 import { cn } from "@app/lib/utils";
+import { apiFetch } from "@app/lib/api";
 
 type SearchResult = {
   id: string;
@@ -113,6 +115,7 @@ function relevanceBadgeClass(pct: number) {
 }
 
 export function SearchInterface() {
+  const { getToken } = useAuth();
   const [queryText, setQueryText] = useState("");
   const [results, setResults] = useState<SearchResult[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -127,25 +130,19 @@ export function SearchInterface() {
     setError(null);
 
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/search`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          query_text: queryText,
-          tenant_id: "bypass-mode",
-        }),
-      });
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(
-          `Search failed (${res.status}). ${text ? `Details: ${text}` : ""}`.trim()
-        );
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
       }
 
-      const data = (await res.json()) as SearchResponse;
+      const data = await apiFetch<SearchResponse>("/api/v1/search", {
+        token,
+        method: "POST",
+        body: {
+          query_text: queryText,
+          tenant_id: "bypass-mode",
+        },
+      });
       setResults(Array.isArray(data?.results) ? data.results : []);
     } catch (e) {
       setResults([]);

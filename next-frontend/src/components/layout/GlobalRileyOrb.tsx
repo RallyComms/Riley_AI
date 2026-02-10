@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { Bot, Sparkles, X, AlertCircle, Calendar, FileText, Minus, MessageCircle } from "lucide-react";
 import { cn } from "@app/lib/utils";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, useMotionValue } from "framer-motion";
 
 type Notification = {
   id: string;
@@ -38,10 +38,85 @@ const mockNotifications: Notification[] = [
   },
 ];
 
+interface SavedPosition {
+  x: number;
+  y: number;
+}
+
+const STORAGE_KEY = "riley_orb_pos";
+const DEFAULT_POSITION = { x: 0, y: 0 }; // Relative to bottom-right corner
+
 export function GlobalRileyOrb() {
   const [isCollapsed, setIsCollapsed] = useState(true);
   const [notifications, setNotifications] = useState<Notification[]>(mockNotifications);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  
+  // Position state - stored as offset from bottom-right corner
+  const [position, setPosition] = useState<SavedPosition>(DEFAULT_POSITION);
+  
+  // Motion values for dragging
+  const x = useMotionValue(0);
+  const y = useMotionValue(0);
+
+  // Load saved position from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as SavedPosition;
+        setPosition(parsed);
+        x.set(parsed.x);
+        y.set(parsed.y);
+      }
+    } catch (err) {
+      console.error("Failed to load saved orb position:", err);
+    }
+  }, [x, y]);
+
+  // Update constraints on window resize
+  useEffect(() => {
+    const handleResize = () => {
+      // Constraints will be recalculated on next render
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
+
+  // Calculate viewport constraints
+  const getConstraints = () => {
+    if (typeof window === "undefined" || !containerRef.current) {
+      return { left: -Infinity, right: Infinity, top: -Infinity, bottom: Infinity };
+    }
+    
+    const orbSize = 56; // h-14 w-14 = 56px
+    const padding = 24; // 6 * 4 = 24px (bottom-6 right-6)
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    
+    // Constraints relative to bottom-right corner
+    // Left constraint: can't go further left than viewport edge
+    const left = -(viewportWidth - orbSize - padding);
+    // Right constraint: can't go further right than default position
+    const right = 0;
+    // Top constraint: can't go above viewport (accounting for orb size)
+    const top = -(viewportHeight - orbSize - padding);
+    // Bottom constraint: can't go below default position
+    const bottom = 0;
+    
+    return { left, right, top, bottom };
+  };
+
+  // Save position to localStorage on drag end
+  const handleDragEnd = () => {
+    const newPosition = { x: x.get(), y: y.get() };
+    setPosition(newPosition);
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(newPosition));
+    } catch (err) {
+      console.error("Failed to save orb position:", err);
+    }
+  };
 
   // Close popover when clicking outside
   useEffect(() => {
@@ -87,9 +162,24 @@ export function GlobalRileyOrb() {
 
   const alertCount = notifications.length;
   const hasNewAlerts = notifications.some((n) => n.isCritical);
+  const constraints = getConstraints();
 
   return (
-    <div className="fixed bottom-6 right-6 z-50" ref={popoverRef}>
+    <motion.div
+      ref={containerRef}
+      className="fixed bottom-6 right-6 z-50"
+      style={{
+        x,
+        y,
+      }}
+      drag
+      dragMomentum={false}
+      dragConstraints={constraints}
+      dragElastic={0}
+      onDragEnd={handleDragEnd}
+      whileDrag={{ cursor: "grabbing" }}
+    >
+      <div ref={popoverRef}>
       {/* Expanded Panel - Notification Feed */}
       <AnimatePresence>
         {!isCollapsed && (
@@ -188,7 +278,7 @@ export function GlobalRileyOrb() {
       <motion.button
         type="button"
         onClick={() => setIsCollapsed(!isCollapsed)}
-        className="relative flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg transition-all hover:shadow-xl hover:scale-105"
+        className="relative flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg transition-all hover:shadow-xl hover:scale-105 cursor-grab active:cursor-grabbing"
         whileHover={{ scale: 1.05 }}
         whileTap={{ scale: 0.95 }}
         aria-label="Intelligence Feed"
@@ -216,7 +306,8 @@ export function GlobalRileyOrb() {
           </span>
         )}
       </motion.button>
-    </div>
+      </div>
+    </motion.div>
   );
 }
 

@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useAuth, useUser } from "@clerk/nextjs";
 import { Send } from "lucide-react";
 import { cn } from "@app/lib/utils";
+import { apiFetch } from "@app/lib/api";
 
 // Helper function to get initials from name
 function getInitials(name: string): string {
@@ -136,32 +137,11 @@ export default function TeamChatPage() {
         throw new Error("No authentication token available");
       }
 
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const url = new URL(`${apiUrl}/api/v1/campaigns/${campaignId}/chat`);
-      url.searchParams.set("limit", "50");
-      if (since) {
-        url.searchParams.set("since", since);
-      }
-
-      const response = await fetch(url.toString(), {
+      const path = `/api/v1/campaigns/${campaignId}/chat?limit=50${since ? `&since=${encodeURIComponent(since)}` : ""}`;
+      const data = await apiFetch<{ messages: BackendMessage[] }>(path, {
+        token,
         method: "GET",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
       });
-
-      if (!response.ok) {
-        if (response.status === 401) {
-          throw new Error("Authentication failed. Please sign in again.");
-        } else if (response.status === 403) {
-          throw new Error("You don't have access to this campaign.");
-        } else {
-          throw new Error(`Failed to load messages: ${response.status}`);
-        }
-      }
-
-      const data = await response.json();
       const backendMessages: BackendMessage[] = data.messages || [];
 
       // Build user map (for now, use current user info for all messages)
@@ -284,34 +264,13 @@ export default function TeamChatPage() {
         throw new Error("No authentication token available");
       }
 
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const response = await fetch(
-        `${apiUrl}/api/v1/campaigns/${campaignId}/chat`,
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            content: messageText,
-          }),
-        }
-      );
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({
-          detail: "Failed to send message",
-        }));
-
-        if (response.status === 403) {
-          throw new Error("You don't have access to post messages in this campaign.");
-        } else {
-          throw new Error(
-            errorData.detail || `Failed to send message: ${response.status}`
-          );
-        }
-      }
+      await apiFetch(`/api/v1/campaigns/${campaignId}/chat`, {
+        token,
+        method: "POST",
+        body: {
+          content: messageText,
+        },
+      });
 
       // Clear input
       setInputValue("");

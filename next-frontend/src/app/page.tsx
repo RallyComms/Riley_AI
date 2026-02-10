@@ -8,6 +8,7 @@ import { OpsDock } from "@app/components/dashboard/OpsDock";
 import { CreateCampaignModal } from "@app/components/dashboard/CreateCampaignModal";
 import { CampaignDirectory } from "@app/components/dashboard/CampaignDirectory";
 import Greeting from "@app/components/ui/Greeting";
+import { apiFetch } from "@app/lib/api";
 
 // Backend campaign response shape
 interface BackendCampaign {
@@ -84,14 +85,17 @@ export default function Dashboard() {
   // Fetch campaigns from API
   useEffect(() => {
     async function fetchCampaigns() {
-      // Only fetch when Clerk is loaded and user is authenticated
+      // Only fetch when Clerk is loaded
       if (!isLoaded) {
         return;
       }
 
+      // If user is not authenticated, show empty state (not error)
       const userId = user?.id;
       if (!userId) {
         setIsLoading(false);
+        setError(null);
+        setCampaigns([]);
         return;
       }
 
@@ -104,37 +108,24 @@ export default function Dashboard() {
           throw new Error("No authentication token available");
         }
 
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-        const response = await fetch(`${apiUrl}/api/v1/campaigns`, {
+        const data: CampaignsResponse = await apiFetch("/api/v1/campaigns", {
+          token,
           method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
         });
-
-        if (!response.ok) {
-          if (response.status === 401) {
-            throw new Error("Authentication failed. Please sign in again.");
-          } else if (response.status === 403) {
-            throw new Error("Access denied. You don't have permission to view campaigns.");
-          } else {
-            throw new Error(`Failed to load campaigns: ${response.status}`);
-          }
-        }
-
-        const data: CampaignsResponse = await response.json();
+        
         const mappedCampaigns = data.campaigns.map((campaign, index) =>
           mapBackendToFrontend(campaign, index)
         );
         setCampaigns(mappedCampaigns);
       } catch (err) {
         console.error("Error fetching campaigns:", err);
-        setError(
-          err instanceof Error
-            ? err.message
-            : "Unable to load campaigns. Please refresh."
-        );
+        // Preserve exact error message from apiFetch (includes status codes if available)
+        const errorMessage = err instanceof Error 
+          ? err.message 
+          : "Unable to load campaigns. Please refresh.";
+        setError(errorMessage);
+        // Clear campaigns on error to ensure we don't show stale data
+        setCampaigns([]);
       } finally {
         setIsLoading(false);
       }
@@ -155,21 +146,17 @@ export default function Dashboard() {
         const token = await getToken();
         if (!token) return;
 
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-        const response = await fetch(`${apiUrl}/api/v1/campaigns`, {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        });
-
-        if (response.ok) {
-          const data: CampaignsResponse = await response.json();
+        try {
+          const data: CampaignsResponse = await apiFetch("/api/v1/campaigns", {
+            token,
+            method: "GET",
+          });
           const mappedCampaigns = data.campaigns.map((campaign, index) =>
             mapBackendToFrontend(campaign, index)
           );
           setCampaigns(mappedCampaigns);
+        } catch {
+          // Silently fail - optimistic update already succeeded
         }
       } catch (err) {
         console.error("Background refresh failed:", err);
@@ -215,34 +202,10 @@ export default function Dashboard() {
         throw new Error("No authentication token available");
       }
 
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-      const response = await fetch(
-        `${apiUrl}/api/v1/campaign/${campaignId}`,
-        {
-          method: "DELETE",
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({
-          detail: "Termination failed",
-        }));
-
-        if (response.status === 403) {
-          throw new Error(
-            "Only campaign leads can terminate missions."
-          );
-        } else {
-          throw new Error(
-            errorData.detail ||
-              `Termination failed with status ${response.status}`
-          );
-        }
-      }
+      await apiFetch(`/api/v1/campaign/${campaignId}`, {
+        token,
+        method: "DELETE",
+      });
 
       // Optimistically remove from UI
       setCampaigns((prev) => prev.filter((c) => c.campaignId !== campaignId));
@@ -294,7 +257,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Error State */}
+      {/* Error State - Show exact error message from API */}
       {!isLoading && error && (
         <div className="w-full max-w-7xl px-6">
           <div className="rounded-lg border border-red-500/50 bg-red-500/10 p-6 text-center">
@@ -309,7 +272,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Empty State */}
+      {/* Empty State - Only show when not loading, no error, and truly empty */}
       {!isLoading && !error && campaigns.length === 0 && (
         <div className="w-full max-w-7xl px-6">
           <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-12 text-center">
@@ -329,7 +292,7 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Campaigns Grid */}
+      {/* Success State - Render campaign cards */}
       {!isLoading && !error && campaigns.length > 0 && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 w-full max-w-7xl px-6">
           {campaigns.map((campaign) => (

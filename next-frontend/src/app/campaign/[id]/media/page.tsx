@@ -2,11 +2,13 @@
 
 import { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
+import { useAuth } from "@clerk/nextjs";
 import { Download, Video, Music, Image as ImageIcon, Sparkles, X, Upload, FileText, FileType2, Table, Presentation } from "lucide-react";
 import { RileyContextChat, getRileyTitle } from "@app/components/campaign/RileyContextChat";
 import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { Asset } from "@app/lib/types";
 import { cn } from "@app/lib/utils";
+import { apiFetch } from "@app/lib/api";
 
 // Helper to get file type from extension
 function getFileTypeFromExtension(filename: string): Asset["type"] {
@@ -57,6 +59,7 @@ function isAISupportedType(type: Asset["type"]): boolean {
 
 export default function MediaPage() {
   const params = useParams();
+  const { getToken } = useAuth();
   const campaignId = params.id as string;
   const [assets, setAssets] = useState<Asset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -70,11 +73,18 @@ export default function MediaPage() {
       if (!campaignId) return;
 
       try {
-        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`);
-        if (!response.ok) {
-          throw new Error("Failed to fetch files");
+        const token = await getToken();
+        if (!token) {
+          throw new Error("Authentication required");
         }
-        const data = await response.json();
+        
+        const data = await apiFetch<{ files: any[] }>(
+          `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
+          {
+            token,
+            method: "GET",
+          }
+        );
 
         // Convert backend file list to Asset format and filter by Media tag
         const fetchedAssets: Asset[] = data.files

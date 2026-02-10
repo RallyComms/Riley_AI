@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useParams } from "next/navigation";
+import { useAuth } from "@clerk/nextjs";
 import { Upload, Loader2 } from "lucide-react";
 import { Asset, AssetTag } from "@app/lib/types";
 import { AssetRow } from "@app/components/campaign/AssetRow";
@@ -9,6 +10,7 @@ import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { RenameAssetModal } from "@app/components/campaign/RenameAssetModal";
 import { DeleteFileModal } from "@app/components/campaign/DeleteFileModal";
 import { PromoteModal } from "@app/components/campaign/PromoteModal";
+import { apiFetch } from "@app/lib/api";
 
 // Helper function to determine if file type supports AI processing
 function isAISupportedType(type: Asset["type"]): boolean {
@@ -127,6 +129,7 @@ function formatFileSize(bytes: number): string {
 
 export default function CampaignAssetsPage() {
   const params = useParams();
+  const { getToken } = useAuth();
   const campaignId = params.id as string;
   const [assets, setAssets] = useState<Asset[]>([]);
   const [isUploading, setIsUploading] = useState(false);
@@ -143,11 +146,18 @@ export default function CampaignAssetsPage() {
       if (!campaignId) return; // Don't fetch if no campaign ID
       
       try {
-        const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`);
-        if (!response.ok) {
-          throw new Error("Failed to fetch files");
+        const token = await getToken();
+        if (!token) {
+          throw new Error("Authentication required");
         }
-        const data = await response.json();
+        
+        const data = await apiFetch<{ files: any[] }>(
+          `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
+          {
+            token,
+            method: "GET",
+          }
+        );
         
         // Convert backend file list to Asset format
         const fetchedAssets: Asset[] = data.files.map((file: any) => {
@@ -209,12 +219,29 @@ export default function CampaignAssetsPage() {
     formData.append("tags", ""); // Empty tags - user will add tags via UI
 
     const uploadFile = async (overwrite: boolean = false) => {
-      const url = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/upload${overwrite ? "?overwrite=true" : ""}`;
-      const response = await fetch(url, {
-        method: "POST",
-        body: formData,
-      });
-      return response;
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
+      }
+      
+      const path = `/api/v1/upload${overwrite ? "?overwrite=true" : ""}`;
+      try {
+        const result = await apiFetch(path, {
+          token,
+          method: "POST",
+          body: formData,
+        });
+        return { ok: true, json: async () => result, status: 200 };
+      } catch (error) {
+        // Convert apiFetch error to response-like object for compatibility
+        const errorMessage = error instanceof Error ? error.message : "Upload failed";
+        if (errorMessage.includes("409")) {
+          return { ok: false, status: 409, json: async () => ({ detail: "File exists" }) };
+        }
+        const statusMatch = errorMessage.match(/HTTP (\d+)/);
+        const status = statusMatch ? parseInt(statusMatch[1]) : 500;
+        return { ok: false, status, json: async () => ({ detail: errorMessage }) };
+      }
     };
 
     try {
@@ -250,39 +277,51 @@ export default function CampaignAssetsPage() {
       
       // Fetch the file from the list endpoint to get full metadata including tags
       // This ensures we have the correct tags that were saved to Qdrant
-      const listResponse = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`);
-      if (listResponse.ok) {
-        const listData = await listResponse.json();
-        const uploadedFile = listData.files.find((f: any) => f.id === result.id);
-        
-        if (uploadedFile) {
-          const baseType = getFileTypeFromExtension(uploadedFile.name);
-          const previewType = uploadedFile.preview_type as string | undefined;
-          const effectiveType = previewType === "pdf" ? "pdf" : baseType;
-
-          // Use the file data from Qdrant (source of truth)
-          const newAsset: Asset = {
-            id: uploadedFile.id,
-            name: uploadedFile.name,
-            type: effectiveType,
-            url: uploadedFile.url, // original URL
-            previewUrl: uploadedFile.preview_url ?? undefined,
-            previewType,
-            previewStatus: uploadedFile.preview_status ?? undefined,
-            tags: uploadedFile.tags || [], // Use tags from Qdrant
-            uploadDate: new Date(uploadedFile.date).toISOString().split("T")[0],
-            uploader: "You",
-            size: uploadedFile.size,
-            urgency: "medium",
-            assignedTo: [],
-            comments: 0,
-            status: "ready",
-            aiEnabled: isAISupportedType(effectiveType),
-          };
+      const token = await getToken();
+      if (token) {
+        try {
+          const listData = await apiFetch<{ files: any[] }>(
+            `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
+            {
+              token,
+              method: "GET",
+            }
+          );
+          const uploadedFile = listData.files.find((f: any) => f.id === result.id);
           
-          // Add the new asset to the state
-          setAssets([newAsset, ...assets]);
-          setIsUploading(false);
+          if (uploadedFile) {
+            const baseType = getFileTypeFromExtension(uploadedFile.name);
+            const previewType = uploadedFile.preview_type as string | undefined;
+            const effectiveType = previewType === "pdf" ? "pdf" : baseType;
+
+            // Use the file data from Qdrant (source of truth)
+            const newAsset: Asset = {
+              id: uploadedFile.id,
+              name: uploadedFile.name,
+              type: effectiveType,
+              url: uploadedFile.url, // original URL
+              previewUrl: uploadedFile.preview_url ?? undefined,
+              previewType,
+              previewStatus: uploadedFile.preview_status ?? undefined,
+              tags: uploadedFile.tags || [], // Use tags from Qdrant
+              uploadDate: new Date(uploadedFile.date).toISOString().split("T")[0],
+              uploader: "You",
+              size: uploadedFile.size,
+              urgency: "medium",
+              assignedTo: [],
+              comments: 0,
+              status: "ready",
+              aiEnabled: isAISupportedType(effectiveType),
+            };
+            
+            // Add the new asset to the state
+            setAssets([newAsset, ...assets]);
+          }
+        } catch (err) {
+          console.error("Error fetching uploaded file metadata:", err);
+        }
+      }
+      setIsUploading(false);
           return;
         }
       }
@@ -333,21 +372,15 @@ export default function CampaignAssetsPage() {
     try {
       if (isGlobal) {
         // Global delete: Remove from disk, Qdrant, and all tabs
-        const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/files/${assetId}`,
-          {
-            method: "DELETE",
-          }
-        );
-
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({
-            detail: "Delete failed",
-          }));
-          throw new Error(
-            errorData.detail || `Delete failed with status ${response.status}`
-          );
+        const token = await getToken();
+        if (!token) {
+          throw new Error("Authentication required");
         }
+        
+        await apiFetch(`/api/v1/files/${assetId}`, {
+          token,
+          method: "DELETE",
+        });
 
         // Remove from local state
         setAssets((prev) => prev.filter((a) => a.id !== assetId));
@@ -358,16 +391,16 @@ export default function CampaignAssetsPage() {
         }
       } else {
         // Local delete: Clear all tags (remove from all workstreams)
-        const response = await fetch(
-          `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/files/${assetId}/untag`,
-          {
-            method: "PATCH",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({ tag: "*" }), // "*" means clear all tags
-          }
-        );
+        const token = await getToken();
+        if (!token) {
+          throw new Error("Authentication required");
+        }
+        
+        await apiFetch(`/api/v1/files/${assetId}/untag`, {
+          token,
+          method: "PATCH",
+          body: { tag: "*" }, // "*" means clear all tags
+        });
 
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({
@@ -422,23 +455,22 @@ export default function CampaignAssetsPage() {
     if (!renamingAsset) return;
 
     try {
-      const response = await fetch(`${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/files/rename`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          old_name: renamingAsset.name,
-          new_name: newName,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ detail: "Rename failed" }));
-        throw new Error(errorData.detail || `Rename failed with status ${response.status}`);
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
       }
-
-      const result = await response.json();
+      
+      const result = await apiFetch<{ new_name: string; new_url: string }>(
+        "/api/v1/files/rename",
+        {
+          token,
+          method: "POST",
+          body: {
+            old_name: renamingAsset.name,
+            new_name: newName,
+          },
+        }
+      );
 
       // Update the asset in state
       setAssets((prev) =>
@@ -464,25 +496,16 @@ export default function CampaignAssetsPage() {
     if (!promotingAsset) return;
 
     try {
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/files/${promotingAsset.id}/archive`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ is_golden: isGolden }),
-        }
-      );
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({
-          detail: "Promote failed",
-        }));
-        throw new Error(
-          errorData.detail || `Promote failed with status ${response.status}`
-        );
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
       }
+      
+      await apiFetch(`/api/v1/files/${promotingAsset.id}/archive`, {
+        token,
+        method: "POST",
+        body: { is_golden: isGolden },
+      });
 
       // Success - modal will close automatically
       setPromotingAsset(null);

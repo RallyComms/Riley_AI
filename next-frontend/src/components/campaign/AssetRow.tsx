@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useAuth } from "@clerk/nextjs";
 import * as Popover from "@radix-ui/react-popover";
 import {
   FileText,
@@ -21,6 +22,7 @@ import {
 } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { Asset, AssetTag } from "@app/lib/types";
+import { apiFetch } from "@app/lib/api";
 
 interface AssetRowProps {
   asset: Asset;
@@ -120,6 +122,7 @@ function formatFilename(name: string): string {
 }
 
 export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabledChange, onClick, onRename, onPromote }: AssetRowProps) {
+  const { getToken } = useAuth();
   const { icon: FileIcon, color: iconColor } = getFileIcon(asset.type);
   const [isUpdatingTags, setIsUpdatingTags] = useState(false);
 
@@ -139,27 +142,21 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
     // Persist to backend
     setIsUpdatingTags(true);
     try {
-      const response = await fetch(
-        `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/files/${asset.id}/tags`,
-        {
-          method: "PUT",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ tags: newTags }),
-        }
-      );
-
-      if (!response.ok) {
-        // Revert on error
-        onTagChange(asset.id, asset.tags);
-        const errorData = await response.json().catch(() => ({
-          detail: "Failed to update tags",
-        }));
-        throw new Error(
-          errorData.detail || `Failed to update tags: ${response.status}`
-        );
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
       }
+      
+      await apiFetch(`/api/v1/files/${asset.id}/tags`, {
+        token,
+        method: "PUT",
+        body: { tags: newTags },
+      });
+    } catch (error) {
+      // Revert on error
+      onTagChange(asset.id, asset.tags);
+      const errorMessage = error instanceof Error ? error.message : "Failed to update tags";
+      throw new Error(errorMessage);
     } catch (error) {
       console.error("Failed to update tags:", error);
       // Revert optimistic update
