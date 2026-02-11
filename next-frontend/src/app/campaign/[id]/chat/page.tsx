@@ -34,6 +34,18 @@ interface BackendMessage {
   author_id: string;
 }
 
+// Backend campaign shape
+interface BackendCampaign {
+  id: string;
+  name: string;
+  description: string | null;
+  role: "Lead" | "Member";
+}
+
+interface CampaignsResponse {
+  campaigns: BackendCampaign[];
+}
+
 // Frontend message shape
 interface TeamMessage {
   id: string;
@@ -103,6 +115,7 @@ export default function TeamChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [isPosting, setIsPosting] = useState(false);
   const [lastTimestamp, setLastTimestamp] = useState<string | null>(null);
+  const [campaignName, setCampaignName] = useState<string>("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -197,6 +210,42 @@ export default function TeamChatPage() {
     }
   };
 
+  // Fetch campaign name on mount
+  useEffect(() => {
+    async function fetchCampaignName() {
+      if (!isLoaded || !campaignId) return;
+
+      try {
+        const token = await getToken();
+        if (!token) {
+          // Fallback to shortened ID if no token
+          setCampaignName(campaignId.slice(0, 8));
+          return;
+        }
+
+        const data: CampaignsResponse = await apiFetch("/api/v1/campaigns", {
+          token,
+          method: "GET",
+        });
+
+        // Find campaign with matching ID
+        const campaign = data.campaigns.find((c) => c.id === campaignId);
+        if (campaign) {
+          setCampaignName(campaign.name);
+        } else {
+          // Fallback to shortened ID if not found
+          setCampaignName(campaignId.slice(0, 8));
+        }
+      } catch (err) {
+        console.error("Error fetching campaign name:", err);
+        // Fallback to shortened ID on error
+        setCampaignName(campaignId.slice(0, 8));
+      }
+    }
+
+    fetchCampaignName();
+  }, [isLoaded, campaignId, getToken]);
+
   // Initial fetch on mount
   useEffect(() => {
     if (isLoaded && campaignId && user?.id) {
@@ -245,11 +294,8 @@ export default function TeamChatPage() {
     }
   }, [inputValue]);
 
-  // Format campaign name from ID (e.g., "clean-water" -> "Clean Water")
-  const campaignName = campaignId
-    .split("-")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
+  // Use fetched campaign name, or fallback to shortened ID if not loaded yet
+  const displayName = campaignName || campaignId.slice(0, 8);
 
   const handleSend = async () => {
     if (!inputValue.trim() || !user || isPosting) return;
@@ -322,7 +368,7 @@ export default function TeamChatPage() {
         {/* Header */}
         <header className="flex items-center justify-between p-6 border-b border-white/5 bg-slate-900/50 backdrop-blur-md">
           <h1 className="text-2xl font-bold text-zinc-100">
-            Team Comms | <span className="text-amber-400">{campaignName}</span>
+            Team Comms | <span className="text-amber-400">{displayName}</span>
           </h1>
         </header>
 
