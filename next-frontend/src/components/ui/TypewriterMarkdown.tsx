@@ -59,7 +59,7 @@ export function TypewriterMarkdown({
   }, [content, onComplete]);
 
   return (
-    <div className="prose prose-invert max-w-none leading-loose prose-p:mb-8 prose-p:leading-7 prose-headings:mt-8 prose-headings:mb-4 prose-ul:my-4 prose-ul:list-disc prose-ul:pl-4 prose-li:mb-4 prose-strong:text-amber-400 prose-strong:font-semibold">
+    <div className="riley-md">
       <ReactMarkdown remarkPlugins={[remarkBreaks]}>{displayedContent}</ReactMarkdown>
       {displayedContent.length < content.length && (
         <span className="inline-block w-0.5 h-4 bg-amber-400 ml-0.5 animate-pulse align-middle">

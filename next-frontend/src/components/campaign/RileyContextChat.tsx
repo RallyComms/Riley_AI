@@ -25,10 +25,14 @@ interface RileyContextChatProps {
 export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: RileyContextChatProps) {
   // All hooks must be called unconditionally before any early returns
   const { user, isLoaded } = useUser();
-  const { getToken } = useAuth();
+  const { getToken, isLoaded: authLoaded } = useAuth();
   
   // Derive user display name: username ?? firstName ?? primaryEmail ?? "there"
   const userDisplayName = user?.username ?? user?.firstName ?? user?.primaryEmailAddress?.emailAddress ?? "there";
+  
+  // Check for missing requirements (but still render UI with error banner)
+  const missingAuth = !authLoaded || !isLoaded || !user;
+  const missingCampaignId = !campaignId;
   
   const getSystemMessage = () => {
     switch (mode) {
@@ -196,7 +200,21 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const canSend = input.trim().length > 0 && !isLoading;
+  // Check for missing requirements (but still render UI with error banner)
+  const missingAuth = !isLoaded || !user;
+  const missingCampaignId = !campaignId;
+  
+  // Check if send is enabled and why it might be disabled
+  const canSend = input.trim().length > 0 && !isLoading && !missingAuth && !missingCampaignId;
+  const sendDisabledReason = missingAuth 
+    ? "Not authenticated" 
+    : missingCampaignId 
+    ? "Campaign ID missing" 
+    : input.trim().length === 0 
+    ? "Enter a message" 
+    : isLoading 
+    ? "Sending..." 
+    : null;
 
   async function handleSend() {
     if (!canSend || !sessionId) return;
@@ -260,11 +278,18 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
         );
       });
     } catch (error) {
+      // Log error to console for debugging
+      console.error("Riley chat error:", error);
+      
       // Replace thinking placeholder with error message
+      const errorText = error instanceof Error 
+        ? error.message 
+        : "Unknown error occurred";
+      
       const errorMessage: Message = {
         id: `error-${Date.now()}`,
         role: "assistant",
-        content: `Error: ${error instanceof Error ? error.message : "Unknown error occurred"}`,
+        content: `Error: ${errorText}`,
       };
       
       // Replace thinking message with error message
@@ -393,14 +418,17 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
     );
   }
 
-  // Guard clause: Don't render if user or campaignId is not available
-  // This must come AFTER all hooks to comply with Rules of Hooks
-  if (!isLoaded || !user || !campaignId) {
-    return null;
-  }
-
   return (
     <div className="h-full flex flex-col">
+      {/* Error Banner */}
+      {(missingAuth || missingCampaignId) && (
+        <div className="flex-shrink-0 bg-red-500/10 border-b border-red-500/30 px-4 py-2">
+          <p className="text-sm text-red-400">
+            {missingAuth ? "Not authenticated. Please sign in." : "Campaign ID missing. Cannot send messages."}
+          </p>
+        </div>
+      )}
+      
       {/* Header with Clear Context Button */}
       <div className="flex-shrink-0 flex items-center justify-end px-4 py-2 border-b border-zinc-800">
         <button
@@ -483,6 +511,11 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
 
       {/* Input Area - Fixed Bottom */}
       <div className="flex-shrink-0 border-t border-zinc-800 p-4">
+        {sendDisabledReason && !isLoading && (
+          <div className="mb-2 text-xs text-zinc-500 text-center">
+            {sendDisabledReason}
+          </div>
+        )}
         <div className="flex items-center gap-2">
           <input
             ref={inputRef}
@@ -491,7 +524,7 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={handleKeyDown}
             placeholder="Ask Riley..."
-            disabled={isLoading}
+            disabled={isLoading || missingAuth || missingCampaignId}
             className="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-amber-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
           />
           <button
@@ -505,6 +538,7 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
                 : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-600 cursor-not-allowed"
             )}
             aria-label="Send message"
+            title={sendDisabledReason || "Send message"}
           >
             {isLoading ? (
               <Loader2 className="h-4 w-4 animate-spin" />

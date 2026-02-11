@@ -31,11 +31,15 @@ interface RileyStudioProps {
 }
 
 export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" }: RileyStudioProps) {
-  const { getToken, userId } = useAuth();
-  const { user } = useUser();
+  const { getToken, userId, isLoaded: authLoaded } = useAuth();
+  const { user, isLoaded: userLoaded } = useUser();
   
   // Derive user display name: username ?? firstName ?? primaryEmail ?? "there"
   const userDisplayName = user?.username ?? user?.firstName ?? user?.primaryEmailAddress?.emailAddress ?? "there";
+  
+  // Check for missing requirements
+  const missingAuth = !authLoaded || !userLoaded || !user;
+  const missingTenantId = !tenantId;
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -182,7 +186,17 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     loadHistory();
   }, [activeConversationId, contextName, getToken]);
 
-  const canSend = input.trim().length > 0 && !isLoading;
+  // Check if send is enabled and why it might be disabled
+  const canSend = input.trim().length > 0 && !isLoading && !missingAuth && !missingTenantId;
+  const sendDisabledReason = missingAuth 
+    ? "Not authenticated" 
+    : missingTenantId 
+    ? "Tenant ID missing" 
+    : input.trim().length === 0 
+    ? "Enter a message" 
+    : isLoading 
+    ? "Sending..." 
+    : null;
 
   const handleNewConversation = () => {
     // Generate collision-proof, scope-aware session ID
@@ -429,6 +443,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         ]);
       }
     } catch (error) {
+      // Log error to console for debugging
+      console.error("Riley chat error:", error);
+      
       // On error, replace thinking placeholder with error message
       const errorText = error instanceof Error 
         ? error.message 
@@ -789,6 +806,11 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         {/* Input Area - Fixed Bottom */}
         <div className="flex-shrink-0 border-t border-zinc-800 p-4 bg-slate-950/50 backdrop-blur-sm">
           <div className="max-w-3xl mx-auto w-full">
+            {sendDisabledReason && !isLoading && (
+              <div className="mb-2 text-xs text-zinc-500 text-center">
+                {sendDisabledReason}
+              </div>
+            )}
             <div className="flex items-end gap-3">
               <textarea
                 ref={inputRef}
@@ -796,7 +818,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
                 placeholder="Message Riley..."
-                disabled={isLoading}
+                disabled={isLoading || missingAuth || missingTenantId}
                 rows={1}
                 className="flex-1 resize-none rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-amber-500/50 disabled:opacity-50 disabled:cursor-not-allowed max-h-[200px]"
               />
@@ -811,6 +833,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-600 cursor-not-allowed"
                 )}
                 aria-label="Send message"
+                title={sendDisabledReason || "Send message"}
               >
                 {isLoading ? (
                   <Loader2 className="h-5 w-5 animate-spin" />
