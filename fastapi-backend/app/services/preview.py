@@ -66,7 +66,7 @@ async def generate_pdf_preview(file_bytes: bytes, filename: str) -> bytes:
         # Write input bytes
         input_path.write_bytes(file_bytes)
 
-        # Build LibreOffice command
+        # Build ice command
         cmd = [
             "soffice",
             "--headless",
@@ -127,11 +127,11 @@ async def generate_pdf_preview(file_bytes: bytes, filename: str) -> bytes:
             raise HTTPException(
                 status_code=500,
                 detail=(
-                    "Preview generation is not available: LibreOffice (soffice) is not installed. "
-                    "Install it with 'apt-get update && apt-get install -y libreoffice'."
+                    "Preview generation is not available: LibreOffice is not installed. "
+                    "Install it with 'apt-get install -y libreoffice."
                 ),
             )
-        except Exception as exc:  # pragma: no cover - OS/LibreOffice edge cases
+        except Exception as exc:  # pragma: no cover - OS/ice edge cases
             raise HTTPException(
                 status_code=500,
                 detail=f"Unexpected error during preview generation: {exc}",

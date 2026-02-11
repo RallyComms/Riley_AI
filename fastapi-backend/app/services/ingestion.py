@@ -522,6 +522,9 @@ async def process_upload(
         # Rewind file stream before uploading to GCS
         await file.seek(0)
         
+        # Generate point_id early so it can be used for preview object naming
+        point_id = str(uuid.uuid4())
+        
         # Upload original to GCS
         file_url = await StorageService.upload_file(file, unique_filename)
 
@@ -532,7 +535,7 @@ async def process_upload(
         preview_error: Optional[str] = None
 
         if settings.ENABLE_PREVIEW_GENERATION and is_office_or_html(filename):
-            preview_status = "queued"
+            preview_status = "processing"
             try:
                 pdf_bytes = await generate_pdf_preview(file_content, filename)
 
@@ -576,7 +579,7 @@ async def process_upload(
             vector = await _generate_embedding(fallback_text)
         
         # Prepare Qdrant payload
-        point_id = str(uuid.uuid4())
+        # (point_id already generated above for preview naming)
         
         # Determine ai_enabled based on file type
         # Default: pdf, docx, doc, pptx, xlsx, html -> ai_enabled = true

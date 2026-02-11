@@ -3,7 +3,14 @@ FROM python:3.11-slim
 # System dependencies for Office-to-PDF preview generation
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice \
+    libreoffice-core \
+    libreoffice-writer \
+    fontconfig \
+    fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
+
+# Verify soffice is available on PATH
+RUN which soffice || (echo "ERROR: soffice not found in PATH" && exit 1)
 
 WORKDIR /app
 
