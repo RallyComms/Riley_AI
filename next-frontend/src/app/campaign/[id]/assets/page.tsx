@@ -140,63 +140,65 @@ export default function CampaignAssetsPage() {
   const [promotingAsset, setPromotingAsset] = useState<Asset | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Fetch files from backend - reusable function
+  const fetchFiles = async () => {
+    if (!campaignId) return; // Don't fetch if no campaign ID
+    
+    try {
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
+      }
+      
+      const data = await apiFetch<{ files: any[] }>(
+        `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
+        {
+          token,
+          method: "GET",
+        }
+      );
+      
+      // Convert backend file list to Asset format
+      const fetchedAssets: Asset[] = data.files.map((file: any) => {
+        const baseType = getFileTypeFromExtension(file.name);
+        const previewType = file.preview_type as string | undefined;
+
+        // If server generated a PDF preview, treat as PDF for viewing
+        const effectiveType = previewType === "pdf" ? "pdf" : baseType;
+
+        return {
+          id: file.id, // Qdrant UUID (required)
+          name: file.name,
+          type: effectiveType,
+          url: file.url, // original file URL (used for download)
+          previewUrl: file.preview_url ?? undefined,
+          previewType: previewType ?? undefined,
+          previewStatus: file.preview_status ?? undefined,
+          previewError: file.preview_error ?? undefined,
+          tags: file.tags || [], // Use tags from backend
+          uploadDate: new Date(file.date).toISOString().split("T")[0],
+          uploader: "System",
+          size: file.size,
+          urgency: "medium",
+          assignedTo: [],
+          comments: 0,
+          status: "ready",
+          aiEnabled: isAISupportedType(effectiveType),
+        };
+      });
+      
+      setAssets(fetchedAssets);
+    } catch (error) {
+      console.error("Error fetching files:", error);
+      // Return empty array if fetch fails (Qdrant is source of truth)
+      setAssets([]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   // Fetch files from backend on mount
   useEffect(() => {
-    const fetchFiles = async () => {
-      if (!campaignId) return; // Don't fetch if no campaign ID
-      
-      try {
-        const token = await getToken();
-        if (!token) {
-          throw new Error("Authentication required");
-        }
-        
-        const data = await apiFetch<{ files: any[] }>(
-          `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
-          {
-            token,
-            method: "GET",
-          }
-        );
-        
-        // Convert backend file list to Asset format
-        const fetchedAssets: Asset[] = data.files.map((file: any) => {
-          const baseType = getFileTypeFromExtension(file.name);
-          const previewType = file.preview_type as string | undefined;
-
-          // If server generated a PDF preview, treat as PDF for viewing
-          const effectiveType = previewType === "pdf" ? "pdf" : baseType;
-
-          return {
-            id: file.id, // Qdrant UUID (required)
-            name: file.name,
-            type: effectiveType,
-            url: file.url, // original file URL (used for download)
-            previewUrl: file.preview_url ?? undefined,
-            previewType,
-            previewStatus: file.preview_status ?? undefined,
-            tags: file.tags || [], // Use tags from backend
-            uploadDate: new Date(file.date).toISOString().split("T")[0],
-            uploader: "System",
-            size: file.size,
-            urgency: "medium",
-            assignedTo: [],
-            comments: 0,
-            status: "ready",
-            aiEnabled: isAISupportedType(effectiveType),
-          };
-        });
-        
-        setAssets(fetchedAssets);
-      } catch (error) {
-        console.error("Error fetching files:", error);
-        // Return empty array if fetch fails (Qdrant is source of truth)
-        setAssets([]);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
     fetchFiles();
   }, [campaignId]);
 
@@ -263,72 +265,11 @@ export default function CampaignAssetsPage() {
         }
       }
       
-      // Fetch the file from the list endpoint to get full metadata including tags
-      // This ensures we have the correct tags that were saved to Qdrant
-      const token = await getToken();
-      if (token) {
-        try {
-          const listData = await apiFetch<{ files: any[] }>(
-            `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
-            {
-              token,
-              method: "GET",
-            }
-          );
-          const uploadedFile = listData.files.find((f: any) => f.id === result.id);
-          
-          if (uploadedFile) {
-            const baseType = getFileTypeFromExtension(uploadedFile.name);
-            const previewType = uploadedFile.preview_type as string | undefined;
-            const effectiveType = previewType === "pdf" ? "pdf" : baseType;
-
-            // Use the file data from Qdrant (source of truth)
-            const newAsset: Asset = {
-              id: uploadedFile.id,
-              name: uploadedFile.name,
-              type: effectiveType,
-              url: uploadedFile.url, // original URL
-              previewUrl: uploadedFile.preview_url ?? undefined,
-              previewType,
-              previewStatus: uploadedFile.preview_status ?? undefined,
-              tags: uploadedFile.tags || [], // Use tags from Qdrant
-              uploadDate: new Date(uploadedFile.date).toISOString().split("T")[0],
-              uploader: "You",
-              size: uploadedFile.size,
-              urgency: "medium",
-              assignedTo: [],
-              comments: 0,
-              status: "ready",
-              aiEnabled: isAISupportedType(effectiveType),
-            };
-            
-            // Add the new asset to the state
-            setAssets([newAsset, ...assets]);
-          }
-        } catch (err) {
-          console.error("Error fetching uploaded file metadata:", err);
-        }
-      }
+      // After successful upload, refetch the entire assets list to get complete metadata
+      // including preview fields (preview_url, preview_status, preview_error) from Qdrant
+      // This ensures the UI sees the latest preview state without waiting
+      await fetchFiles();
       
-      // Fallback if we can't fetch from list (shouldn't happen, but handle gracefully)
-      const newAsset: Asset = {
-        id: result.id,
-        name: result.filename,
-        type: fileType,
-        url: result.url,
-        tags: [], // Empty tags - user will add via UI
-        uploadDate: new Date().toISOString().split("T")[0],
-        uploader: "You",
-        size: fileSize,
-        urgency: "medium",
-        assignedTo: [],
-        comments: 0,
-        status: "ready",
-        aiEnabled: isAISupportedType(fileType),
-      };
-
-      // Add the new asset to the state so it appears in the table instantly
-      setAssets([newAsset, ...assets]);
       setIsUploading(false);
     } catch (error) {
       console.error("Upload error:", error);
@@ -361,7 +302,7 @@ export default function CampaignAssetsPage() {
           throw new Error("Authentication required");
         }
         
-        await apiFetch(`/api/v1/files/${assetId}`, {
+        await apiFetch(`/api/v1/files/${assetId}?tenant_id=${encodeURIComponent(campaignId)}`, {
           token,
           method: "DELETE",
         });
@@ -396,6 +337,34 @@ export default function CampaignAssetsPage() {
         );
       }
     } catch (error) {
+      // Improved error logging: fetch and log full response JSON on non-2xx
+      // This ensures 422 details are properly stringified, not [object Object]
+      if (error instanceof Error && error.message.includes("HTTP")) {
+        try {
+          const token = await getToken();
+          if (token) {
+            const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+            const url = isGlobal 
+              ? `${baseUrl}/api/v1/files/${assetId}?tenant_id=${encodeURIComponent(campaignId)}`
+              : `${baseUrl}/api/v1/files/${assetId}/untag`;
+            const response = await fetch(url, {
+              method: isGlobal ? "DELETE" : "PATCH",
+              headers: {
+                Authorization: `Bearer ${token}`,
+                "Content-Type": "application/json",
+              },
+              body: !isGlobal ? JSON.stringify({ tag: "*" }) : undefined,
+            });
+            if (!response.ok) {
+              const errorJson = await response.json();
+              console.error("Delete error response JSON:", JSON.stringify(errorJson, null, 2));
+            }
+          }
+        } catch (logError) {
+          // If logging fails, fall back to basic error logging
+          console.error("Failed to log error details:", logError);
+        }
+      }
       console.error("Delete error:", error);
       throw error; // Re-throw so modal can handle it
     }

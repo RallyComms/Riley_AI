@@ -20,9 +20,10 @@ export interface Asset {
   type: "pdf" | "docx" | "xlsx" | "img" | "pptx";
   url: string;
   // Optional server-generated preview metadata (e.g., Office/HTML -> PDF)
-  previewUrl?: string;
-  previewType?: string;
-  previewStatus?: string;
+  previewUrl?: string | null;
+  previewType?: string | null;
+  previewStatus?: "complete" | "failed" | "processing" | "queued" | null;
+  previewError?: string | null;
   tags: AssetTag[]; // Array for multi-tagging
   uploadDate: string;
   uploader: string;
