@@ -12,6 +12,7 @@ type Message = {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
+  status?: "thinking"; // For placeholder messages
 };
 
 interface RileyContextChatProps {
@@ -25,6 +26,9 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
   // All hooks must be called unconditionally before any early returns
   const { user, isLoaded } = useUser();
   const { getToken } = useAuth();
+  
+  // Derive user display name: username ?? firstName ?? primaryEmail ?? "there"
+  const userDisplayName = user?.username ?? user?.firstName ?? user?.primaryEmailAddress?.emailAddress ?? "there";
   
   const getSystemMessage = () => {
     switch (mode) {
@@ -81,6 +85,20 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
       return;
     }
 
+    // Only load history if messages are empty or only contain system message
+    // This prevents overwriting optimistic updates
+    setMessages((prev) => {
+      const hasUserOrAssistantMessages = prev.some(
+        (msg) => msg.role === "user" || msg.role === "assistant"
+      );
+      // If we have user/assistant messages, don't load history (preserve optimistic updates)
+      if (hasUserOrAssistantMessages) {
+        return prev;
+      }
+      // Otherwise, keep current messages (might be system message)
+      return prev;
+    });
+
     async function loadHistory() {
       try {
         const token = await getToken();
@@ -94,7 +112,17 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
           }
         );
         
-        if (history && Array.isArray(history) && history.length > 0) {
+        // Guard: Only update if history exists and messages are still empty/only system
+        setMessages((prev) => {
+          const hasUserOrAssistantMessages = prev.some(
+            (msg) => msg.role === "user" || msg.role === "assistant"
+          );
+          // Don't overwrite if user/assistant messages exist
+          if (hasUserOrAssistantMessages) {
+            return prev;
+          }
+          
+          if (history && Array.isArray(history) && history.length > 0) {
             // Convert history to Message format
             const historyMessages: Message[] = history.map(
               (msg: { role: string; content: string }, idx: number) => ({
@@ -104,45 +132,58 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
               })
             );
             // Prepend system message
-            setMessages([
+            return [
               {
                 id: "system-1",
                 role: "system",
                 content: getSystemMessage(),
               },
               ...historyMessages,
-            ]);
+            ];
           } else {
-            // No history found, keep default system message
-            setMessages([
+            // Empty history - keep system message only if messages are still empty
+            return prev.length === 0 || (prev.length === 1 && prev[0].role === "system")
+              ? [
+                  {
+                    id: "system-1",
+                    role: "system",
+                    content: getSystemMessage(),
+                  },
+                ]
+              : prev;
+          }
+        });
+      } catch (error) {
+        // If history fetch fails (404 or other), continue with default system message
+        // Guard: Only set system message if messages are still empty
+        setMessages((prev) => {
+          const hasUserOrAssistantMessages = prev.some(
+            (msg) => msg.role === "user" || msg.role === "assistant"
+          );
+          if (hasUserOrAssistantMessages) {
+            return prev;
+          }
+          
+          if (error instanceof Error && error.message.includes("404")) {
+            // No history exists yet, keep default system message
+            return [
               {
                 id: "system-1",
                 role: "system",
                 content: getSystemMessage(),
               },
-            ]);
+            ];
+          } else {
+            console.error("Failed to load chat history:", error);
+            return [
+              {
+                id: "system-1",
+                role: "system",
+                content: getSystemMessage(),
+              },
+            ];
           }
-      } catch (error) {
-        // If history fetch fails (404 or other), continue with default system message
-        if (error instanceof Error && error.message.includes("404")) {
-          // No history exists yet, keep default system message
-          setMessages([
-            {
-              id: "system-1",
-              role: "system",
-              content: getSystemMessage(),
-            },
-          ]);
-        } else {
-          console.error("Failed to load chat history:", error);
-          setMessages([
-            {
-              id: "system-1",
-              role: "system",
-              content: getSystemMessage(),
-            },
-          ]);
-        }
+        });
       }
     }
 
@@ -158,17 +199,33 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
   const canSend = input.trim().length > 0 && !isLoading;
 
   async function handleSend() {
-    if (!canSend) return;
+    if (!canSend || !sessionId) return;
 
+    // Step 1: Capture user input immediately
+    const userInput = input.trim();
     const userMessage: Message = {
       id: `user-${Date.now()}`,
       role: "user",
-      content: input.trim(),
+      content: userInput,
     };
 
-    setMessages((prev) => [...prev, userMessage]);
-    const userInput = input.trim();
+    // Step 2: Create thinking placeholder for assistant response (store ID for later replacement)
+    const thinkingId = `thinking-${Date.now()}`;
+    const thinkingMessage: Message = {
+      id: thinkingId,
+      role: "assistant",
+      content: "",
+      status: "thinking",
+    };
+
+    // Step 3: OPTIMISTIC UPDATE - Immediately append user message + thinking placeholder
+    // This makes the message appear instantly in the UI BEFORE any await
+    setMessages((prev) => [...prev, userMessage, thinkingMessage]);
+    
+    // Step 4: Clear input field immediately for better UX
     setInput("");
+    
+    // Step 5: Set loading state
     setIsLoading(true);
 
     try {
@@ -185,22 +242,37 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
           tenant_id: campaignId,
           mode: "fast",
           session_id: sessionId,
+          user_display_name: userDisplayName,
         },
       });
 
+      // Step 6: Replace thinking placeholder with actual assistant response
       const assistantMessage: Message = {
         id: `assistant-${Date.now()}`,
         role: "assistant",
         content: data.response,
       };
-      setMessages((prev) => [...prev, assistantMessage]);
+      
+      // Replace thinking message with actual response
+      setMessages((prev) => {
+        return prev.map((msg) =>
+          msg.id === thinkingId ? assistantMessage : msg
+        );
+      });
     } catch (error) {
+      // Replace thinking placeholder with error message
       const errorMessage: Message = {
         id: `error-${Date.now()}`,
         role: "assistant",
         content: `Error: ${error instanceof Error ? error.message : "Unknown error occurred"}`,
       };
-      setMessages((prev) => [...prev, errorMessage]);
+      
+      // Replace thinking message with error message
+      setMessages((prev) => {
+        return prev.map((msg) =>
+          msg.id === thinkingId ? errorMessage : msg
+        );
+      });
     } finally {
       setIsLoading(false);
     }
@@ -374,12 +446,18 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
                     : "bg-zinc-900/50 border border-zinc-800/50 text-zinc-100"
                 )}
               >
-                {isLastAssistant ? (
+                {message.status === "thinking" ? (
+                  // Thinking placeholder
+                  <div className="flex items-center gap-2 text-zinc-400">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    <span>Riley is thinking...</span>
+                  </div>
+                ) : isLastAssistant ? (
                   // Typewriter effect for last assistant message
                   <TypewriterMarkdown content={message.content} />
                 ) : message.role === "assistant" ? (
                   // Static markdown for previous assistant messages
-                  <div className="prose prose-invert prose-sm max-w-none prose-p:mb-4 prose-p:leading-7 prose-ul:my-4 prose-ul:list-disc prose-ul:pl-4 prose-li:mb-2 prose-strong:text-amber-400 prose-strong:font-semibold">
+                  <div className="riley-md">
                     <ReactMarkdown>{message.content}</ReactMarkdown>
                   </div>
                 ) : (

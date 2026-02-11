@@ -6,6 +6,7 @@ import { useAuth, useUser } from "@clerk/nextjs";
 import { Send } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { apiFetch } from "@app/lib/api";
+import { useCampaignName } from "@app/lib/useCampaignName";
 
 // Helper function to get initials from name
 function getInitials(name: string): string {
@@ -32,18 +33,6 @@ interface BackendMessage {
   content: string;
   timestamp: string; // ISO string
   author_id: string;
-}
-
-// Backend campaign shape
-interface BackendCampaign {
-  id: string;
-  name: string;
-  description: string | null;
-  role: "Lead" | "Member";
-}
-
-interface CampaignsResponse {
-  campaigns: BackendCampaign[];
 }
 
 // Frontend message shape
@@ -115,10 +104,12 @@ export default function TeamChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [isPosting, setIsPosting] = useState(false);
   const [lastTimestamp, setLastTimestamp] = useState<string | null>(null);
-  const [campaignName, setCampaignName] = useState<string>("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Fetch campaign name using shared hook
+  const { displayName } = useCampaignName(campaignId);
 
   // Map backend message to frontend shape
   const mapBackendToFrontend = (
@@ -210,42 +201,6 @@ export default function TeamChatPage() {
     }
   };
 
-  // Fetch campaign name on mount
-  useEffect(() => {
-    async function fetchCampaignName() {
-      if (!isLoaded || !campaignId) return;
-
-      try {
-        const token = await getToken();
-        if (!token) {
-          // Fallback to shortened ID if no token
-          setCampaignName(campaignId.slice(0, 8));
-          return;
-        }
-
-        const data: CampaignsResponse = await apiFetch("/api/v1/campaigns", {
-          token,
-          method: "GET",
-        });
-
-        // Find campaign with matching ID
-        const campaign = data.campaigns.find((c) => c.id === campaignId);
-        if (campaign) {
-          setCampaignName(campaign.name);
-        } else {
-          // Fallback to shortened ID if not found
-          setCampaignName(campaignId.slice(0, 8));
-        }
-      } catch (err) {
-        console.error("Error fetching campaign name:", err);
-        // Fallback to shortened ID on error
-        setCampaignName(campaignId.slice(0, 8));
-      }
-    }
-
-    fetchCampaignName();
-  }, [isLoaded, campaignId, getToken]);
-
   // Initial fetch on mount
   useEffect(() => {
     if (isLoaded && campaignId && user?.id) {
@@ -294,8 +249,6 @@ export default function TeamChatPage() {
     }
   }, [inputValue]);
 
-  // Use fetched campaign name, or fallback to shortened ID if not loaded yet
-  const displayName = campaignName || campaignId.slice(0, 8);
 
   const handleSend = async () => {
     if (!inputValue.trim() || !user || isPosting) return;

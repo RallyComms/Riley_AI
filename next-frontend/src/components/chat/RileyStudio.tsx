@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { useAuth } from "@clerk/nextjs";
+import { useAuth, useUser } from "@clerk/nextjs";
 import { Send, Loader2, Sparkles, Zap, Brain, FileText, Pencil, Check, X, Search, MessageSquare, BarChart3 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
@@ -14,6 +14,7 @@ type Message = {
   role: "user" | "assistant" | "system";
   content: string;
   sourcesCount?: number;
+  status?: "thinking"; // For placeholder messages
 };
 
 type Conversation = {
@@ -31,6 +32,10 @@ interface RileyStudioProps {
 
 export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" }: RileyStudioProps) {
   const { getToken, userId } = useAuth();
+  const { user } = useUser();
+  
+  // Derive user display name: username ?? firstName ?? primaryEmail ?? "there"
+  const userDisplayName = user?.username ?? user?.firstName ?? user?.primaryEmailAddress?.emailAddress ?? "there";
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -80,14 +85,29 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       return;
     }
 
-    // Clear messages immediately when switching sessions
-    setMessages([]);
+    // Only load history if messages are empty or only contain system message
+    // This prevents overwriting optimistic updates
+    setMessages((prev) => {
+      const hasUserOrAssistantMessages = prev.some(
+        (msg) => msg.role === "user" || msg.role === "assistant"
+      );
+      // If we have user/assistant messages, don't load history (preserve optimistic updates)
+      if (hasUserOrAssistantMessages) {
+        return prev;
+      }
+      // Otherwise, clear and load history
+      return [];
+    });
+    
     setIsLoading(true);
 
     async function loadHistory() {
       try {
         const token = await getToken();
-        if (!token) return;
+        if (!token) {
+          setIsLoading(false);
+          return;
+        }
         
         const history = await apiFetch<Array<{ role: string; content: string }>>(
           `/api/v1/chat/history/${activeConversationId}`,
@@ -97,7 +117,16 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           }
         );
         
-        if (history && Array.isArray(history) && history.length > 0) {
+        // Guard: Only update if history exists and messages are still empty/only system
+        setMessages((prev) => {
+          const hasUserOrAssistantMessages = prev.some(
+            (msg) => msg.role === "user" || msg.role === "assistant"
+          );
+          // Don't overwrite if user/assistant messages exist
+          if (hasUserOrAssistantMessages) {
+            return prev;
+          }
+          
           if (history && Array.isArray(history) && history.length > 0) {
             const historyMessages: Message[] = history.map(
               (msg: { role: string; content: string }, idx: number) => ({
@@ -106,33 +135,45 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 content: msg.content,
               })
             );
-            setMessages([
+            return [
               {
                 id: "system-1",
                 role: "system",
                 content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
               },
               ...historyMessages,
-            ]);
+            ];
           } else {
-            setMessages([
-              {
-                id: "system-1",
-                role: "system",
-                content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
-              },
-            ]);
+            // Empty history - keep system message only if messages are still empty
+            return prev.length === 0 || (prev.length === 1 && prev[0].role === "system")
+              ? [
+                  {
+                    id: "system-1",
+                    role: "system",
+                    content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
+                  },
+                ]
+              : prev;
           }
-        }
+        });
       } catch (error) {
         console.error("Failed to load chat history:", error);
-        setMessages([
-          {
-            id: "system-1",
-            role: "system",
-            content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
-          },
-        ]);
+        // Guard: Only set system message if messages are still empty
+        setMessages((prev) => {
+          const hasUserOrAssistantMessages = prev.some(
+            (msg) => msg.role === "user" || msg.role === "assistant"
+          );
+          if (hasUserOrAssistantMessages) {
+            return prev;
+          }
+          return [
+            {
+              id: "system-1",
+              role: "system",
+              content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
+            },
+          ];
+        });
       } finally {
         setIsLoading(false);
       }
@@ -294,7 +335,16 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const handleSend = async () => {
     if (!canSend) return;
 
-    // Step 1: Capture user input immediately
+    // Step 1: Ensure we have a session ID BEFORE any async operations
+    // This prevents history loading from interfering with optimistic updates
+    let sessionId = activeConversationId;
+    if (!sessionId) {
+      const newId = createNewSessionId();
+      setActiveConversationId(newId);
+      sessionId = newId;
+    }
+
+    // Step 2: Capture user input immediately
     const userInput = input.trim();
     const userMessage: Message = {
       id: `user-${Date.now()}`,
@@ -302,40 +352,40 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       content: userInput,
     };
 
-    // Step 2: OPTIMISTIC UPDATE - Immediately append user message to state
-    // This makes the message appear instantly in the UI
+    // Step 3: Create thinking placeholder for assistant response (store ID for later replacement)
+    const thinkingId = `thinking-${Date.now()}`;
+    const thinkingMessage: Message = {
+      id: thinkingId,
+      role: "assistant",
+      content: "",
+      status: "thinking",
+    };
+
+    // Step 4: OPTIMISTIC UPDATE - Immediately append user message + thinking placeholder
+    // This makes the message appear instantly in the UI BEFORE any await
     setMessages((prev) => {
-      // If this is the first message (only system message exists), keep system + add user
+      // If this is the first message (only system message exists), keep system + add user + thinking
       if (prev.length === 1 && prev[0].role === "system") {
-        return [prev[0], userMessage];
+        return [prev[0], userMessage, thinkingMessage];
       }
       // Otherwise, append to existing messages
-      return [...prev, userMessage];
+      return [...prev, userMessage, thinkingMessage];
     });
     
-    // Step 3: Clear input field immediately for better UX
+    // Step 5: Clear input field immediately for better UX
     setInput("");
 
-    // Step 4: Set loading state to show "Thinking" indicator
+    // Step 6: Set loading state to show "Thinking" indicator
     setIsLoading(true);
 
     try {
-      // Step 5: Get auth token
+      // Step 7: Get auth token
       const token = await getToken();
       if (!token) {
         throw new Error("Authentication token not available");
       }
 
-      // Step 6: Ensure we have a session ID (create new conversation if needed)
-      // Generate collision-proof, scope-aware session ID if needed
-      let sessionId = activeConversationId;
-      if (!sessionId) {
-        const newId = createNewSessionId();
-        setActiveConversationId(newId);
-        sessionId = newId;
-      }
-
-      // Step 7: Perform the API call
+      // Step 8: Perform the API call
       const data = await apiFetch<{
         response: string;
         sources_count?: number;
@@ -347,10 +397,11 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           tenant_id: tenantId,
           mode: mode,
           session_id: sessionId,
+          user_display_name: userDisplayName,
         },
       });
 
-      // Step 8: Create assistant message from response
+      // Step 9: Replace thinking placeholder with actual assistant response
       const assistantMessage: Message = {
         id: `assistant-${Date.now()}`,
         role: "assistant",
@@ -358,8 +409,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         sourcesCount: data.sources_count,
       };
 
-      // Step 9: Append assistant response to messages
-      setMessages((prev) => [...prev, assistantMessage]);
+      // Replace thinking message with actual response
+      setMessages((prev) => {
+        return prev.map((msg) =>
+          msg.id === thinkingId ? assistantMessage : msg
+        );
+      });
 
       // Step 10: Update conversation list if this is a new conversation
       if (sessionId && !conversations.find((c) => c.id === sessionId)) {
@@ -374,7 +429,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         ]);
       }
     } catch (error) {
-      // On error, append error message with exact details from API (includes status codes)
+      // On error, replace thinking placeholder with error message
       const errorText = error instanceof Error 
         ? error.message 
         : "Unknown error occurred";
@@ -386,7 +441,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         role: "assistant",
         content: `Error: ${errorText}`,
       };
-      setMessages((prev) => [...prev, errorMessage]);
+      // Replace thinking message with error message
+      setMessages((prev) => {
+        return prev.map((msg) =>
+          msg.id === thinkingId ? errorMessage : msg
+        );
+      });
     } finally {
       // Step 11: Clear loading state (hides "Thinking" indicator)
       setIsLoading(false);
@@ -670,12 +730,18 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           : "bg-zinc-900/50 border border-zinc-800/50 text-zinc-100"
                       )}
                     >
-                      {isLastAssistant ? (
+                      {message.status === "thinking" ? (
+                        // Thinking placeholder
+                        <div className="flex items-center gap-2 text-sm text-zinc-400">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <span>Riley is thinking...</span>
+                        </div>
+                      ) : isLastAssistant ? (
                         // Typewriter effect for last assistant message
                         <TypewriterMarkdown content={message.content} />
                       ) : message.role === "assistant" ? (
                         // Static markdown for previous assistant messages
-                        <div className="text-sm prose prose-invert prose-sm max-w-none leading-loose prose-p:mb-8 prose-p:leading-7 prose-headings:mt-8 prose-headings:mb-4 prose-ul:my-4 prose-ul:list-disc prose-ul:pl-4 prose-li:mb-4 prose-strong:font-semibold prose-strong:text-amber-400">
+                        <div className="riley-md">
                           <ReactMarkdown remarkPlugins={[remarkBreaks]}>
                             {message.content.replace(/<br\s*\/?>/gi, '\n\n')}
                           </ReactMarkdown>
