@@ -17,6 +17,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
+# Ensure static directory exists in the image
+RUN mkdir -p /app/static
+
 ENV PORT=8080
 
 # Cloud Run expects the container to listen on $PORT

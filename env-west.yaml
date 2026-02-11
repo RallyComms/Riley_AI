@@ -1,0 +1,7 @@
+ALLOWED_ORIGINS: "https://rileyplatform.com,https://www.rileyplatform.com"
+CLERK_JWKS_URL: "https://clerk.rileyplatform.com/.well-known/jwks.json"
+CLERK_ISSUER: "https://clerk.rileyplatform.com"
+NEO4J_URI: "bolt://10.138.0.2:7687"
+QDRANT_COLLECTION_TIER_1: "riley_campaigns_768"
+QDRANT_COLLECTION_TIER_2: "riley_production_v1"
+GCS_BUCKET_NAME: "riley-platform-assets-live"

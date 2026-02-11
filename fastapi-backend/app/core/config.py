@@ -23,11 +23,11 @@ class Settings(BaseSettings):
     QDRANT_HOST: str = "localhost"  # Fallback for local dev
     QDRANT_PORT: int = 6333  # Fallback for local dev
 
-    # Global firm knowledge collection (Tier 1 - no filters)
-    QDRANT_COLLECTION_TIER_1: str = "riley_production_v1"
-
+    # Global firm knowledge collection (Tier 1 - firm-wide, is_global=true)
+    QDRANT_COLLECTION_TIER_1: str = "riley_campaigns_768"
+    
     # Private client data collection (Tier 2 - tenant-filtered)
-    QDRANT_COLLECTION_TIER_2: str = "riley_campaigns"
+    QDRANT_COLLECTION_TIER_2: str = "riley_production_v1"
 
     # Neo4j Graph Database configuration
     NEO4J_URI: str = "bolt://localhost:7687"

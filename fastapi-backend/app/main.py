@@ -12,14 +12,13 @@ from app.dependencies.auth import verify_clerk_token
 from app.services.graph import GraphService
 from app.services.qdrant import vector_service
 from app.core.config import get_settings
-import app.services.graph as graph_module
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan: startup and shutdown events."""
-    # Startup: Initialize Neo4j connection
-    graph_module.graph_service = GraphService()
+    # Startup: Initialize Neo4j connection and store in app.state
+    app.state.graph = GraphService()
 
     # Startup: Log Qdrant connection mode
     settings = get_settings()
@@ -50,8 +49,8 @@ async def lifespan(app: FastAPI):
     
     yield
     # Shutdown: Close Neo4j connection
-    if graph_module.graph_service:
-        await graph_module.graph_service.close()
+    if hasattr(app.state, "graph") and app.state.graph:
+        await app.state.graph.close()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -107,6 +106,10 @@ app.include_router(chat.router, prefix="/api/v1", dependencies=[Depends(verify_c
 app.include_router(files.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # CRITICAL: This puts the campaign route at /api/v1/campaign/{tenant_id}
 app.include_router(campaign.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
+
+# Ensure static directory exists BEFORE mounting (required for Cloud Run)
+# This must happen synchronously at module load time, not in lifespan
+Path("static").mkdir(parents=True, exist_ok=True)
 
 # Mount static file directory for serving uploaded files
 app.mount("/static", StaticFiles(directory="static"), name="static")

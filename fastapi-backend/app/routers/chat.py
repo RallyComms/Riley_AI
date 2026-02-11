@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 import google.generativeai as genai  # Still needed for GenerativeModel (chat responses)
 from typing import Dict
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Depends
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue
@@ -12,8 +12,9 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from app.core.config import get_settings
 from app.core.personas import get_persona_context  # CRITICAL: Preserve for Board Demo
 from app.dependencies.auth import verify_clerk_token, check_tenant_membership
+from app.dependencies.graph_dep import get_graph, get_graph_optional
 from app.services.genai_client import get_genai_client
-from app.services.graph import graph_service
+from app.services.graph import GraphService
 from app.services.qdrant import vector_service
 
 
@@ -44,6 +45,7 @@ class ChatRequest(BaseModel):
     tenant_id: str = Field(..., max_length=50, description="Tenant/client identifier (max 50 characters)")
     mode: Literal["fast", "deep"] = "fast"  # 'fast' = Gemini 2.5 Flash, 'deep' = Gemini 2.5 Pro
     session_id: Optional[str] = Field(None, description="Optional session ID for chat memory")
+    user_display_name: Optional[str] = Field(None, description="User's display name for personalization (username, firstName, or email)")
 
 
 class ChatResponse(BaseModel):
@@ -268,7 +270,9 @@ def _generate_content_with_retry(model: genai.GenerativeModel, prompt: str) -> A
 async def chat(
     request: ChatRequest,
     background_tasks: BackgroundTasks,
-    current_user: Dict = Depends(verify_clerk_token)
+    http_request: Request,
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: Optional[GraphService] = Depends(get_graph_optional)
 ) -> ChatResponse:
     """Chat endpoint with RAG and model routing for tenant-isolated queries.
     
@@ -280,7 +284,7 @@ async def chat(
     """
     # Verify tenant membership (tenant_id comes from request body)
     user_id = current_user.get("id", "unknown")
-    await check_tenant_membership(user_id, request.tenant_id)
+    await check_tenant_membership(user_id, request.tenant_id, http_request)
     
     # Log user_id + tenant_id for every request
     print(f"Chat request: user_id={user_id}, tenant_id={request.tenant_id}")
@@ -305,8 +309,8 @@ async def chat(
         try:
             # Parallel execution: Graph and Vector searches
             tasks = []
-            if graph_service:
-                tasks.append(graph_service.search_campaigns_fuzzy(request.query))
+            if graph:
+                tasks.append(graph.search_campaigns_fuzzy(request.query))
             
             # Search Tier 1 with is_global=True filter for Firm Documents
             global_filter = Filter(
@@ -330,7 +334,7 @@ async def chat(
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             # Extract results
-            if graph_service and len(results) > 0:
+            if graph and len(results) > 0:
                 graph_result = results[0]
                 if isinstance(graph_result, str):
                     graph_results = graph_result
@@ -370,8 +374,8 @@ async def chat(
 
         # Parallel execution: Graph and Vector searches
         tasks = []
-        if graph_service:
-            tasks.append(graph_service.search_campaigns_fuzzy(request.query))
+        if graph:
+            tasks.append(graph.search_campaigns_fuzzy(request.query))
         
         # Campaign Mode: Search Tier 2 with client_id filter AND ai_enabled=true
         tasks.append(vector_service.search_silo(
@@ -404,7 +408,7 @@ async def chat(
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
             # Extract results (handle exceptions gracefully)
-            if graph_service and len(results) > 0:
+            if graph and len(results) > 0:
                 graph_result = results[0]
                 if isinstance(graph_result, str):
                     graph_results = graph_result
@@ -426,9 +430,9 @@ async def chat(
                 global_results = []
         except Exception as exc:
             # If parallel execution fails, try sequential as fallback
-            if graph_service:
+            if graph:
                 try:
-                    graph_results = await graph_service.search_campaigns_fuzzy(request.query)
+                    graph_results = await graph.search_campaigns_fuzzy(request.query)
                 except:
                     graph_results = ""
             try:
@@ -461,11 +465,11 @@ async def chat(
 
     # Step C: Fetch chat history if session_id provided
     chat_history: List[Dict[str, str]] = []
-    if request.session_id and graph_service:
+    if request.session_id and graph:
         try:
             # Extract user_id from session_id (format: session_{tenantId}_{userId}_{timestamp})
             user_id = _extract_user_id_from_session(request.session_id)
-            chat_history = await graph_service.get_chat_history(
+            chat_history = await graph.get_chat_history(
                 session_id=request.session_id,
                 tenant_id=request.tenant_id,
                 user_id=user_id,
@@ -502,11 +506,14 @@ Instead, say: "I'm looking through the files, but I don't see that specific deta
 Provide helpful guidance based on campaign strategy best practices, even if the specific data isn't in the files.
 """
 
+    # Get user display name for personalization (fallback to "there" if not provided)
+    user_display_name = request.user_display_name or "there"
+    
     system_prompt = f"""You are Riley, a Senior Strategist at RALLY.
 You speak in a **High-Bandwidth, Low-Density** style.
 
 YOUR ROLE:
-You work alongside the user in a Campaign Workspace setting. You're warm, professional, confident, and proactive. You think strategically and connect dots that others might miss.
+You work alongside {user_display_name} in a Campaign Workspace setting. You're warm, professional, confident, and proactive. You think strategically and connect dots that others might miss.
 
 YOUR TONE:
 Confident, collaborative, and punchy. Use bolding to highlight **key metrics** or **names**.
@@ -524,25 +531,55 @@ CITATION PROTOCOL:
 - Example: "According to the Q3 report [[Source: Q3_Report_2024.pdf]], we saw a 15% increase..."
 - **If the answer is NOT in the context provided, explicitly admit it**: "I don't see that specific information in the available documents. However, based on standard RALLY strategy..."
 
-FORMATTING RULES (NON-NEGOTIABLE):
-1. **EMOJI HEADERS:** Start sections with `### 🎯 Header Name`.
-2. **AGGRESSIVE SPACING:** You MUST put a blank line between every single paragraph and every single list item.
-3. **REAL LISTS:** When listing items (like attributes, steps, or insights), you MUST use Markdown bullet points:
+FORMATTING RULES (NON-NEGOTIABLE - SCANNABLE OUTPUT):
+1. **SHORT HEADINGS WITH EMOJIS:** Always use `###` (h3) for section headers with required emojis. Keep header text concise (3-5 words max).
+   - Examples: `### 🧠 Strategic Context`, `### 🔎 Key Insights`, `### 🚀 Next Moves`
+2. **BULLET LISTS REQUIRED:** Key Insights and Next Moves MUST be formatted as bullet lists, not paragraphs:
+   - Correct: `### 🔎 Key Insights\n- **Insight 1:** Description.\n- **Insight 2:** Description.`
+   - Incorrect: `### Key Insights\nParagraph format with multiple sentences...`
+3. **AGGRESSIVE SPACING:** You MUST put a blank line between every single paragraph, list item, and section.
+4. **REAL LISTS:** When listing items (like attributes, steps, or insights), you MUST use Markdown bullet points:
    - Correct: `- **Attribute Name:** The description.`
    - Incorrect: `Attribute Name: The description.`
-4. **INDENTATION:** Never write a list item without the `- ` prefix.
-5. **SHORT BLOCKS:** No paragraph longer than 2 sentences.
-6. **STRUCTURE RULE:** Use Markdown Headers (###) for sections. ALWAYS put TWO blank lines between sections.
+5. **INDENTATION:** Never write a list item without the `- ` prefix.
+6. **AVOID DENSE PARAGRAPHS:** Keep paragraphs to 1-2 sentences max. Use bullet lists instead of long paragraphs unless the user specifically asks for detailed prose.
+7. **STRUCTURE RULE:** Use Markdown Headers (###) for sections. ALWAYS put TWO blank lines between sections.
 
-RESPONSE TEMPLATE:
+RESPONSE TEMPLATE (MANDATORY FORMAT):
+EVERY response MUST follow this exact structure. No exceptions.
+
 Start with a direct answer (1-2 sentences max).
 
-Then, use these sections if applicable:
-- `### 🧠 Strategic Context` (Why this matters, connections to campaign goals)
-- `### 📊 Key Insights` (Cite sources here: `[[Source: ...]]`)
-- `### 🚀 Next Moves` (Actionable recommendations)
+Then ALWAYS include these three sections in this exact order:
 
-Remember: Insert a blank line (`\n\n`) between EVERY section, paragraph, and list item.
+### 🧠 Strategic Context
+1-2 sentences explaining why this matters and connections to campaign goals.
+
+### 🔎 Key Insights
+MUST be formatted as a bullet list:
+- **Insight 1:** Description with citation `[[Source: ...]]` if applicable.
+- **Insight 2:** Description with citation `[[Source: ...]]` if applicable.
+- **Insight 3:** Description with citation `[[Source: ...]]` if applicable.
+
+If no documents were retrieved, include ONE bullet: `- No documents retrieved from the archive for this query.`
+
+### 🚀 Next Moves
+MUST be formatted as a bullet list:
+- **Action 1:** Specific actionable recommendation.
+- **Action 2:** Specific actionable recommendation.
+- **Action 3:** Specific actionable recommendation.
+
+CRITICAL FORMATTING RULES:
+- Use EXACTLY these emojis: 🧠 for Strategic Context, 🔎 for Key Insights, 🚀 for Next Moves
+- Put a blank line (`\n\n`) between EVERY section
+- Strategic Context: 1-2 sentences only (no dense paragraphs)
+- Key Insights and Next Moves: ALWAYS bullet lists, never paragraphs
+- If you have no insights, still include the section with: `- No specific insights available.`
+
+PLACEHOLDER TOKEN PROHIBITION:
+- **NEVER output placeholder tokens** like `[User Name]`, `[Filename]`, or `[[Source: ...]]` unless you are actually citing a real source from the context.
+- Only use `[[Source: Filename.pdf]]` when you are referencing information that was actually retrieved from the Document Archive.
+- If no sources were used, do not include citation placeholders.
 
 DATA SOURCES (TWO MEMORY BANKS):
 You have access to two memory banks:
@@ -613,12 +650,12 @@ Context Data:
         ) from exc
 
     # Step G: Save messages to Neo4j using background tasks (non-blocking)
-    if request.session_id and graph_service:
+    if request.session_id and graph:
         # Extract user_id from session_id (format: session_{tenantId}_{userId}_{timestamp})
         user_id = _extract_user_id_from_session(request.session_id)
         
         background_tasks.add_task(
-            graph_service.save_message,
+            graph.save_message,
             request.session_id,
             "user",
             request.query,
@@ -626,7 +663,7 @@ Context Data:
             user_id,
         )
         background_tasks.add_task(
-            graph_service.save_message,
+            graph.save_message,
             request.session_id,
             "model",
             response_text,
@@ -643,22 +680,19 @@ Context Data:
 
 @router.get("/chat/history/{session_id}", response_model=List[MessageSchema])
 async def get_chat_session_history(
-    session_id: str, tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation")
+    session_id: str,
+    tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
+    graph: GraphService = Depends(get_graph)
 ) -> List[MessageSchema]:
     """Retrieve chat history for a specific session.
     
     SECURITY: Requires tenant_id to enforce scope isolation.
     Only returns messages for the specified tenant and user.
     """
-    if not graph_service:
-        raise HTTPException(
-            status_code=503, detail="Graph service is not available"
-        )
-    
     try:
         # Extract user_id from session_id (format: session_{tenantId}_{userId}_{timestamp})
         user_id = _extract_user_id_from_session(session_id)
-        history = await graph_service.get_chat_history(
+        history = await graph.get_chat_history(
             session_id=session_id,
             tenant_id=tenant_id,
             user_id=user_id,
@@ -673,7 +707,9 @@ async def get_chat_session_history(
 
 @router.delete("/chat/history/{session_id}")
 async def clear_chat_history(
-    session_id: str, tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation")
+    session_id: str,
+    tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
+    graph: GraphService = Depends(get_graph)
 ) -> Dict[str, str]:
     """Clear chat history for a session.
     
@@ -683,15 +719,10 @@ async def clear_chat_history(
     SECURITY: Requires tenant_id to enforce scope isolation.
     Only deletes sessions for the specified tenant and user.
     """
-    if not graph_service:
-        raise HTTPException(
-            status_code=503, detail="Graph service is not available"
-        )
-    
     try:
         # Extract user_id from session_id (format: session_{tenantId}_{userId}_{timestamp})
         user_id = _extract_user_id_from_session(session_id)
-        await graph_service.clear_chat_history(
+        await graph.clear_chat_history(
             session_id=session_id,
             tenant_id=tenant_id,
             user_id=user_id
@@ -711,7 +742,8 @@ async def clear_chat_history(
 async def rename_session(
     session_id: str,
     tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
-    request: RenameRequest = ...
+    request: RenameRequest = ...,
+    graph: GraphService = Depends(get_graph)
 ) -> Dict[str, str]:
     """Rename a chat session.
     
@@ -728,15 +760,10 @@ async def rename_session(
     Returns:
         Dictionary with status and updated title
     """
-    if not graph_service:
-        raise HTTPException(
-            status_code=503, detail="Graph service is not available"
-        )
-    
     try:
         # Extract user_id from session_id (format: session_{tenantId}_{userId}_{timestamp})
         user_id = _extract_user_id_from_session(session_id)
-        updated_title = await graph_service.update_session_title(
+        updated_title = await graph.update_session_title(
             session_id=session_id,
             tenant_id=tenant_id,
             user_id=user_id,

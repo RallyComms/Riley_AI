@@ -476,7 +476,7 @@ export default function CampaignAssetsPage() {
         throw new Error("Authentication required");
       }
       
-      await apiFetch(`/api/v1/files/${promotingAsset.id}/archive`, {
+      await apiFetch(`/api/v1/files/${promotingAsset.id}/archive?tenant_id=${encodeURIComponent(campaignId)}`, {
         token,
         method: "POST",
         body: { is_golden: isGolden },
@@ -586,6 +586,7 @@ export default function CampaignAssetsPage() {
                         onClick={handleAssetClick}
                         onRename={setRenamingAsset}
                         onPromote={setPromotingAsset}
+                        campaignId={campaignId}
                       />
                     ))
                   )}

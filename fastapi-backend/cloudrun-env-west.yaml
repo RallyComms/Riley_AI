@@ -1,0 +1,15 @@
+ALLOWED_ORIGINS: "https://rileyplatform.com,https://www.rileyplatform.com"
+
+# Clerk (must exist or middleware will crash)
+CLERK_JWKS_URL: "https://clerk.rileyplatform.com/.well-known/jwks.json"
+CLERK_ISSUER: "https://clerk.rileyplatform.com"
+
+# Neo4j (auth disabled on VM)
+NEO4J_URI: "bolt://10.138.0.2:7687"
+
+# Qdrant
+QDRANT_COLLECTION_TIER_1: "riley_campaigns_768"
+QDRANT_COLLECTION_TIER_2: "riley_production_v1"
+
+# (Optional) keep if your app expects it
+GCS_BUCKET_NAME: "riley-platform-assets-live"

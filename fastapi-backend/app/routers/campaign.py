@@ -3,7 +3,8 @@ from fastapi import APIRouter, HTTPException, Depends, Query, status
 from pydantic import BaseModel, Field
 
 from app.dependencies.auth import verify_tenant_access, verify_clerk_token
-from app.services.graph import graph_service
+from app.dependencies.graph_dep import get_graph
+from app.services.graph import GraphService
 from app.services.qdrant import vector_service
 from app.services.storage import StorageService
 from app.services.clerk_directory import find_user_by_email
@@ -67,23 +68,18 @@ class MembersListResponse(BaseModel):
 @router.post("/campaigns", response_model=CampaignResponse)
 async def create_campaign(
     request: CreateCampaignRequest,
-    current_user: Dict = Depends(verify_clerk_token)
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph)
 ) -> CampaignResponse:
     """Create a new campaign and add the current user as Lead member.
     
     The creator is automatically added as a member with role "Lead".
     Returns the created campaign with the user's role.
     """
-    if graph_service is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Graph service not initialized"
-        )
-    
     user_id = current_user.get("id", "unknown")
     
     try:
-        campaign = await graph_service.create_campaign(
+        campaign = await graph.create_campaign(
             name=request.name,
             description=request.description,
             user_id=user_id
@@ -98,22 +94,17 @@ async def create_campaign(
 
 @router.get("/campaigns", response_model=CampaignsListResponse)
 async def get_campaigns(
-    current_user: Dict = Depends(verify_clerk_token)
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph)
 ) -> CampaignsListResponse:
     """Get all campaigns that the current user is a member of.
     
     Returns a list of campaigns with the user's role in each campaign.
     """
-    if graph_service is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Graph service not initialized"
-        )
-    
     user_id = current_user.get("id", "unknown")
     
     try:
-        campaigns = await graph_service.get_user_campaigns(user_id)
+        campaigns = await graph.get_user_campaigns(user_id)
         return CampaignsListResponse(
             campaigns=[CampaignResponse(**camp) for camp in campaigns]
         )
@@ -182,7 +173,8 @@ async def get_team_messages(
     id: str,
     since: Optional[str] = Query(None, description="ISO timestamp - only return messages after this time"),
     limit: int = Query(50, ge=1, le=100, description="Maximum number of messages to return"),
-    current_user: Dict = Depends(verify_tenant_access)
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph)
 ) -> TeamMessagesResponse:
     """Get team messages for a campaign.
     
@@ -198,14 +190,8 @@ async def get_team_messages(
     Returns:
         List of team messages ordered chronologically (oldest -> newest)
     """
-    if graph_service is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Graph service not initialized"
-        )
-    
     try:
-        messages = await graph_service.get_team_messages(
+        messages = await graph.get_team_messages(
             campaign_id=id,
             limit=limit,
             since=since
@@ -225,7 +211,8 @@ async def get_team_messages(
 async def post_team_message(
     id: str,
     request: PostMessageRequest,
-    current_user: Dict = Depends(verify_tenant_access)
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph)
 ) -> TeamMessageResponse:
     """Post a team message to a campaign.
     
@@ -241,14 +228,8 @@ async def post_team_message(
     Returns:
         Created message object
     """
-    if graph_service is None:
-        raise HTTPException(
-            status_code=503,
-            detail="Graph service not initialized"
-        )
-    
     try:
-        message = await graph_service.post_team_message(
+        message = await graph.post_team_message(
             campaign_id=id,
             user=current_user,
             content=request.content
@@ -270,7 +251,8 @@ async def post_team_message(
 @router.get("/campaigns/{id}/members", response_model=MembersListResponse)
 async def get_campaign_members(
     id: str,
-    current_user: Dict = Depends(verify_tenant_access)
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph)
 ) -> MembersListResponse:
     """Get all members of a campaign.
     
@@ -284,14 +266,8 @@ async def get_campaign_members(
     Returns:
         List of campaign members with their roles
     """
-    if graph_service is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Graph service not initialized"
-        )
-    
     try:
-        members = await graph_service.list_campaign_members(campaign_id=id)
+        members = await graph.list_campaign_members(campaign_id=id)
         return MembersListResponse(
             members=[MemberResponse(**member) for member in members]
         )
@@ -306,7 +282,8 @@ async def get_campaign_members(
 async def add_campaign_member(
     id: str,
     request: AddMemberRequest,
-    current_user: Dict = Depends(verify_tenant_access)
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph)
 ) -> MembersListResponse:
     """Add a member to a campaign.
     
@@ -324,12 +301,6 @@ async def add_campaign_member(
     Returns:
         Updated list of campaign members
     """
-    if graph_service is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Graph service not initialized"
-        )
-    
     user_id = current_user.get("id", "unknown")
     
     # Validate role
@@ -341,7 +312,7 @@ async def add_campaign_member(
     
     # Check if requester is Lead
     try:
-        requester_role = await graph_service.get_member_role(user_id, id)
+        requester_role = await graph.get_member_role(user_id, id)
         if requester_role != "Lead":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -373,7 +344,7 @@ async def add_campaign_member(
     
     # Add member to campaign
     try:
-        await graph_service.add_campaign_member(
+        await graph.add_campaign_member(
             campaign_id=id,
             target_user_id=clerk_user["id"],
             target_email=clerk_user["email"],
@@ -392,7 +363,7 @@ async def add_campaign_member(
     
     # Return updated member list
     try:
-        members = await graph_service.list_campaign_members(campaign_id=id)
+        members = await graph.list_campaign_members(campaign_id=id)
         return MembersListResponse(
             members=[MemberResponse(**member) for member in members]
         )
@@ -407,7 +378,8 @@ async def add_campaign_member(
 async def remove_campaign_member(
     id: str,
     user_id: str,
-    current_user: Dict = Depends(verify_tenant_access)
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph)
 ) -> MembersListResponse:
     """Remove a member from a campaign.
     
@@ -423,17 +395,11 @@ async def remove_campaign_member(
     Returns:
         Updated list of campaign members
     """
-    if graph_service is None:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Graph service not initialized"
-        )
-    
     requester_id = current_user.get("id", "unknown")
     
     # Check if requester is Lead
     try:
-        requester_role = await graph_service.get_member_role(requester_id, id)
+        requester_role = await graph.get_member_role(requester_id, id)
         if requester_role != "Lead":
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -449,7 +415,7 @@ async def remove_campaign_member(
     
     # Remove member from campaign
     try:
-        await graph_service.remove_campaign_member(
+        await graph.remove_campaign_member(
             campaign_id=id,
             target_user_id=user_id
         )
@@ -466,7 +432,7 @@ async def remove_campaign_member(
     
     # Return updated member list
     try:
-        members = await graph_service.list_campaign_members(campaign_id=id)
+        members = await graph.list_campaign_members(campaign_id=id)
         return MembersListResponse(
             members=[MemberResponse(**member) for member in members]
         )

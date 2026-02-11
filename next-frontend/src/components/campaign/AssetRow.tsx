@@ -33,6 +33,8 @@ interface AssetRowProps {
   onClick?: (asset: Asset) => void;
   onRename?: (asset: Asset) => void;
   onPromote?: (asset: Asset) => void;
+  // Current campaign / tenant context for this asset row
+  campaignId: string;
 }
 
 // Helper function to determine if file type supports AI processing
@@ -121,7 +123,7 @@ function formatFilename(name: string): string {
   return name;
 }
 
-export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabledChange, onClick, onRename, onPromote }: AssetRowProps) {
+export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabledChange, onClick, onRename, onPromote, campaignId }: AssetRowProps) {
   const { getToken } = useAuth();
   const { icon: FileIcon, color: iconColor } = getFileIcon(asset.type);
   const [isUpdatingTags, setIsUpdatingTags] = useState(false);
@@ -147,7 +149,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
         throw new Error("Authentication required");
       }
       
-      await apiFetch(`/api/v1/files/${asset.id}/tags`, {
+      await apiFetch(`/api/v1/files/${asset.id}/tags?tenant_id=${encodeURIComponent(campaignId)}`, {
         token,
         method: "PUT",
         body: { tags: newTags },

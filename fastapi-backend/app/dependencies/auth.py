@@ -22,7 +22,8 @@ from app.core.config import get_settings
 _jwks_cache: TTLCache = TTLCache(maxsize=10, ttl=600)  # 10 minutes = 600 seconds
 
 # HTTP Bearer token security scheme
-http_bearer = HTTPBearer(auto_error=True)
+# auto_error=False allows OPTIONS preflight requests to proceed without Authorization header
+http_bearer = HTTPBearer(auto_error=False)
 
 
 def _get_jwks_url() -> str:
@@ -110,33 +111,55 @@ def _get_signing_key(jwks: Dict, kid: str) -> Optional[Dict]:
 
 
 async def verify_clerk_token(
-    credentials: HTTPAuthorizationCredentials = Depends(http_bearer)
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))
 ) -> Dict:
     """Verify Clerk JWT token and return user information.
     
     This dependency:
-    1. Extracts the Bearer token from Authorization header
-    2. Determines JWKS URL from environment variables
-    3. Fetches and caches JWKS
-    4. Decodes JWT header to get key ID (kid)
-    5. Selects the correct key from JWKS
-    6. Verifies JWT signature, expiration, and issuer
-    7. Returns user information dictionary
+    1. Bypasses authentication for OPTIONS preflight requests (returns minimal user dict)
+    2. Extracts the Bearer token from Authorization header
+    3. Determines JWKS URL from environment variables
+    4. Fetches and caches JWKS
+    5. Decodes JWT header to get key ID (kid)
+    6. Selects the correct key from JWKS
+    7. Verifies JWT signature, expiration, and issuer
+    8. Returns user information dictionary
     
     Args:
-        credentials: HTTP Bearer token credentials from Authorization header
+        request: FastAPI Request object to check method for OPTIONS preflight
+        credentials: HTTP Bearer token credentials from Authorization header (None for OPTIONS)
         
     Returns:
         Dictionary with:
-        - "id": User ID (sub claim)
-        - "email": User email (email claim, if present)
-        - "raw": Full decoded JWT claims
+        - "id": User ID (sub claim) or "preflight" for OPTIONS requests
+        - "email": User email (email claim, if present) or None for OPTIONS
+        - "raw": Full decoded JWT claims or empty dict for OPTIONS
         
     Raises:
-        HTTPException(401): If token is invalid, expired, or missing
+        HTTPException(401): If token is invalid, expired, or missing (non-OPTIONS requests)
         HTTPException(503): If JWKS cannot be fetched
         RuntimeError: If Clerk configuration is missing
+        
+    Manual Test:
+        OPTIONS /api/v1/campaigns with headers:
+        - Origin: http://localhost:3000
+        - Access-Control-Request-Method: POST
+        - Access-Control-Request-Headers: authorization,content-type
+        Should return 200 (not 400/401) with CORS headers.
     """
+    # CORS preflight bypass: OPTIONS requests don't require authentication
+    # The CORS middleware will handle the preflight response with proper headers
+    if request.method == "OPTIONS":
+        return {"id": "preflight", "email": None}
+    
+    # For non-OPTIONS requests, credentials must be provided
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated"
+        )
+    
     token = credentials.credentials
     
     try:
@@ -333,17 +356,18 @@ async def verify_tenant_access(
     if tenant_id is None:
         return user
     
-    # Import here to avoid circular imports
-    from app.services.graph import graph_service
+    # Get graph service from app.state
+    from app.services.graph import GraphService
+    graph: GraphService = getattr(request.app.state, "graph", None)
     
-    if graph_service is None:
+    if graph is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Graph service not initialized"
         )
     
     # Check membership
-    is_member = await graph_service.check_membership(user["id"], tenant_id)
+    is_member = await graph.check_membership(user["id"], tenant_id)
     
     if not is_member:
         raise HTTPException(
@@ -354,7 +378,7 @@ async def verify_tenant_access(
     return user
 
 
-async def check_tenant_membership(user_id: str, tenant_id: str) -> None:
+async def check_tenant_membership(user_id: str, tenant_id: str, request: Request) -> None:
     """Helper function to check tenant membership after body is parsed.
     
     Use this in endpoints where tenant_id comes from the request body
@@ -363,19 +387,21 @@ async def check_tenant_membership(user_id: str, tenant_id: str) -> None:
     Args:
         user_id: User ID to check
         tenant_id: Tenant ID to check membership for
+        request: FastAPI Request object to access app.state
         
     Raises:
         HTTPException(403): If user is not a member of the tenant
     """
-    from app.services.graph import graph_service
+    from app.services.graph import GraphService
+    graph: GraphService = getattr(request.app.state, "graph", None)
     
-    if graph_service is None:
+    if graph is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Graph service not initialized"
         )
     
-    is_member = await graph_service.check_membership(user_id, tenant_id)
+    is_member = await graph.check_membership(user_id, tenant_id)
     
     if not is_member:
         raise HTTPException(
