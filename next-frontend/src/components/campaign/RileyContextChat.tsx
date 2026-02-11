@@ -200,10 +200,6 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  // Check for missing requirements (but still render UI with error banner)
-  const missingAuth = !isLoaded || !user;
-  const missingCampaignId = !campaignId;
-  
   // Check if send is enabled and why it might be disabled
   const canSend = input.trim().length > 0 && !isLoading && !missingAuth && !missingCampaignId;
   const sendDisabledReason = missingAuth 
