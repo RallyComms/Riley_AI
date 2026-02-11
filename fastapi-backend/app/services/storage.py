@@ -1,14 +1,21 @@
 """Google Cloud Storage service for file uploads and management."""
 
+import logging
 import os
+from datetime import timedelta
 from typing import List, Optional
 from urllib.parse import urlparse
 
+import google.auth
+import google.auth.transport.requests
 from fastapi import HTTPException, UploadFile
 from google.cloud import storage
 from google.cloud.exceptions import GoogleCloudError
 
 from app.core.config import get_settings
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 
 class StorageService:
@@ -121,26 +128,91 @@ class StorageService:
 
     @classmethod
     async def generate_signed_url(cls, object_name: str, ttl_seconds: int) -> str:
-        """Generate a signed URL for a GCS object."""
-        from datetime import timedelta
-
+        """Generate a V4 signed URL for a GCS object using IAM-based signing.
+        
+        Uses token-based credentials (suitable for Cloud Run) instead of private key files.
+        Requires SIGNING_SERVICE_ACCOUNT_EMAIL to be set in environment or config.
+        
+        Args:
+            object_name: The GCS object name (path within bucket)
+            ttl_seconds: Time-to-live for the signed URL in seconds
+            
+        Returns:
+            Signed URL string
+            
+        Raises:
+            HTTPException: If signing fails or service account email is not configured
+        """
         settings = get_settings()
         client = cls._get_client()
         bucket = client.bucket(settings.GCS_BUCKET_NAME)
         blob = bucket.blob(object_name)
 
         try:
-            url = blob.generate_signed_url(expiration=timedelta(seconds=ttl_seconds))
+            # Get default credentials and project
+            credentials, project = google.auth.default()
+            
+            # Refresh credentials to ensure token is available
+            request = google.auth.transport.requests.Request()
+            credentials.refresh(request)
+            
+            # Determine service account email for signing
+            # Priority: 1) env var, 2) credentials.service_account_email, 3) raise error
+            service_account_email = settings.SIGNING_SERVICE_ACCOUNT_EMAIL
+            
+            if not service_account_email:
+                # Try to get from credentials if available
+                if hasattr(credentials, 'service_account_email') and credentials.service_account_email:
+                    service_account_email = credentials.service_account_email
+                    logger.info(
+                        f"Using service account email from credentials: {service_account_email[:10]}..."
+                    )
+            
+            if not service_account_email:
+                error_msg = (
+                    "SIGNING_SERVICE_ACCOUNT_EMAIL not configured. "
+                    "Set SIGNING_SERVICE_ACCOUNT_EMAIL environment variable to the service account "
+                    "email that has 'Service Account Token Creator' role for IAM-based signed URL generation."
+                )
+                logger.error(f"Signed URL generation failed for object '{object_name}': {error_msg}")
+                raise HTTPException(
+                    status_code=500,
+                    detail=error_msg,
+                )
+            
+            # Generate V4 signed URL using IAM signBlob API
+            # This works with token-based credentials (Cloud Run, GCE, etc.)
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(seconds=ttl_seconds),
+                method="GET",
+                service_account_email=service_account_email,
+                access_token=credentials.token,
+            )
+            
+            logger.debug(
+                f"Generated signed URL for object '{object_name}' "
+                f"(TTL: {ttl_seconds}s, SA: {service_account_email[:10]}...)"
+            )
+            
             return url
+            
+        except HTTPException:
+            # Re-raise HTTP exceptions as-is
+            raise
         except GoogleCloudError as exc:
+            error_msg = f"GCS error generating signed URL for object '{object_name}': {type(exc).__name__}"
+            logger.error(f"{error_msg}: {str(exc)}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to generate signed URL for GCS object: {exc}",
+                detail=error_msg,
             ) from exc
         except Exception as exc:
+            error_msg = f"Unexpected error generating signed URL for object '{object_name}': {type(exc).__name__}"
+            logger.error(f"{error_msg}: {str(exc)}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Unexpected error during signed URL generation: {exc}",
+                detail=error_msg,
             ) from exc
 
     @classmethod

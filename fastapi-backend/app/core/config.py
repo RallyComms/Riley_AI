@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     PREVIEW_BUCKET_PATH_PREFIX: str = "previews"
     SIGN_PREVIEW_URLS: bool = True
     PREVIEW_URL_TTL_SECONDS: int = 3600
+    SIGNING_SERVICE_ACCOUNT_EMAIL: Optional[str] = None  # Service account email for IAM-based signed URLs
 
     # Clerk JWT authentication configuration
     # Either CLERK_JWKS_URL (direct JWKS endpoint) or CLERK_ISSUER (to derive JWKS URL)

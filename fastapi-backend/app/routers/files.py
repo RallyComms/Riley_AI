@@ -3,12 +3,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile, Form, Query, Depends
+from fastapi import APIRouter, HTTPException, UploadFile, Form, Query, Depends, Request
 from pydantic import BaseModel
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
 from app.core.config import get_settings
-from app.dependencies.auth import verify_tenant_access
+from app.dependencies.auth import verify_clerk_token, verify_tenant_access, check_tenant_membership
 from app.services.ocr import run_ocr, is_image_ext
 from app.services.qdrant import vector_service
 from app.services.ingestion import process_upload, delete_file, untag_file, _generate_embedding
@@ -258,9 +258,12 @@ async def list_files(
         files.sort(key=lambda x: x.date, reverse=True)
         
     except Exception as exc:
-        # If Qdrant query fails, return empty list
-        print(f"Error fetching files from Qdrant: {exc}")
-        return FileListResponse(files=[])
+        # If Qdrant query fails, raise HTTPException instead of returning empty list
+        logger.error(f"Error fetching files from Qdrant: {exc}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Error fetching files from Qdrant: {exc}"
+        ) from exc
     
     return FileListResponse(files=files)
 
@@ -416,19 +419,50 @@ async def rename_file(
 @router.delete("/files/{file_id}", response_model=DeleteResponse)
 async def delete_file_endpoint(
     file_id: str,
-    tenant_id: str = Query(..., description="Tenant/client ID that owns this file"),
-    current_user: Dict = Depends(verify_tenant_access)
+    request: Request,
+    current_user: Dict = Depends(verify_clerk_token)
 ) -> DeleteResponse:
     """
     Permanently delete a file from disk, Qdrant, and all workstreams.
     
     This is an irreversible action that removes the file completely.
     
-    SECURITY: Tenant membership is enforced via verify_tenant_access dependency.
+    SECURITY: Tenant membership is enforced by retrieving the file's client_id
+    from Tier 2 and verifying the user has access to that tenant.
     """
     settings = get_settings()
+    user_id = current_user.get("id", "unknown")
     
     try:
+        # Step 1: Retrieve the file point from Tier 2 to get tenant_id from payload
+        points = await vector_service.client.retrieve(
+            collection_name=settings.QDRANT_COLLECTION_TIER_2,
+            ids=[file_id],
+            with_payload=True,
+        )
+        
+        # Step 2: Check if file exists
+        if not points:
+            raise HTTPException(
+                status_code=404,
+                detail=f"File {file_id} not found"
+            )
+        
+        # Step 3: Extract tenant_id from payload.client_id
+        point = points[0]
+        payload = point.payload or {}
+        tenant_id = payload.get("client_id")
+        
+        if not tenant_id:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File {file_id} does not have a client_id in payload"
+            )
+        
+        # Step 4: Verify tenant membership before deleting
+        await check_tenant_membership(user_id, tenant_id, request)
+        
+        # Step 5: Delete the file
         await delete_file(
             file_id=file_id,
             collection_name=settings.QDRANT_COLLECTION_TIER_2

@@ -21,6 +21,10 @@ from app.core.config import get_settings
 # JWKS cache with 10-minute TTL
 _jwks_cache: TTLCache = TTLCache(maxsize=10, ttl=600)  # 10 minutes = 600 seconds
 
+# Tenant membership cache with 5-minute TTL
+# Key: (user_id, tenant_id) tuple, Value: bool (True if allowed, False if not)
+_tenant_membership_cache: TTLCache = TTLCache(maxsize=1000, ttl=300)  # 5 minutes = 300 seconds
+
 # HTTP Bearer token security scheme
 # auto_error=False allows OPTIONS preflight requests to proceed without Authorization header
 http_bearer = HTTPBearer(auto_error=False)
@@ -356,7 +360,21 @@ async def verify_tenant_access(
     if tenant_id is None:
         return user
     
-    # Get graph service from app.state
+    # Check cache first
+    user_id = user["id"]
+    cache_key = (user_id, tenant_id)
+    
+    if cache_key in _tenant_membership_cache:
+        # Cache hit - skip Neo4j check
+        is_member = _tenant_membership_cache[cache_key]
+        if not is_member:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied to campaign {tenant_id}. You are not a member of this campaign."
+            )
+        return user
+    
+    # Cache miss - perform Neo4j check
     from app.services.graph import GraphService
     graph: GraphService = getattr(request.app.state, "graph", None)
     
@@ -367,7 +385,10 @@ async def verify_tenant_access(
         )
     
     # Check membership
-    is_member = await graph.check_membership(user["id"], tenant_id)
+    is_member = await graph.check_membership(user_id, tenant_id)
+    
+    # Store result in cache
+    _tenant_membership_cache[cache_key] = is_member
     
     if not is_member:
         raise HTTPException(
