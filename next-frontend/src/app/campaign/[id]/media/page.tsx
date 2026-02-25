@@ -9,32 +9,7 @@ import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { Asset } from "@app/lib/types";
 import { cn } from "@app/lib/utils";
 import { apiFetch, ApiRequestError } from "@app/lib/api";
-
-// Helper to get file type from extension
-function getFileTypeFromExtension(filename: string): Asset["type"] {
-  const ext = filename.split(".").pop()?.toLowerCase();
-  switch (ext) {
-    case "pdf":
-      return "pdf";
-    case "docx":
-    case "doc":
-      return "docx";
-    case "xlsx":
-    case "xls":
-      return "xlsx";
-    case "pptx":
-    case "ppt":
-      return "pptx";
-    case "jpg":
-    case "jpeg":
-    case "png":
-    case "gif":
-    case "webp":
-      return "img";
-    default:
-      return "img"; // Default to img for media page
-  }
-}
+import { toAsset } from "@app/lib/files";
 
 function getFileIcon(type: Asset["type"]) {
   switch (type) {
@@ -51,10 +26,6 @@ function getFileIcon(type: Asset["type"]) {
     default:
       return { icon: ImageIcon, color: "text-purple-500" };
   }
-}
-
-function isAISupportedType(type: Asset["type"]): boolean {
-  return ["pdf", "docx", "xlsx", "pptx"].includes(type);
 }
 
 export default function MediaPage() {
@@ -100,27 +71,10 @@ export default function MediaPage() {
       // Convert backend file list to Asset format and filter by Media tag
       const fetchedAssets: Asset[] = data.files
         .filter((file: any) => {
-          const tags = file.tags || [];
+          const tags = Array.isArray(file.tags) ? file.tags : [];
           return tags.includes("Media");
         })
-        .map((file: any) => {
-          const fileType = getFileTypeFromExtension(file.name);
-          return {
-            id: file.id || file.name,
-            name: file.name,
-            type: fileType,
-            url: file.url,
-            tags: file.tags || [],
-            uploadDate: new Date(file.date).toISOString().split("T")[0],
-            uploader: "System",
-            size: file.size,
-            urgency: "medium",
-            assignedTo: [],
-            comments: 0,
-            status: "ready" as Asset["status"],
-            aiEnabled: isAISupportedType(fileType),
-          };
-        });
+        .map((file: any) => toAsset(file, { status: "ready" }));
 
       setAssets(fetchedAssets);
     } catch (error) {

@@ -121,6 +121,24 @@ function mapFileType(type: FileData["type"]): string {
   }
 }
 
+function getRenderableUrl(asset: FileData): string | null {
+  const documentTypes: FileData["type"][] = ["pdf", "docx", "xlsx", "pptx"];
+  const isDocument = documentTypes.includes(asset.type);
+  if (isDocument) {
+    return asset.previewUrl || asset.url || null;
+  }
+  return asset.url || null;
+}
+
+function getRenderableType(asset: FileData): FileData["type"] {
+  const documentTypes: FileData["type"][] = ["pdf", "docx", "xlsx", "pptx"];
+  const isDocument = documentTypes.includes(asset.type);
+  if (isDocument && asset.previewUrl) {
+    return "pdf";
+  }
+  return asset.type;
+}
+
 // Memoized DocViewer component to prevent re-renders when parent state changes
 const StableDocViewer = memo(({ documents, config }: { documents: any[]; config: any }) => {
   return (
@@ -146,7 +164,6 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
   const [commentInput, setCommentInput] = useState("");
   const [width, setWidth] = useState(800); // Default width for drawer
   const [isResizing, setIsResizing] = useState(false);
-  const [renderError, setRenderError] = useState<string | null>(null);
   const [zoom, setZoom] = useState(1); // Zoom level (0.5 to 3)
   const commentsEndRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<HTMLDivElement>(null);
@@ -156,8 +173,6 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
   const minWidth = 400;
   const maxWidth = 1200;
   const isModal = variant === "modal";
-  const hasPdfPreview = file.type === "pdf" || file.previewType === "pdf";
-
   // Log preview fields when preview panel opens
   useEffect(() => {
     console.log("asset preview fields", {
@@ -223,21 +238,14 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
     }
   };
 
-  // Decide which URL and type to use for the main viewer (prefer preview PDF)
-  // Only use preview if status is "complete" and URL is present
+  // Decide which URL and type to use for rendering.
   const effectiveUrl = useMemo(() => {
-    if (file.previewStatus === "complete" && file.previewType === "pdf" && file.previewUrl) {
-      return file.previewUrl;
-    }
-    return file.url;
-  }, [file.previewStatus, file.previewType, file.previewUrl, file.url]);
+    return getRenderableUrl(file);
+  }, [file]);
 
   const effectiveType = useMemo<Asset["type"]>(() => {
-    if (file.previewStatus === "complete" && file.previewType === "pdf") {
-      return "pdf";
-    }
-    return file.type;
-  }, [file.previewStatus, file.previewType, file.type]);
+    return getRenderableType(file);
+  }, [file]);
 
   // Memoize documents array to prevent unnecessary recalculations
   const documents = useMemo(() => [
@@ -424,101 +432,57 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
               </div>
               {/* Main viewer area: image, PDF (original or preview), or fallback */}
               <div className="flex-1 overflow-auto bg-zinc-950">
-                {file.type === "img" ? (
+                {file.type === "img" && effectiveUrl ? (
                   <div className="flex items-center justify-center h-full p-6">
                     <img
-                      src={file.url}
+                      src={effectiveUrl}
                       alt={file.name}
                       className="max-h-full max-w-full rounded-lg border border-zinc-800 object-contain"
                     />
                   </div>
-                ) : file.previewStatus === "complete" && file.previewUrl ? (
-                  // Preview complete: render iframe with preview URL
-                  <div className="w-full h-full">
-                    <iframe
-                      src={file.previewUrl}
-                      style={{ width: "100%", height: "70vh" }}
-                      className="border-0"
-                      title={`Preview of ${file.name}`}
-                    />
-                  </div>
-                ) : file.previewStatus === "failed" ? (
-                  // Preview failed: show error and download link
-                  <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-zinc-950">
-                    <div className="max-w-md space-y-4">
-                      <div className="rounded-full bg-red-500/10 p-4 inline-block">
-                        <AlertCircle className="h-12 w-12 text-red-400" />
-                      </div>
-                      <div className="space-y-2">
-                        <h3 className="text-lg font-semibold text-zinc-100">Preview Generation Failed</h3>
-                        {file.previewError && (
-                          <p className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg p-3">
-                            {file.previewError}
-                          </p>
-                        )}
-                      </div>
-                      <div className="flex gap-3 justify-center">
-                        <button
-                          type="button"
-                          onClick={() => window.open(file.url, "_blank")}
-                          className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/50 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 hover:border-zinc-600"
-                        >
-                          <Download className="h-4 w-4" />
-                          Download Original
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                ) : file.previewStatus === "processing" || file.previewStatus === "queued" ? (
-                  // Preview processing/queued: show spinner
+                ) : !effectiveUrl ? (
                   <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-zinc-950">
                     <div className="max-w-md space-y-4">
                       <div className="rounded-full bg-zinc-800/50 p-4 inline-block">
-                        <Loader2 className="h-12 w-12 text-amber-400 animate-spin" />
+                        <AlertCircle className="h-12 w-12 text-zinc-400" />
                       </div>
                       <div className="space-y-2">
-                        <h3 className="text-lg font-semibold text-zinc-100">Generating Preview...</h3>
+                        <h3 className="text-lg font-semibold text-zinc-100">Preview unavailable</h3>
                         <p className="text-sm text-zinc-500">
-                          {file.previewStatus === "processing" ? "Processing your file" : "Preview queued for generation"}
-                        </p>
-                      </div>
-                    </div>
-                  </div>
-                ) : file.previewStatus === null || file.previewStatus === undefined ? (
-                  // Preview not generated yet: show message and refresh button
-                  <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-zinc-950">
-                    <div className="max-w-md space-y-4">
-                      <div className={cn("rounded-full bg-zinc-800/50 p-4 inline-block", iconColor)}>
-                        <FileIcon className="h-12 w-12" />
-                      </div>
-                      <div className="space-y-2">
-                        <h3 className="text-lg font-semibold text-zinc-100">{file.name}</h3>
-                        <p className="text-sm text-zinc-500">
-                          Preview not generated yet
+                          This file cannot be previewed right now.
                         </p>
                       </div>
                       <div className="flex gap-3 justify-center">
                         <button
                           type="button"
-                          onClick={() => window.location.reload()}
-                          className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/50 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 hover:border-zinc-600"
-                        >
-                          <RefreshCw className="h-4 w-4" />
-                          Refresh
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => window.open(file.url, "_blank")}
+                          onClick={handleDownload}
                           className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/50 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 hover:border-zinc-600"
                         >
                           <Download className="h-4 w-4" />
                           Download
                         </button>
+                        <button
+                          type="button"
+                          onClick={handleOpenExternally}
+                          className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/50 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 hover:border-zinc-600"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                          Open in new tab
+                        </button>
                       </div>
                     </div>
                   </div>
-                ) : hasPdfPreview ? (
-                  // Fallback: use DocViewer for PDF previews (legacy support)
+                ) : effectiveType === "pdf" ? (
+                  <div className="w-full h-full">
+                    <iframe
+                      src={effectiveUrl}
+                      style={{ width: "100%", height: "70vh" }}
+                      className="border-0"
+                      title={`Preview of ${file.name}`}
+                    />
+                  </div>
+                ) : (
+                  // Non-image docs: render with DocViewer (docx/xlsx/pptx or non-pdf formats)
                   <div
                     style={{
                       transform: `scale(${zoom})`,
@@ -528,31 +492,6 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
                     }}
                   >
                     <StableDocViewer documents={documents} config={docViewerConfig} />
-                  </div>
-                ) : (
-                  // Fallback: show file info
-                  <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-zinc-950">
-                    <div className="max-w-md space-y-4">
-                      <div className={cn("rounded-full bg-zinc-800/50 p-4 inline-block", iconColor)}>
-                        <FileIcon className="h-12 w-12" />
-                      </div>
-                      <div className="space-y-2">
-                        <h3 className="text-lg font-semibold text-zinc-100">{file.name}</h3>
-                        <p className="text-sm text-zinc-500">
-                          {file.size || "Unknown size"} • Uploaded by {file.uploader || "Unknown"}
-                        </p>
-                      </div>
-                      <div className="flex gap-3 justify-center">
-                        <button
-                          type="button"
-                          onClick={() => window.open(file.url, "_blank")}
-                          className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/50 px-4 py-2 text-sm font-medium text-zinc-100 transition-colors hover:bg-zinc-700 hover:border-zinc-600"
-                        >
-                          <Download className="h-4 w-4" />
-                          Download
-                        </button>
-                      </div>
-                    </div>
                   </div>
                 )}
               </div>

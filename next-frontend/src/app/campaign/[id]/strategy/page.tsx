@@ -10,17 +10,7 @@ import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { AssignmentModal } from "@app/components/campaign/AssignmentModal";
 import { Asset, KanbanCard, KanbanStatus } from "@app/lib/types";
 import { apiFetch } from "@app/lib/api";
-
-// Helper functions
-function getFileTypeFromExtension(filename: string): Asset["type"] {
-  const extension = filename.split(".").pop()?.toLowerCase() || "";
-  if (extension === "pdf") return "pdf";
-  if (extension === "docx" || extension === "doc") return "docx";
-  if (extension === "xlsx" || extension === "xls" || extension === "csv") return "xlsx";
-  if (extension === "pptx" || extension === "ppt") return "pptx";
-  if (["png", "jpg", "jpeg", "webp", "gif", "svg"].includes(extension)) return "img";
-  return "pdf"; // Default
-}
+import { toAsset } from "@app/lib/files";
 
 function isAISupportedType(type: Asset["type"]): boolean {
   return type === "pdf" || type === "docx";
@@ -116,27 +106,10 @@ export default function StrategyPage() {
 
         const fetchedAssets: Asset[] = data.files
           .filter((file: any) => {
-            const tags = file.tags || [];
+            const tags = Array.isArray(file.tags) ? file.tags : [];
             return tags.includes("Strategy");
           })
-          .map((file: any) => {
-            const fileType = getFileTypeFromExtension(file.name);
-            return {
-              id: file.id || file.name,
-              name: file.name,
-              type: fileType,
-              url: file.url,
-              tags: file.tags || [],
-              uploadDate: new Date(file.date).toISOString().split("T")[0],
-              uploader: "System",
-              size: file.size,
-              urgency: "medium",
-              assignedTo: [],
-              comments: 0,
-              status: "in_progress" as Asset["status"],
-              aiEnabled: isAISupportedType(fileType),
-            };
-          });
+          .map((file: any) => toAsset(file, { status: "in_progress" }));
 
         setAssets(fetchedAssets);
       } catch (error) {
@@ -274,7 +247,7 @@ export default function StrategyPage() {
 
   // Handle card click to open viewer
   const handleCardClick = (card: KanbanCard) => {
-    const file = kanbanCardToFile(card);
+    const file = assets.find((asset) => asset.id === card.id) ?? kanbanCardToFile(card);
     setSelectedFile(file);
   };
 
