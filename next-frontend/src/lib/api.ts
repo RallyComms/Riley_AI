@@ -40,6 +40,20 @@ interface ApiFetchOptions {
   headers?: Record<string, string>;
 }
 
+export class ApiRequestError extends Error {
+  status: number;
+  statusText: string;
+  responseBody: unknown;
+
+  constructor(message: string, status: number, statusText: string, responseBody: unknown) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.statusText = statusText;
+    this.responseBody = responseBody;
+  }
+}
+
 /**
  * Unified fetch wrapper for API requests.
  * 
@@ -93,21 +107,40 @@ export async function apiFetch<T = any>(
     const response = await fetch(url, requestOptions);
     
     if (!response.ok) {
-      // Try to parse error detail from response
-      let errorDetail = `HTTP ${response.status}`;
+      // Parse and preserve backend error payload for richer caller logging.
+      let parsedBody: unknown = null;
       try {
-        const errorData = await response.json();
-        if (errorData.detail) {
-          errorDetail = `HTTP ${response.status}: ${errorData.detail}`;
-        } else if (errorData.message) {
-          errorDetail = `HTTP ${response.status}: ${errorData.message}`;
-        }
+        parsedBody = await response.json();
       } catch {
-        // If JSON parse fails, use status text
-        const statusText = response.statusText || "Unknown error";
-        errorDetail = `HTTP ${response.status}: ${statusText}`;
+        try {
+          parsedBody = await response.text();
+        } catch {
+          parsedBody = null;
+        }
       }
-      throw new Error(errorDetail);
+
+      let errorDetail = `HTTP ${response.status}`;
+      if (parsedBody && typeof parsedBody === "object" && parsedBody !== null) {
+        const bodyObject = parsedBody as Record<string, unknown>;
+        if (typeof bodyObject.detail === "string" && bodyObject.detail.trim()) {
+          errorDetail = `HTTP ${response.status}: ${bodyObject.detail}`;
+        } else if (typeof bodyObject.message === "string" && bodyObject.message.trim()) {
+          errorDetail = `HTTP ${response.status}: ${bodyObject.message}`;
+        } else {
+          errorDetail = `HTTP ${response.status}: ${response.statusText || "Request failed"}`;
+        }
+      } else if (typeof parsedBody === "string" && parsedBody.trim()) {
+        errorDetail = `HTTP ${response.status}: ${parsedBody}`;
+      } else {
+        errorDetail = `HTTP ${response.status}: ${response.statusText || "Unknown error"}`;
+      }
+
+      throw new ApiRequestError(
+        errorDetail,
+        response.status,
+        response.statusText || "Unknown error",
+        parsedBody
+      );
     }
     
     // Parse JSON response

@@ -1,14 +1,14 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
-import { Download, Video, Music, Image as ImageIcon, Sparkles, X, Upload, FileText, FileType2, Table, Presentation } from "lucide-react";
+import { Download, Video, Music, Image as ImageIcon, Sparkles, X, Upload, FileText, FileType2, Table, Presentation, Loader2 } from "lucide-react";
 import { RileyContextChat, getRileyTitle } from "@app/components/campaign/RileyContextChat";
 import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { Asset } from "@app/lib/types";
 import { cn } from "@app/lib/utils";
-import { apiFetch } from "@app/lib/api";
+import { apiFetch, ApiRequestError } from "@app/lib/api";
 
 // Helper to get file type from extension
 function getFileTypeFromExtension(filename: string): Asset["type"] {
@@ -59,69 +59,149 @@ function isAISupportedType(type: Asset["type"]): boolean {
 
 export default function MediaPage() {
   const params = useParams();
-  const { getToken } = useAuth();
   const campaignId = params.id as string;
+  const { getToken } = useAuth();
+  if (process.env.NODE_ENV !== "production") {
+    console.log("[MediaPage] campaignId:", campaignId);
+  }
   const [assets, setAssets] = useState<Asset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isUploading, setIsUploading] = useState(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<Asset | null>(null);
-  const fileInputRef = useState<HTMLInputElement | null>(null)[0];
+  const [toast, setToast] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const showToast = useCallback((kind: "success" | "error", message: string) => {
+    setToast({ kind, message });
+    window.setTimeout(() => {
+      setToast((current) => (current?.message === message ? null : current));
+    }, 3200);
+  }, []);
 
   // Fetch files from backend and filter by Media tag
-  useEffect(() => {
-    const fetchFiles = async () => {
-      if (!campaignId) return;
+  const fetchFiles = useCallback(async () => {
+    if (!campaignId) return;
 
-      try {
-        const token = await getToken();
-        if (!token) {
-          throw new Error("Authentication required");
-        }
-        
-        const data = await apiFetch<{ files: any[] }>(
-          `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
-          {
-            token,
-            method: "GET",
-          }
-        );
-
-        // Convert backend file list to Asset format and filter by Media tag
-        const fetchedAssets: Asset[] = data.files
-          .filter((file: any) => {
-            const tags = file.tags || [];
-            return tags.includes("Media");
-          })
-          .map((file: any) => {
-            const fileType = getFileTypeFromExtension(file.name);
-            return {
-              id: file.id || file.name,
-              name: file.name,
-              type: fileType,
-              url: file.url,
-              tags: file.tags || [],
-              uploadDate: new Date(file.date).toISOString().split("T")[0],
-              uploader: "System",
-              size: file.size,
-              urgency: "medium",
-              assignedTo: [],
-              comments: 0,
-              status: "ready" as Asset["status"],
-              aiEnabled: isAISupportedType(fileType),
-            };
-          });
-
-        setAssets(fetchedAssets);
-      } catch (error) {
-        console.error("Error fetching files:", error);
-        setAssets([]);
-      } finally {
-        setIsLoading(false);
+    try {
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
       }
-    };
+        
+      const data = await apiFetch<{ files: any[] }>(
+        `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
+        {
+          token,
+          method: "GET",
+        }
+      );
 
+      // Convert backend file list to Asset format and filter by Media tag
+      const fetchedAssets: Asset[] = data.files
+        .filter((file: any) => {
+          const tags = file.tags || [];
+          return tags.includes("Media");
+        })
+        .map((file: any) => {
+          const fileType = getFileTypeFromExtension(file.name);
+          return {
+            id: file.id || file.name,
+            name: file.name,
+            type: fileType,
+            url: file.url,
+            tags: file.tags || [],
+            uploadDate: new Date(file.date).toISOString().split("T")[0],
+            uploader: "System",
+            size: file.size,
+            urgency: "medium",
+            assignedTo: [],
+            comments: 0,
+            status: "ready" as Asset["status"],
+            aiEnabled: isAISupportedType(fileType),
+          };
+        });
+
+      setAssets(fetchedAssets);
+    } catch (error) {
+      console.error("Error fetching files:", error);
+      setAssets([]);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [campaignId, getToken]);
+
+  useEffect(() => {
     fetchFiles();
-  }, [campaignId]);
+  }, [fetchFiles]);
+
+  const handleUploadClick = () => {
+    if (!isUploading) {
+      fileInputRef.current?.click();
+    }
+  };
+
+  const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (process.env.NODE_ENV !== "production") {
+      console.log("[MediaPage] file select triggered");
+      console.log("[MediaPage] selected file:", event.target.files?.[0]);
+    }
+    const file = event.target.files?.[0];
+    if (!file || !campaignId) {
+      if (process.env.NODE_ENV !== "production") {
+        console.warn("[MediaPage] aborting upload: missing file or campaignId", { file: !!file, campaignId });
+      }
+      return;
+    }
+
+    setIsUploading(true);
+
+    try {
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
+      }
+
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("tenant_id", campaignId);
+      formData.append("tags", "Media");
+
+      if (process.env.NODE_ENV !== "production") {
+        console.log("[upload] FormData keys:", Array.from(formData.keys()));
+        console.log("[upload] selected file:", { name: file.name, size: file.size, type: file.type });
+      }
+
+      const result = await apiFetch<{ id: string; url: string; filename: string; type?: string }>("/api/v1/upload", {
+        token,
+        method: "POST",
+        body: formData,
+      });
+
+      if (process.env.NODE_ENV !== "production") {
+        console.log("[upload] success response:", result);
+      }
+
+      await fetchFiles();
+      showToast("success", `Uploaded "${file.name}" successfully.`);
+    } catch (error) {
+      if (error instanceof ApiRequestError) {
+        console.error("[upload] failed request", {
+          status: error.status,
+          statusText: error.statusText,
+          responseBody: error.responseBody,
+        });
+      } else {
+        console.error("[upload] failed:", error);
+      }
+      showToast("error", `Upload failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+    } finally {
+      setIsUploading(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  };
 
   // Handle viewing an asset from citation badge
   const handleViewAsset = (filename: string) => {
@@ -154,24 +234,22 @@ export default function MediaPage() {
         <header className="flex items-center justify-between p-6 border-b border-zinc-800">
           <h1 className="text-2xl font-bold text-zinc-100">Media Assets</h1>
           <div className="flex items-center gap-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.png,.jpg,.jpeg,.webp,.gif,.svg,.mp4,.webm,.mov,.mp3,.wav,.ogg"
+              onChange={handleFileSelect}
+            />
             {/* Upload Button */}
             <button
-              onClick={() => {
-                const input = document.createElement("input");
-                input.type = "file";
-                input.accept = "image/*,video/*,audio/*";
-                input.onchange = async (e) => {
-                  const file = (e.target as HTMLInputElement).files?.[0];
-                  if (!file) return;
-                  // Upload logic would go here
-                  console.log("Uploading:", file.name);
-                };
-                input.click();
-              }}
+              type="button"
+              onClick={handleUploadClick}
+              disabled={isUploading}
               className="flex items-center gap-2 bg-zinc-800 text-zinc-300 hover:bg-zinc-700 px-4 py-2 rounded-md transition-colors"
             >
-              <Upload className="w-4 h-4" />
-              <span>Upload</span>
+              {isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+              <span>{isUploading ? "Uploading..." : "Upload media"}</span>
             </button>
             {/* THE "OPEN" BUTTON - Only visible if chat is closed */}
             {!isChatOpen && (
@@ -328,6 +406,19 @@ export default function MediaPage() {
           variant="modal"
           onClose={() => setSelectedFile(null)}
         />
+      )}
+      {toast && (
+        <div
+          role="status"
+          className={cn(
+            "fixed right-6 top-6 z-50 rounded-md border px-4 py-3 text-sm shadow-lg backdrop-blur-md",
+            toast.kind === "success"
+              ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-100"
+              : "border-red-500/30 bg-red-500/15 text-red-100"
+          )}
+        >
+          {toast.message}
+        </div>
       )}
     </div>
   );
