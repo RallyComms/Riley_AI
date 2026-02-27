@@ -384,10 +384,93 @@ class GraphService:
                     "id": record["id"],
                     "name": record["name"],
                     "description": record.get("description"),
-                    "role": record["role"]
+                    "role": record["role"],
+                    "access": "member",
                 })
             
             return campaigns
+
+    async def get_all_campaigns_with_access(self, user_id: str) -> List[Dict[str, Any]]:
+        """Return metadata-only campaign list across org with user access status.
+
+        access:
+        - "member" when the user has MEMBER_OF relationship to campaign
+        - "requestable" otherwise
+        """
+        async with self._driver.session() as session:
+            query = """
+            MATCH (c:Campaign)
+            OPTIONAL MATCH (owner:User)-[owner_rel:MEMBER_OF]->(c)
+            WHERE owner_rel.role = "Lead"
+            WITH c, owner
+            OPTIONAL MATCH (me:User {id: $user_id})-[r:MEMBER_OF]->(c)
+            RETURN
+                c.id as id,
+                c.name as name,
+                c.description as description,
+                toString(c.created_at) as created_at,
+                owner.id as owner_id,
+                coalesce(owner.email, owner.id) as owner_name,
+                CASE WHEN r IS NULL THEN "requestable" ELSE "member" END as access,
+                r.role as role
+            ORDER BY c.created_at DESC
+            """
+
+            result = await session.run(query, user_id=user_id)
+            campaigns: List[Dict[str, Any]] = []
+            async for record in result:
+                campaigns.append(
+                    {
+                        "id": record["id"],
+                        "name": record["name"],
+                        "description": record.get("description"),
+                        "role": record.get("role"),
+                        "access": record["access"],
+                        "created_at": record.get("created_at"),
+                        "owner_id": record.get("owner_id"),
+                        "owner_name": record.get("owner_name"),
+                    }
+                )
+            return campaigns
+
+    async def create_access_request(
+        self, tenant_id: str, requester_user_id: str, message: Optional[str] = None
+    ) -> None:
+        """Create or update a pending access request for a campaign."""
+        request_id = str(uuid.uuid4())
+        normalized_message = message.strip() if isinstance(message, str) else None
+        if normalized_message == "":
+            normalized_message = None
+
+        async with self._driver.session() as session:
+            query = """
+            MATCH (c:Campaign {id: $tenant_id})
+            MERGE (u:User {id: $requester_user_id})
+            MERGE (ar:AccessRequest {
+                tenant_id: $tenant_id,
+                requester_user_id: $requester_user_id,
+                status: "pending"
+            })
+            ON CREATE SET
+                ar.id = $request_id,
+                ar.message = $message,
+                ar.created_at = datetime()
+            ON MATCH SET
+                ar.message = coalesce($message, ar.message)
+            MERGE (u)-[:REQUESTED_ACCESS]->(ar)
+            MERGE (ar)-[:FOR_CAMPAIGN]->(c)
+            RETURN ar.id as id
+            """
+            result = await session.run(
+                query,
+                tenant_id=tenant_id,
+                requester_user_id=requester_user_id,
+                request_id=request_id,
+                message=normalized_message,
+            )
+            record = await result.single()
+            if not record:
+                raise ValueError(f"Campaign {tenant_id} not found")
 
     async def check_membership(self, user_id: str, tenant_id: str) -> bool:
         """Check if a user is a member of a campaign (tenant).

@@ -22,11 +22,23 @@ class CampaignResponse(BaseModel):
     id: str
     name: str
     description: Optional[str] = None
-    role: str
+    role: Optional[str] = None
+    access: str = "member"
+    created_at: Optional[str] = None
+    owner_id: Optional[str] = None
+    owner_name: Optional[str] = None
 
 
 class CampaignsListResponse(BaseModel):
     campaigns: List[CampaignResponse]
+
+
+class CreateAccessRequest(BaseModel):
+    message: Optional[str] = Field(None, max_length=500, description="Optional access request message")
+
+
+class AccessRequestResponse(BaseModel):
+    ok: bool
 
 
 class TerminationResponse(BaseModel):
@@ -94,17 +106,23 @@ async def create_campaign(
 
 @router.get("/campaigns", response_model=CampaignsListResponse)
 async def get_campaigns(
+    scope: str = Query("my", pattern="^(my|all)$", description="Visibility scope: my|all"),
     current_user: Dict = Depends(verify_clerk_token),
     graph: GraphService = Depends(get_graph)
 ) -> CampaignsListResponse:
     """Get all campaigns that the current user is a member of.
     
-    Returns a list of campaigns with the user's role in each campaign.
+    Returns campaigns for either:
+    - scope=my: campaigns where user is a member (existing behavior)
+    - scope=all: metadata-only list of all campaigns in org with access indicator
     """
     user_id = current_user.get("id", "unknown")
     
     try:
-        campaigns = await graph.get_user_campaigns(user_id)
+        if scope == "all":
+            campaigns = await graph.get_all_campaigns_with_access(user_id)
+        else:
+            campaigns = await graph.get_user_campaigns(user_id)
         return CampaignsListResponse(
             campaigns=[CampaignResponse(**camp) for camp in campaigns]
         )
@@ -112,6 +130,40 @@ async def get_campaigns(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to retrieve campaigns: {exc}"
+        ) from exc
+
+
+@router.post("/campaigns/{tenant_id}/access-requests", response_model=AccessRequestResponse)
+async def request_campaign_access(
+    tenant_id: str,
+    request: CreateAccessRequest,
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> AccessRequestResponse:
+    """Create a pending access request for a campaign.
+
+    SECURITY:
+    - Requires authentication
+    - Validates campaign exists
+    - Does not grant access to campaign contents
+    """
+    user_id = current_user.get("id", "unknown")
+    try:
+        await graph.create_access_request(
+            tenant_id=tenant_id,
+            requester_user_id=user_id,
+            message=request.message,
+        )
+        return AccessRequestResponse(ok=True)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create access request: {exc}",
         ) from exc
 
 

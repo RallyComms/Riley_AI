@@ -170,9 +170,27 @@ export default function Dashboard() {
     window.location.href = `/campaign/${campaignId}`;
   };
 
-  const handleRequestAccess = (campaignId: string) => {
-    // TODO: Implement access request API call
-    console.log("Requesting access to campaign:", campaignId);
+  const handleRequestAccess = async (campaignId: string, message?: string) => {
+    try {
+      const token = await getToken();
+      if (!token) {
+        throw new Error("No authentication token available");
+      }
+      await apiFetch(`/api/v1/campaigns/${encodeURIComponent(campaignId)}/access-requests`, {
+        token,
+        method: "POST",
+        body: { message: message || null },
+      });
+      alert("Access request submitted.");
+    } catch (err) {
+      console.error("Request access error:", err);
+      alert(
+        `Failed to submit access request: ${
+          err instanceof Error ? err.message : "Unknown error"
+        }`
+      );
+      throw err;
+    }
   };
 
   const handleArchive = (campaignId: string) => {

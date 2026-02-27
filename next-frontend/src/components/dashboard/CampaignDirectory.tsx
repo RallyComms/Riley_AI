@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import Link from "next/link";
 import { GlobalDocsList } from "./GlobalDocsList";
 import { CampaignBucketCard } from "@app/components/campaign/CampaignBucketCard";
+import { AccessRequestModal } from "./AccessRequestModal";
 import { Asset } from "@app/lib/types";
 import { apiFetch } from "@app/lib/api";
 
@@ -16,7 +17,11 @@ interface BackendCampaign {
   id: string;
   name: string;
   description: string | null;
-  role: "Lead" | "Member";
+  role?: "Lead" | "Member";
+  access: "member" | "requestable";
+  created_at?: string | null;
+  owner_id?: string | null;
+  owner_name?: string | null;
 }
 
 interface CampaignsResponse {
@@ -32,6 +37,8 @@ interface UserCampaign {
   userRole?: "Lead" | "Member";
   themeColor: string;
   campaignId: string;
+  access: "member" | "requestable";
+  ownerName?: string;
 }
 
 // Theme colors for campaigns (rotating assignment)
@@ -67,6 +74,8 @@ function mapBackendToFrontend(
     userRole: backendCampaign.role,
     themeColor,
     campaignId: backendCampaign.id,
+    access: backendCampaign.access,
+    ownerName: backendCampaign.owner_name ?? undefined,
   };
 }
 
@@ -76,7 +85,7 @@ interface CampaignDirectoryProps {
   userCampaigns?: UserCampaign[];
   archivedCampaigns?: UserCampaign[];
   onEnterCampaign?: (campaignId: string) => void;
-  onRequestAccess?: (campaignId: string) => void;
+  onRequestAccess?: (campaignId: string, message?: string) => Promise<void>;
   onRestore?: (campaignId: string) => void;
   onTerminate?: (campaignId: string) => Promise<void>;
   terminatingCampaignId?: string | null;
@@ -99,11 +108,14 @@ export function CampaignDirectory({
   const { getToken, isLoaded } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
   const [activeTab, setActiveTab] = useState<"campaigns" | "archive" | "documents">("campaigns");
+  const [campaignScope, setCampaignScope] = useState<"my" | "all">("my");
   
   // State for fetched campaigns
   const [campaigns, setCampaigns] = useState<UserCampaign[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [requestedCampaignIds, setRequestedCampaignIds] = useState<Set<string>>(new Set());
+  const [requestingCampaign, setRequestingCampaign] = useState<UserCampaign | null>(null);
 
   // Fetch campaigns from API
   useEffect(() => {
@@ -129,7 +141,7 @@ export function CampaignDirectory({
           throw new Error("No authentication token available");
         }
 
-        const data: CampaignsResponse = await apiFetch("/api/v1/campaigns", {
+        const data: CampaignsResponse = await apiFetch(`/api/v1/campaigns?scope=${campaignScope}`, {
           token,
           method: "GET",
         });
@@ -151,7 +163,7 @@ export function CampaignDirectory({
     }
 
     fetchCampaigns();
-  }, [isOpen, isLoaded, user?.id, getToken]);
+  }, [isOpen, isLoaded, user?.id, getToken, campaignScope]);
 
   // Filter campaigns by search query
   const filteredCampaigns = useMemo(() => {
@@ -169,6 +181,13 @@ export function CampaignDirectory({
     if (onEnterCampaign) {
       onEnterCampaign(campaignId);
     }
+  };
+
+  const handleRequestAccess = async (message: string) => {
+    if (!requestingCampaign || !onRequestAccess) return;
+    await onRequestAccess(requestingCampaign.campaignId, message);
+    setRequestedCampaignIds((prev) => new Set(prev).add(requestingCampaign.campaignId));
+    setRequestingCampaign(null);
   };
 
   if (!isOpen) return null;
@@ -278,6 +297,28 @@ export function CampaignDirectory({
                     className="flex-1 bg-transparent text-zinc-100 placeholder:text-zinc-500 focus:outline-none"
                   />
                 </div>
+                <div className="mt-3 inline-flex rounded-lg border border-zinc-800 bg-zinc-950/50 p-1">
+                  <button
+                    type="button"
+                    onClick={() => setCampaignScope("my")}
+                    className={cn(
+                      "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+                      campaignScope === "my" ? "bg-amber-400 text-zinc-900" : "text-zinc-400 hover:text-zinc-200"
+                    )}
+                  >
+                    My Campaigns
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCampaignScope("all")}
+                    className={cn(
+                      "rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
+                      campaignScope === "all" ? "bg-amber-400 text-zinc-900" : "text-zinc-400 hover:text-zinc-200"
+                    )}
+                  >
+                    All Campaigns
+                  </button>
+                </div>
               </div>
 
               {/* Content - Scrollable Grid */}
@@ -320,22 +361,43 @@ export function CampaignDirectory({
                 {!isLoading && !error && filteredCampaigns.length > 0 && (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                     {filteredCampaigns.map((campaign) => (
-                      <CampaignBucketCard
-                        key={campaign.campaignId}
-                        name={campaign.name}
-                        role={campaign.role}
-                        lastActive={campaign.lastActive}
-                        mentions={campaign.mentions}
-                        pendingRequests={campaign.pendingRequests}
-                        userRole={campaign.userRole}
-                        themeColor={campaign.themeColor}
-                        campaignId={campaign.campaignId}
-                        isArchived={false}
-                        onArchive={undefined}
-                        onRestore={undefined}
-                        onTerminate={onTerminate}
-                        isTerminating={terminatingCampaignId === campaign.campaignId}
-                      />
+                      <div key={campaign.campaignId} className="space-y-2">
+                        <CampaignBucketCard
+                          name={campaign.name}
+                          role={campaign.access === "member" ? campaign.role : "Access request required"}
+                          lastActive={campaign.lastActive}
+                          mentions={campaign.mentions}
+                          pendingRequests={campaign.pendingRequests}
+                          userRole={campaign.userRole}
+                          themeColor={campaign.themeColor}
+                          campaignId={campaign.campaignId}
+                          isArchived={false}
+                          onClick={
+                            campaign.access === "member"
+                              ? () => handleEnterCampaign(campaign.campaignId)
+                              : () => {}
+                          }
+                          onArchive={undefined}
+                          onRestore={undefined}
+                          onTerminate={onTerminate}
+                          isTerminating={terminatingCampaignId === campaign.campaignId}
+                        />
+                        {campaign.access !== "member" && (
+                          <button
+                            type="button"
+                            disabled={requestedCampaignIds.has(campaign.campaignId)}
+                            onClick={() => setRequestingCampaign(campaign)}
+                            className={cn(
+                              "w-full rounded-lg border px-3 py-2 text-sm font-medium transition-colors",
+                              requestedCampaignIds.has(campaign.campaignId)
+                                ? "cursor-not-allowed border-zinc-700 bg-zinc-800/50 text-zinc-400"
+                                : "border-amber-500/40 bg-amber-500/15 text-amber-300 hover:bg-amber-500/25"
+                            )}
+                          >
+                            {requestedCampaignIds.has(campaign.campaignId) ? "Requested" : "Request access"}
+                          </button>
+                        )}
+                      </div>
                     ))}
                   </div>
                 )}
@@ -398,6 +460,12 @@ export function CampaignDirectory({
             <GlobalDocsList onViewDocument={onViewDocument} />
           )}
         </motion.div>
+        <AccessRequestModal
+          isOpen={!!requestingCampaign}
+          campaignName={requestingCampaign?.name || ""}
+          onClose={() => setRequestingCampaign(null)}
+          onSubmit={handleRequestAccess}
+        />
       </div>
     </AnimatePresence>
   );
