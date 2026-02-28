@@ -15,7 +15,11 @@ interface BackendCampaign {
   id: string;
   name: string;
   description: string | null;
-  role: "Lead" | "Member";
+  role?: "Lead" | "Member";
+  access: "member" | "requestable";
+  created_at?: string | null;
+  owner_id?: string | null;
+  owner_name?: string | null;
 }
 
 interface CampaignsResponse {
@@ -34,6 +38,19 @@ interface CampaignBucket {
   campaignId: string;
 }
 
+interface UserCampaign {
+  name: string;
+  role: string;
+  lastActive: string;
+  mentions: number;
+  pendingRequests?: number;
+  userRole?: "Lead" | "Member";
+  themeColor: string;
+  campaignId: string;
+  access: "member" | "requestable";
+  ownerName?: string;
+}
+
 // Theme colors for campaigns (rotating assignment)
 const THEME_COLORS = [
   "#0f766e", // Teal
@@ -44,11 +61,11 @@ const THEME_COLORS = [
   "#facc15", // Amber
 ];
 
-// Map backend campaign to frontend shape
-function mapBackendToFrontend(
+// Map backend campaign to directory shape
+function mapBackendToUserCampaign(
   backendCampaign: BackendCampaign,
   index: number
-): CampaignBucket {
+): UserCampaign {
   // Generate role display text based on user role
   const roleDisplay =
     backendCampaign.role === "Lead"
@@ -69,6 +86,21 @@ function mapBackendToFrontend(
     userRole: backendCampaign.role,
     themeColor,
     campaignId: backendCampaign.id,
+    access: backendCampaign.access,
+    ownerName: backendCampaign.owner_name ?? undefined,
+  };
+}
+
+function mapUserCampaignToBucket(campaign: UserCampaign): CampaignBucket {
+  return {
+    name: campaign.name,
+    role: campaign.role,
+    lastActive: campaign.lastActive,
+    mentions: campaign.mentions,
+    pendingRequests: campaign.pendingRequests ?? 0,
+    userRole: campaign.userRole ?? "Member",
+    themeColor: campaign.themeColor,
+    campaignId: campaign.campaignId,
   };
 }
 
@@ -76,6 +108,7 @@ export default function Dashboard() {
   const { user } = useUser();
   const { getToken, isLoaded } = useAuth();
   const [campaigns, setCampaigns] = useState<CampaignBucket[]>([]);
+  const [directoryCampaigns, setDirectoryCampaigns] = useState<UserCampaign[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
@@ -96,6 +129,7 @@ export default function Dashboard() {
         setIsLoading(false);
         setError(null);
         setCampaigns([]);
+        setDirectoryCampaigns([]);
         return;
       }
 
@@ -114,9 +148,10 @@ export default function Dashboard() {
         });
         
         const mappedCampaigns = data.campaigns.map((campaign, index) =>
-          mapBackendToFrontend(campaign, index)
+          mapBackendToUserCampaign(campaign, index)
         );
-        setCampaigns(mappedCampaigns);
+        setDirectoryCampaigns(mappedCampaigns);
+        setCampaigns(mappedCampaigns.map(mapUserCampaignToBucket));
       } catch (err) {
         console.error("Error fetching campaigns:", err);
         // Preserve exact error message from apiFetch (includes status codes if available)
@@ -126,6 +161,7 @@ export default function Dashboard() {
         setError(errorMessage);
         // Clear campaigns on error to ensure we don't show stale data
         setCampaigns([]);
+        setDirectoryCampaigns([]);
       } finally {
         setIsLoading(false);
       }
@@ -137,6 +173,20 @@ export default function Dashboard() {
   const handleCampaignCreated = (newCampaign: CampaignBucket) => {
     // Optimistically add the new campaign to the list
     setCampaigns((prev) => [newCampaign, ...prev]);
+    setDirectoryCampaigns((prev) => [
+      {
+        name: newCampaign.name,
+        role: newCampaign.role,
+        lastActive: newCampaign.lastActive,
+        mentions: newCampaign.mentions,
+        pendingRequests: newCampaign.pendingRequests,
+        userRole: newCampaign.userRole,
+        themeColor: newCampaign.themeColor,
+        campaignId: newCampaign.campaignId,
+        access: "member",
+      },
+      ...prev,
+    ]);
     setIsCreateModalOpen(false);
     
     // Optionally re-fetch in background to ensure consistency
@@ -152,9 +202,10 @@ export default function Dashboard() {
             method: "GET",
           });
           const mappedCampaigns = data.campaigns.map((campaign, index) =>
-            mapBackendToFrontend(campaign, index)
+            mapBackendToUserCampaign(campaign, index)
           );
-          setCampaigns(mappedCampaigns);
+          setDirectoryCampaigns(mappedCampaigns);
+          setCampaigns(mappedCampaigns.map(mapUserCampaignToBucket));
         } catch {
           // Silently fail - optimistic update already succeeded
         }
@@ -227,6 +278,7 @@ export default function Dashboard() {
 
       // Optimistically remove from UI
       setCampaigns((prev) => prev.filter((c) => c.campaignId !== campaignId));
+      setDirectoryCampaigns((prev) => prev.filter((c) => c.campaignId !== campaignId));
     } catch (err) {
       console.error("Termination error:", err);
       alert(
@@ -343,7 +395,7 @@ export default function Dashboard() {
       <CampaignDirectory
         isOpen={isDirectoryOpen}
         onClose={() => setIsDirectoryOpen(false)}
-        userCampaigns={campaigns}
+        userCampaigns={directoryCampaigns}
         archivedCampaigns={[]}
         onEnterCampaign={handleEnterCampaign}
         onRequestAccess={handleRequestAccess}
