@@ -64,6 +64,8 @@ interface ChatThread {
   is_private: boolean;
   created_by_user_id: string;
   created_at: string;
+  has_unread?: boolean;
+  unread_count?: number;
 }
 
 interface MentionContext {
@@ -274,6 +276,8 @@ export default function TeamChatPage() {
   const { getToken, isLoaded } = useAuth();
   const [messages, setMessages] = useState<TeamMessage[]>([]);
   const [threads, setThreads] = useState<ChatThread[]>([]);
+  const [teamCommsHasUnread, setTeamCommsHasUnread] = useState(false);
+  const [teamCommsUnreadCount, setTeamCommsUnreadCount] = useState(0);
   const [currentThreadId, setCurrentThreadId] = useState<string>(MAIN_THREAD_ID);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(true);
@@ -440,7 +444,11 @@ export default function TeamChatPage() {
       const token = await getToken();
       if (!token) return;
 
-      const data = await apiFetch<{ threads: ChatThread[] }>(
+      const data = await apiFetch<{
+        threads: ChatThread[];
+        team_comms_has_unread?: boolean;
+        team_comms_unread_count?: number;
+      }>(
         `/api/v1/campaigns/${campaignId}/chat-threads`,
         {
           token,
@@ -448,9 +456,13 @@ export default function TeamChatPage() {
         }
       );
       setThreads(data.threads || []);
+      setTeamCommsHasUnread(Boolean(data.team_comms_has_unread));
+      setTeamCommsUnreadCount(Number(data.team_comms_unread_count || 0));
     } catch (err) {
       console.error("Error fetching chat threads:", err);
       setThreads([]);
+      setTeamCommsHasUnread(false);
+      setTeamCommsUnreadCount(0);
     } finally {
       setThreadsLoaded(true);
     }
@@ -608,6 +620,7 @@ export default function TeamChatPage() {
         // If no lastTimestamp yet, fetch all messages
         fetchMessages(null, currentThreadId);
       }
+      fetchThreads();
     }, 12000); // 12 seconds
 
     return () => {
@@ -885,6 +898,21 @@ export default function TeamChatPage() {
 
   const handleSelectThread = (threadId: string) => {
     if (threadId === currentThreadId) return;
+
+    // Optimistically clear unread marker when opening the thread.
+    if (threadId === MAIN_THREAD_ID) {
+      setTeamCommsHasUnread(false);
+      setTeamCommsUnreadCount(0);
+    } else {
+      setThreads((prev) =>
+        prev.map((thread) =>
+          thread.thread_id === threadId
+            ? { ...thread, has_unread: false, unread_count: 0 }
+            : thread
+        )
+      );
+    }
+
     setCurrentThreadId(threadId);
     persistThreadPref(threadId);
     setMessages([]);
@@ -966,13 +994,18 @@ export default function TeamChatPage() {
               type="button"
               onClick={() => handleSelectThread(MAIN_THREAD_ID)}
               className={cn(
-                "w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
+                "w-full rounded-md px-3 py-2 text-left text-sm transition-colors inline-flex items-center justify-between",
                 currentThreadId === MAIN_THREAD_ID
                   ? "bg-amber-500/20 text-amber-200 border border-amber-500/30"
                   : "text-zinc-200 border border-zinc-700 hover:bg-zinc-800/60"
               )}
             >
-              Team Comms
+              <span>Team Comms</span>
+              {teamCommsHasUnread && (
+                <span className="ml-2 inline-flex min-w-[18px] items-center justify-center rounded-full bg-amber-500/25 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
+                  {teamCommsUnreadCount > 0 ? teamCommsUnreadCount : "•"}
+                </span>
+              )}
             </button>
             {threads.map((thread) => (
               <button
@@ -980,13 +1013,18 @@ export default function TeamChatPage() {
                 type="button"
                 onClick={() => handleSelectThread(thread.thread_id)}
                 className={cn(
-                  "w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
+                  "w-full rounded-md px-3 py-2 text-left text-sm transition-colors inline-flex items-center justify-between",
                   currentThreadId === thread.thread_id
                     ? "bg-amber-500/20 text-amber-200 border border-amber-500/30"
                     : "text-zinc-200 border border-zinc-700 hover:bg-zinc-800/60"
                 )}
               >
                 <span className="block truncate">{getThreadLabel(thread)}</span>
+                {thread.has_unread && (
+                  <span className="ml-2 inline-flex min-w-[18px] items-center justify-center rounded-full bg-amber-500/25 px-1.5 py-0.5 text-[10px] font-semibold text-amber-300">
+                    {(thread.unread_count || 0) > 0 ? thread.unread_count : "•"}
+                  </span>
+                )}
               </button>
             ))}
           </div>

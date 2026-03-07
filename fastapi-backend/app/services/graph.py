@@ -702,13 +702,18 @@ class GraphService:
         async with self._driver.session() as session:
             query = """
             MATCH (u:User {id: $user_id})-[:THREAD_MEMBER]->(t:ChatThread {tenant_id: $campaign_id, is_private: true})-[:THREAD_IN]->(:Campaign {id: $campaign_id})
+            OPTIONAL MATCH (u)-[read:THREAD_READ]->(t)
+            WITH t, coalesce(read.last_read_at, datetime({epochMillis: 0})) as last_read_at
+            OPTIONAL MATCH (t)<-[:IN_THREAD]-(m:ThreadMessage)<-[:SENT_THREAD_MESSAGE]-(author:User)
+            WHERE m.timestamp > last_read_at AND author.id <> $user_id
             RETURN
                 t.id as thread_id,
                 t.tenant_id as tenant_id,
                 t.name as name,
                 t.is_private as is_private,
                 t.created_by_user_id as created_by_user_id,
-                toString(t.created_at) as created_at
+                toString(t.created_at) as created_at,
+                count(m) as unread_count
             ORDER BY t.created_at DESC
             """
             result = await session.run(
@@ -726,9 +731,30 @@ class GraphService:
                         "is_private": bool(record["is_private"]),
                         "created_by_user_id": record["created_by_user_id"],
                         "created_at": record["created_at"],
+                        "has_unread": (record.get("unread_count") or 0) > 0,
+                        "unread_count": int(record.get("unread_count") or 0),
                     }
                 )
             return threads
+
+    async def get_team_comms_unread_status(self, campaign_id: str, user_id: str) -> Dict[str, Any]:
+        """Return unread status for the main Team Comms thread for a user."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (u:User {id: $user_id})-[:MEMBER_OF]->(c:Campaign {id: $campaign_id})
+            OPTIONAL MATCH (u)-[read:TEAM_CHAT_READ]->(c)
+            WITH c, coalesce(read.last_read_at, datetime({epochMillis: 0})) as last_read_at
+            OPTIONAL MATCH (c)<-[:POSTED_IN]-(m:TeamMessage)<-[:SENT]-(author:User)
+            WHERE m.timestamp > last_read_at AND author.id <> $user_id
+            RETURN count(m) as unread_count
+            """
+            result = await session.run(query, campaign_id=campaign_id, user_id=user_id)
+            record = await result.single()
+            unread_count = int(record.get("unread_count") or 0) if record else 0
+            return {
+                "has_unread": unread_count > 0,
+                "unread_count": unread_count,
+            }
 
     async def get_private_thread_messages(
         self, campaign_id: str, thread_id: str, user_id: str, limit: int = 50, since: Optional[str] = None
@@ -747,6 +773,18 @@ class GraphService:
             )
             if not await membership_result.single():
                 raise PermissionError("Access denied to this private chat thread")
+
+            # Opening a thread marks it read for this user.
+            await session.run(
+                """
+                MATCH (u:User {id: $user_id})-[:THREAD_MEMBER]->(t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})
+                MERGE (u)-[read:THREAD_READ]->(t)
+                SET read.last_read_at = datetime()
+                """,
+                campaign_id=campaign_id,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
 
             if since:
                 query = """
@@ -833,6 +871,8 @@ class GraphService:
                 timestamp: datetime()
             })
             CREATE (u)-[:SENT_THREAD_MESSAGE]->(m)-[:IN_THREAD]->(t)
+            MERGE (u)-[read:THREAD_READ]->(t)
+            SET read.last_read_at = datetime()
             RETURN
                 m.id as id,
                 m.content as content,
@@ -983,7 +1023,7 @@ class GraphService:
             }
 
     async def get_team_messages(
-        self, campaign_id: str, limit: int = 50, since: Optional[str] = None
+        self, campaign_id: str, limit: int = 50, since: Optional[str] = None, user_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Get team messages for a campaign.
         
@@ -1046,6 +1086,18 @@ class GraphService:
             
             # Reverse to get chronological order (oldest -> newest)
             messages.reverse()
+
+            # Opening Team Comms marks it read for this user.
+            if user_id:
+                await session.run(
+                    """
+                    MATCH (u:User {id: $user_id})-[:MEMBER_OF]->(c:Campaign {id: $campaign_id})
+                    MERGE (u)-[read:TEAM_CHAT_READ]->(c)
+                    SET read.last_read_at = datetime()
+                    """,
+                    campaign_id=campaign_id,
+                    user_id=user_id,
+                )
             return messages
 
     async def get_member_role(self, user_id: str, campaign_id: str) -> Optional[str]:
@@ -1107,12 +1159,34 @@ class GraphService:
         async with self._driver.session() as session:
             query = """
             MATCH (u:User)-[r:MEMBER_OF]->(c:Campaign {id: $campaign_id})
+            WITH
+                u,
+                r,
+                trim(coalesce(u.first_name, "") + " " + coalesce(u.last_name, "")) as full_name,
+                CASE
+                    WHEN u.email IS NULL THEN NULL
+                    ELSE split(u.email, "@")[0]
+                END as email_prefix
             RETURN
                 u.id as user_id,
-                coalesce(u.name, u.first_name, u.email, u.id) as display_name,
+                CASE
+                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
+                    WHEN u.name IS NOT NULL AND trim(u.name) <> "" THEN u.name
+                    WHEN full_name <> "" THEN full_name
+                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
+                    ELSE "Unknown User"
+                END as display_name,
                 u.avatar_url as avatar_url,
                 r.role as role
-            ORDER BY toLower(coalesce(u.name, u.first_name, u.email, u.id)) ASC
+            ORDER BY toLower(
+                CASE
+                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
+                    WHEN u.name IS NOT NULL AND trim(u.name) <> "" THEN u.name
+                    WHEN full_name <> "" THEN full_name
+                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
+                    ELSE "Unknown User"
+                END
+            ) ASC
             """
 
             result = await session.run(query, campaign_id=campaign_id)

@@ -101,10 +101,14 @@ class ChatThreadResponse(BaseModel):
     is_private: bool
     created_by_user_id: str
     created_at: str
+    has_unread: bool = False
+    unread_count: int = 0
 
 
 class ChatThreadsResponse(BaseModel):
     threads: List[ChatThreadResponse]
+    team_comms_has_unread: bool = False
+    team_comms_unread_count: int = 0
 
 
 class CreateChatThreadRequest(BaseModel):
@@ -278,10 +282,12 @@ async def get_team_messages(
         List of team messages ordered chronologically (oldest -> newest)
     """
     try:
+        user_id = current_user.get("id", "unknown")
         messages = await graph.get_team_messages(
             campaign_id=id,
             limit=limit,
-            since=since
+            since=since,
+            user_id=user_id,
         )
         
         return TeamMessagesResponse(
@@ -430,8 +436,14 @@ async def list_chat_threads(
             campaign_id=tenant_id,
             user_id=user_id,
         )
+        team_comms = await graph.get_team_comms_unread_status(
+            campaign_id=tenant_id,
+            user_id=user_id,
+        )
         return ChatThreadsResponse(
-            threads=[ChatThreadResponse(**thread) for thread in threads]
+            threads=[ChatThreadResponse(**thread) for thread in threads],
+            team_comms_has_unread=bool(team_comms.get("has_unread")),
+            team_comms_unread_count=int(team_comms.get("unread_count") or 0),
         )
     except Exception as exc:
         raise HTTPException(
