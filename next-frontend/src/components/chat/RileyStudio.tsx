@@ -8,6 +8,9 @@ import remarkBreaks from "remark-breaks";
 import { cn } from "@app/lib/utils";
 import { TypewriterMarkdown } from "@app/components/ui/TypewriterMarkdown";
 import { apiFetch } from "@app/lib/api";
+import { toAsset } from "@app/lib/files";
+import { Asset } from "@app/lib/types";
+import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 
 type Message = {
   id: string;
@@ -15,6 +18,11 @@ type Message = {
   content: string;
   sourcesCount?: number;
   status?: "thinking"; // For placeholder messages
+};
+
+type SourceCitation = {
+  key: string;
+  label: string;
 };
 
 type Conversation = {
@@ -49,6 +57,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState("");
   const [isRenaming, setIsRenaming] = useState(false);
+  const [assetByFilename, setAssetByFilename] = useState<Record<string, Asset>>({});
+  const [selectedSourceAsset, setSelectedSourceAsset] = useState<Asset | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -72,6 +82,63 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Build local filename -> asset map for source opening.
+  useEffect(() => {
+    if (!tenantId || !authLoaded || !userLoaded || !user) return;
+
+    async function loadAssets() {
+      try {
+        const token = await getToken();
+        if (!token) return;
+
+        const data = await apiFetch<{ files: any[] }>(
+          `/api/v1/list?tenant_id=${encodeURIComponent(tenantId)}`,
+          {
+            token,
+            method: "GET",
+          }
+        );
+
+        const next: Record<string, Asset> = {};
+        for (const file of data.files || []) {
+          const asset = toAsset(file, { status: "ready" });
+          next[asset.name.toLowerCase()] = asset;
+        }
+        setAssetByFilename(next);
+      } catch (error) {
+        console.error("Failed to load source assets:", error);
+        setAssetByFilename({});
+      }
+    }
+
+    loadAssets();
+  }, [tenantId, authLoaded, userLoaded, user, getToken]);
+
+  const extractCitations = (content: string): SourceCitation[] => {
+    if (!content) return [];
+    const regex = /\[\[Source:\s*(.+?)\]\]/g;
+    const found: SourceCitation[] = [];
+    const seen = new Set<string>();
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(content)) !== null) {
+      const label = match[1]?.trim();
+      if (!label) continue;
+      const key = label.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push({ key, label });
+    }
+
+    return found;
+  };
+
+  const handleSourceClick = (citation: SourceCitation) => {
+    const asset = assetByFilename[citation.key];
+    if (!asset) return;
+    setSelectedSourceAsset(asset);
+  };
 
   // Auto-resize textarea
   useEffect(() => {
@@ -272,79 +339,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       handleRenameCancel();
     }
   };
-
-  // Render content with interactive citation badges
-  function renderContent(text: string): React.ReactNode {
-    if (!text) return null;
-
-    // Regex to match [[Source: Filename.pdf]] patterns
-    const citationRegex = /(\[\[Source: .*?\]\])/g;
-    const parts: Array<{ type: "text" | "citation"; content: string }> = [];
-    let lastIndex = 0;
-    let match;
-
-    // Find all citation matches
-    while ((match = citationRegex.exec(text)) !== null) {
-      // Add text before the citation
-      if (match.index > lastIndex) {
-        parts.push({
-          type: "text",
-          content: text.substring(lastIndex, match.index),
-        });
-      }
-
-      // Extract filename from citation (remove [[Source: ]] wrapper)
-      const citationText = match[1];
-      const filenameMatch = citationText.match(/\[\[Source: (.+?)\]\]/);
-      const filename = filenameMatch ? filenameMatch[1] : citationText;
-
-      parts.push({
-        type: "citation",
-        content: filename,
-      });
-
-      lastIndex = match.index + match[0].length;
-    }
-
-    // Add remaining text after last citation
-    if (lastIndex < text.length) {
-      parts.push({
-        type: "text",
-        content: text.substring(lastIndex),
-      });
-    }
-
-    // If no citations found, return plain text
-    if (parts.length === 0) {
-      return <span>{text}</span>;
-    }
-
-    // Render parts with citation badges and markdown for text
-    return (
-      <>
-        {parts.map((part, idx) => {
-          if (part.type === "citation") {
-            return (
-              <button
-                key={`citation-${idx}`}
-                type="button"
-                onClick={() => {
-                  // For global chat, we might not have onViewAsset, so just show alert
-                  alert(`Citation: ${part.content}\n\nNote: File viewing not available in global chat.`);
-                }}
-                className="inline-flex items-center gap-1.5 bg-zinc-800/50 border border-zinc-700/50 rounded-md px-2 py-0.5 text-[10px] transition-all mx-1 align-baseline cursor-pointer text-amber-500/90 hover:bg-amber-500/10 hover:border-amber-500/30 hover:text-amber-400"
-              >
-                <FileText className="h-2.5 w-2.5" />
-                <span>{part.content}</span>
-              </button>
-            );
-          }
-          // Render text parts (markdown will be handled by parent container)
-          return <span key={`text-${idx}`}>{part.content}</span>;
-        })}
-      </>
-    );
-  }
 
   const handleSend = async () => {
     if (!canSend) return;
@@ -721,6 +715,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               {messages.map((message, index) => {
                 const isLastMessage = index === messages.length - 1;
                 const isLastAssistant = message.role === "assistant" && isLastMessage;
+                const citations = message.role === "assistant" ? extractCitations(message.content) : [];
 
                 return (
                   <div
@@ -771,6 +766,34 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         <div className="mt-2 flex items-center gap-1.5 border-t border-zinc-800 pt-2 text-xs text-zinc-500">
                           <span>📚</span>
                           <span>Analyzed {message.sourcesCount} document{message.sourcesCount !== 1 ? "s" : ""}</span>
+                        </div>
+                      )}
+                      {message.role === "assistant" && citations.length > 0 && (
+                        <div className="mt-2 border-t border-zinc-800 pt-2">
+                          <div className="mb-1 text-xs text-zinc-500">Sources</div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {citations.map((citation) => {
+                              const hasAsset = Boolean(assetByFilename[citation.key]);
+                              return (
+                                <button
+                                  key={citation.key}
+                                  type="button"
+                                  onClick={() => handleSourceClick(citation)}
+                                  disabled={!hasAsset}
+                                  className={cn(
+                                    "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] transition-colors",
+                                    hasAsset
+                                      ? "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                                      : "border-zinc-700 bg-zinc-800/40 text-zinc-500 cursor-not-allowed"
+                                  )}
+                                  title={hasAsset ? `Open ${citation.label}` : "Source unavailable"}
+                                >
+                                  <FileText className="h-3 w-3" />
+                                  <span className="max-w-[220px] truncate">{citation.label}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
                       )}
                     </div>
@@ -848,6 +871,13 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           </div>
         </div>
       </main>
+      {selectedSourceAsset && (
+        <DocumentViewer
+          file={selectedSourceAsset}
+          variant="modal"
+          onClose={() => setSelectedSourceAsset(null)}
+        />
+      )}
     </div>
   );
 }

@@ -7,12 +7,20 @@ import ReactMarkdown from "react-markdown";
 import { cn } from "@app/lib/utils";
 import { TypewriterMarkdown } from "@app/components/ui/TypewriterMarkdown";
 import { apiFetch } from "@app/lib/api";
+import { toAsset } from "@app/lib/files";
+import { Asset } from "@app/lib/types";
+import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 
 type Message = {
   id: string;
   role: "user" | "assistant" | "system";
   content: string;
   status?: "thinking"; // For placeholder messages
+};
+
+type SourceCitation = {
+  key: string;
+  label: string;
 };
 
 interface RileyContextChatProps {
@@ -74,6 +82,8 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isClearing, setIsClearing] = useState(false);
+  const [assetByFilename, setAssetByFilename] = useState<Record<string, Asset>>({});
+  const [selectedSourceAsset, setSelectedSourceAsset] = useState<Asset | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -199,6 +209,69 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Build local filename -> asset map for source opening.
+  useEffect(() => {
+    if (!campaignId || !authLoaded || !isLoaded || !user) return;
+
+    async function loadAssets() {
+      try {
+        const token = await getToken();
+        if (!token) return;
+
+        const data = await apiFetch<{ files: any[] }>(
+          `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
+          {
+            token,
+            method: "GET",
+          }
+        );
+
+        const next: Record<string, Asset> = {};
+        for (const file of data.files || []) {
+          const asset = toAsset(file, { status: "ready" });
+          next[asset.name.toLowerCase()] = asset;
+        }
+        setAssetByFilename(next);
+      } catch (error) {
+        console.error("Failed to load campaign source assets:", error);
+        setAssetByFilename({});
+      }
+    }
+
+    loadAssets();
+  }, [campaignId, authLoaded, isLoaded, user, getToken]);
+
+  const extractCitations = (content: string): SourceCitation[] => {
+    if (!content) return [];
+    const regex = /\[\[Source:\s*(.+?)\]\]/g;
+    const found: SourceCitation[] = [];
+    const seen = new Set<string>();
+    let match: RegExpExecArray | null;
+
+    while ((match = regex.exec(content)) !== null) {
+      const label = match[1]?.trim();
+      if (!label) continue;
+      const key = label.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      found.push({ key, label });
+    }
+
+    return found;
+  };
+
+  const handleSourceClick = (citation: SourceCitation) => {
+    // Preserve optional callback contract used by parent pages.
+    // Local modal opening is the primary path for reliable source viewing.
+    void onViewAsset;
+    const asset = assetByFilename[citation.key];
+    if (asset) {
+      setSelectedSourceAsset(asset);
+      return;
+    }
+    // If no mapped asset exists, keep graceful disabled state (handled in UI).
+  };
 
   // Check if send is enabled and why it might be disabled
   const canSend = input.trim().length > 0 && !isLoading && !missingAuth && !missingCampaignId;
@@ -335,85 +408,6 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
     }
   };
 
-  // Render content with interactive citation badges
-  function renderContent(text: string): React.ReactNode {
-    if (!text) return null;
-
-    // Regex to match [[Source: Filename.pdf]] patterns
-    const citationRegex = /(\[\[Source: .*?\]\])/g;
-    const parts: Array<{ type: "text" | "citation"; content: string }> = [];
-    let lastIndex = 0;
-    let match;
-
-    // Find all citation matches
-    while ((match = citationRegex.exec(text)) !== null) {
-      // Add text before the citation
-      if (match.index > lastIndex) {
-        parts.push({
-          type: "text",
-          content: text.substring(lastIndex, match.index),
-        });
-      }
-
-      // Extract filename from citation (remove [[Source: ]] wrapper)
-      const citationText = match[1];
-      const filenameMatch = citationText.match(/\[\[Source: (.+?)\]\]/);
-      const filename = filenameMatch ? filenameMatch[1] : citationText;
-
-      parts.push({
-        type: "citation",
-        content: filename,
-      });
-
-      lastIndex = match.index + match[0].length;
-    }
-
-    // Add remaining text after last citation
-    if (lastIndex < text.length) {
-      parts.push({
-        type: "text",
-        content: text.substring(lastIndex),
-      });
-    }
-
-    // If no citations found, return plain text
-    if (parts.length === 0) {
-      return <span>{text}</span>;
-    }
-
-    // Render parts with citation badges
-    return (
-      <>
-        {parts.map((part, idx) => {
-          if (part.type === "citation") {
-            return (
-              <button
-                key={`citation-${idx}`}
-                type="button"
-                onClick={() => {
-                  if (onViewAsset) {
-                    onViewAsset(part.content);
-                  }
-                }}
-                className={cn(
-                  "inline-flex items-center gap-1.5",
-                  "bg-zinc-800/50 border border-zinc-700/50 rounded-md",
-                  "px-2 py-0.5 text-[10px] text-amber-500/90",
-                  "hover:bg-amber-500/10 hover:border-amber-500/30 hover:text-amber-400",
-                  "transition-all mx-1 align-baseline cursor-pointer"
-                )}
-              >
-                <FileText className="h-2.5 w-2.5" />
-                <span>{part.content}</span>
-              </button>
-            );
-          }
-          return <span key={`text-${idx}`}>{part.content}</span>;
-        })}
-      </>
-    );
-  }
-
   return (
     <div className="h-full flex flex-col">
       {/* Error Banner */}
@@ -451,6 +445,7 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
         {messages.map((message, index) => {
           const isLastMessage = index === messages.length - 1;
           const isLastAssistant = message.role === "assistant" && isLastMessage;
+          const citations = message.role === "assistant" ? extractCitations(message.content) : [];
           
           return (
             <div
@@ -487,6 +482,38 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
                 ) : (
                   // User and system messages (plain text)
                   message.content
+                )}
+                {message.role === "assistant" && citations.length > 0 && (
+                  <div className="mt-2 border-t border-zinc-800 pt-2">
+                    <div className="mb-1 text-xs text-zinc-500">Sources</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {citations.map((citation) => {
+                        const hasAsset = Boolean(assetByFilename[citation.key]);
+                        return (
+                          <button
+                            key={citation.key}
+                            type="button"
+                            onClick={() => {
+                              if (hasAsset) {
+                                handleSourceClick(citation);
+                              }
+                            }}
+                            disabled={!hasAsset}
+                            className={cn(
+                              "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] transition-colors",
+                              hasAsset
+                                ? "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                                : "border-zinc-700 bg-zinc-800/40 text-zinc-500 cursor-not-allowed"
+                            )}
+                            title={hasAsset ? `Open ${citation.label}` : "Source unavailable"}
+                          >
+                            <FileText className="h-3 w-3" />
+                            <span className="max-w-[200px] truncate">{citation.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 )}
               </div>
             </div>
@@ -544,6 +571,13 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
           </button>
         </div>
       </div>
+      {selectedSourceAsset && (
+        <DocumentViewer
+          file={selectedSourceAsset}
+          variant="modal"
+          onClose={() => setSelectedSourceAsset(null)}
+        />
+      )}
     </div>
   );
 }

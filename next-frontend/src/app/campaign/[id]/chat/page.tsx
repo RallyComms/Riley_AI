@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useParams } from "next/navigation";
 import { useAuth, useUser } from "@clerk/nextjs";
-import { Check, ChevronLeft, Pencil, Plus, Send, Trash2, Users, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, MoreHorizontal, Plus, Send, Users, X } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { apiFetch } from "@app/lib/api";
 import { useCampaignName } from "@app/lib/useCampaignName";
@@ -115,6 +115,33 @@ function TeamMessageBubble({
   onDelete: (messageId: string) => void;
 }) {
   const isDeleted = Boolean(message.deleted_at);
+  const [isActionsOpen, setIsActionsOpen] = useState(false);
+  const actionsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!isActionsOpen) return;
+
+    const onMouseDown = (event: MouseEvent) => {
+      if (!actionsRef.current) return;
+      const target = event.target as Node;
+      if (!actionsRef.current.contains(target)) {
+        setIsActionsOpen(false);
+      }
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsActionsOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [isActionsOpen]);
 
   // Parse content and highlight mentions
   const renderContent = (text: string) => {
@@ -157,27 +184,41 @@ function TeamMessageBubble({
             <span className="text-xs text-zinc-500">(edited)</span>
           )}
           {isOwnMessage && !isDeleted && !isEditing && (
-            <div className="ml-2 flex items-center gap-2">
+            <div ref={actionsRef} className="relative ml-2">
               <button
                 type="button"
-                onClick={() => onStartEdit(message)}
+                onClick={() => setIsActionsOpen((prev) => !prev)}
                 disabled={isMutating}
-                className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-50"
-                aria-label="Edit message"
-                title="Edit"
+                className="rounded p-1 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60 transition-colors disabled:opacity-50"
+                aria-label="Message actions"
+                title="Message actions"
               >
-                <Pencil className="h-3.5 w-3.5" />
+                <MoreHorizontal className="h-3.5 w-3.5" />
               </button>
-              <button
-                type="button"
-                onClick={() => onDelete(message.id)}
-                disabled={isMutating}
-                className="text-xs text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-50"
-                aria-label="Delete message"
-                title="Delete"
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
+              {isActionsOpen && (
+                <div className="absolute right-0 top-full z-30 mt-1 w-28 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-lg">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsActionsOpen(false);
+                      onStartEdit(message);
+                    }}
+                    className="w-full px-3 py-2 text-left text-xs text-zinc-200 hover:bg-zinc-800"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsActionsOpen(false);
+                      onDelete(message.id);
+                    }}
+                    className="w-full px-3 py-2 text-left text-xs text-red-300 hover:bg-zinc-800"
+                  >
+                    Delete
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -243,6 +284,7 @@ export default function TeamChatPage() {
   const [editDraft, setEditDraft] = useState("");
   const [mutatingMessageId, setMutatingMessageId] = useState<string | null>(null);
   const [campaignMembers, setCampaignMembers] = useState<MentionMember[]>([]);
+  const [isThreadsPanelOpen, setIsThreadsPanelOpen] = useState(true);
   const [isMembersPanelOpen, setIsMembersPanelOpen] = useState(true);
   const [isNewThreadOpen, setIsNewThreadOpen] = useState(false);
   const [newThreadName, setNewThreadName] = useState("");
@@ -831,50 +873,61 @@ export default function TeamChatPage() {
 
   return (
     <div className="flex h-full relative">
-      <aside className="w-64 border-r border-white/5 bg-slate-900/40 backdrop-blur-md flex flex-col">
-        <div className="px-4 py-3 border-b border-white/5">
-          <h2 className="text-sm font-semibold text-zinc-100">Chats</h2>
-        </div>
-        <div className="p-3 space-y-2">
-          <button
-            type="button"
-            onClick={() => handleSelectThread(MAIN_THREAD_ID)}
-            className={cn(
-              "w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
-              currentThreadId === MAIN_THREAD_ID
-                ? "bg-amber-500/20 text-amber-200 border border-amber-500/30"
-                : "text-zinc-200 border border-zinc-700 hover:bg-zinc-800/60"
-            )}
-          >
-            Team Comms
-          </button>
-          {threads.map((thread) => (
+      {isThreadsPanelOpen && (
+        <aside className="w-64 border-r border-white/5 bg-slate-900/40 backdrop-blur-md flex flex-col">
+          <div className="px-4 py-3 border-b border-white/5 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-zinc-100">Chats</h2>
             <button
-              key={thread.thread_id}
               type="button"
-              onClick={() => handleSelectThread(thread.thread_id)}
+              onClick={() => setIsThreadsPanelOpen(false)}
+              className="rounded p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 transition-colors"
+              aria-label="Close chats panel"
+              title="Close chats panel"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="p-3 space-y-2">
+            <button
+              type="button"
+              onClick={() => handleSelectThread(MAIN_THREAD_ID)}
               className={cn(
                 "w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
-                currentThreadId === thread.thread_id
+                currentThreadId === MAIN_THREAD_ID
                   ? "bg-amber-500/20 text-amber-200 border border-amber-500/30"
                   : "text-zinc-200 border border-zinc-700 hover:bg-zinc-800/60"
               )}
             >
-              <span className="block truncate">{getThreadLabel(thread)}</span>
+              Team Comms
             </button>
-          ))}
-        </div>
-        <div className="p-3 border-t border-white/5 mt-auto">
-          <button
-            type="button"
-            onClick={() => setIsNewThreadOpen(true)}
-            className="w-full rounded-md border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800/70 transition-colors inline-flex items-center justify-center gap-2"
-          >
-            <Plus className="h-4 w-4" />
-            New Private Chat
-          </button>
-        </div>
-      </aside>
+            {threads.map((thread) => (
+              <button
+                key={thread.thread_id}
+                type="button"
+                onClick={() => handleSelectThread(thread.thread_id)}
+                className={cn(
+                  "w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
+                  currentThreadId === thread.thread_id
+                    ? "bg-amber-500/20 text-amber-200 border border-amber-500/30"
+                    : "text-zinc-200 border border-zinc-700 hover:bg-zinc-800/60"
+                )}
+              >
+                <span className="block truncate">{getThreadLabel(thread)}</span>
+              </button>
+            ))}
+          </div>
+          <div className="p-3 border-t border-white/5 mt-auto">
+            <button
+              type="button"
+              onClick={() => setIsNewThreadOpen(true)}
+              className="w-full rounded-md border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800/70 transition-colors inline-flex items-center justify-center gap-2"
+            >
+              <Plus className="h-4 w-4" />
+              New Private Chat
+            </button>
+          </div>
+        </aside>
+      )}
 
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col overflow-hidden bg-transparent">
@@ -884,15 +937,28 @@ export default function TeamChatPage() {
             {currentThreadId === MAIN_THREAD_ID ? "Team Comms" : "Private Chat"} |{" "}
             <span className="text-amber-400">{displayName}</span>
           </h1>
-          <button
-            type="button"
-            onClick={() => setIsMembersPanelOpen((prev) => !prev)}
-            className="inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900/50 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800/70 transition-colors"
-            aria-label={isMembersPanelOpen ? "Hide members panel" : "Show members panel"}
-          >
-            {isMembersPanelOpen ? <ChevronLeft className="h-4 w-4" /> : <Users className="h-4 w-4" />}
-            <span>Members</span>
-          </button>
+          <div className="inline-flex items-center gap-2">
+            {!isThreadsPanelOpen && (
+              <button
+                type="button"
+                onClick={() => setIsThreadsPanelOpen(true)}
+                className="inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900/50 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800/70 transition-colors"
+                aria-label="Show chats panel"
+              >
+                <Users className="h-4 w-4" />
+                <span>Chats</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setIsMembersPanelOpen((prev) => !prev)}
+              className="inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900/50 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800/70 transition-colors"
+              aria-label={isMembersPanelOpen ? "Hide members panel" : "Show members panel"}
+            >
+              <span>Members</span>
+              {isMembersPanelOpen ? <ChevronRight className="h-4 w-4" /> : <Users className="h-4 w-4" />}
+            </button>
+          </div>
         </header>
 
         {/* Loading State */}
