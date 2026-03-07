@@ -284,8 +284,9 @@ export default function TeamChatPage() {
   const [editDraft, setEditDraft] = useState("");
   const [mutatingMessageId, setMutatingMessageId] = useState<string | null>(null);
   const [campaignMembers, setCampaignMembers] = useState<MentionMember[]>([]);
-  const [isThreadsPanelOpen, setIsThreadsPanelOpen] = useState(true);
-  const [isMembersPanelOpen, setIsMembersPanelOpen] = useState(true);
+  const [isThreadsPanelOpen, setIsThreadsPanelOpen] = useState(false);
+  const [isMembersPanelOpen, setIsMembersPanelOpen] = useState(false);
+  const [threadsLoaded, setThreadsLoaded] = useState(false);
   const [isNewThreadOpen, setIsNewThreadOpen] = useState(false);
   const [newThreadName, setNewThreadName] = useState("");
   const [selectedThreadMemberIds, setSelectedThreadMemberIds] = useState<string[]>([]);
@@ -297,9 +298,33 @@ export default function TeamChatPage() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const composerRef = useRef<HTMLDivElement>(null);
+  const hydratedScopeRef = useRef<string | null>(null);
   
   // Fetch campaign name using shared hook
   const { displayName } = useCampaignName(campaignId);
+  const storageScope = campaignId && user?.id ? `${campaignId}:${user.id}` : null;
+
+  const getStorageKey = (
+    key: "lastActiveThread" | "teamChatLeftPanelOpen" | "teamChatMembersPanelOpen"
+  ): string | null => {
+    if (!storageScope) return null;
+    return `${key}:${storageScope}`;
+  };
+
+  const persistBoolPref = (
+    key: "teamChatLeftPanelOpen" | "teamChatMembersPanelOpen",
+    value: boolean
+  ) => {
+    const storageKey = getStorageKey(key);
+    if (!storageKey) return;
+    localStorage.setItem(storageKey, String(value));
+  };
+
+  const persistThreadPref = (threadId: string) => {
+    const storageKey = getStorageKey("lastActiveThread");
+    if (!storageKey) return;
+    localStorage.setItem(storageKey, threadId);
+  };
 
   // Map backend message to frontend shape
   const mapBackendToFrontend = (
@@ -410,6 +435,7 @@ export default function TeamChatPage() {
 
   const fetchThreads = async () => {
     if (!isLoaded || !campaignId) return;
+    setThreadsLoaded(false);
     try {
       const token = await getToken();
       if (!token) return;
@@ -425,6 +451,8 @@ export default function TeamChatPage() {
     } catch (err) {
       console.error("Error fetching chat threads:", err);
       setThreads([]);
+    } finally {
+      setThreadsLoaded(true);
     }
   };
 
@@ -509,14 +537,56 @@ export default function TeamChatPage() {
     }
   };
 
-  // Initial fetch on mount
+  // Restore persisted panel/thread state once per campaign+user scope.
+  useEffect(() => {
+    if (!storageScope) return;
+    if (hydratedScopeRef.current === storageScope) return;
+
+    const threadKey = getStorageKey("lastActiveThread");
+    const leftPanelKey = getStorageKey("teamChatLeftPanelOpen");
+    const membersPanelKey = getStorageKey("teamChatMembersPanelOpen");
+
+    const savedThread = threadKey ? localStorage.getItem(threadKey) : null;
+    const savedLeftPanel = leftPanelKey ? localStorage.getItem(leftPanelKey) : null;
+    const savedMembersPanel = membersPanelKey ? localStorage.getItem(membersPanelKey) : null;
+
+    setCurrentThreadId(savedThread && savedThread.trim() ? savedThread : MAIN_THREAD_ID);
+    setIsThreadsPanelOpen(savedLeftPanel === "true");
+    setIsMembersPanelOpen(savedMembersPanel === "true");
+    hydratedScopeRef.current = storageScope;
+  }, [storageScope]);
+
+  // If restored thread is no longer available, fall back to Team Comms.
+  useEffect(() => {
+    if (!threadsLoaded) return;
+    if (currentThreadId === MAIN_THREAD_ID) return;
+    const isKnownThread = threads.some((thread) => thread.thread_id === currentThreadId);
+    if (!isKnownThread) {
+      setCurrentThreadId(MAIN_THREAD_ID);
+    }
+  }, [threadsLoaded, threads, currentThreadId, MAIN_THREAD_ID]);
+
+  // Persist active thread after hydration.
+  useEffect(() => {
+    if (!storageScope) return;
+    if (hydratedScopeRef.current !== storageScope) return;
+    persistThreadPref(currentThreadId);
+  }, [currentThreadId, storageScope]);
+
+  // Initial fetches for campaign members and thread list.
   useEffect(() => {
     if (isLoaded && campaignId) {
       fetchCampaignMembers();
       fetchThreads();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoaded, campaignId, user?.id]);
+
+  // Fetch message history for active thread.
+  useEffect(() => {
     if (isLoaded && campaignId && user?.id) {
-      fetchMessages(null);
+      setIsLoading(true);
+      fetchMessages(null, currentThreadId);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoaded, campaignId, user?.id, currentThreadId]);
@@ -816,6 +886,7 @@ export default function TeamChatPage() {
   const handleSelectThread = (threadId: string) => {
     if (threadId === currentThreadId) return;
     setCurrentThreadId(threadId);
+    persistThreadPref(threadId);
     setMessages([]);
     setLastTimestamp(null);
     setIsLoading(true);
@@ -879,7 +950,10 @@ export default function TeamChatPage() {
             <h2 className="text-sm font-semibold text-zinc-100">Chats</h2>
             <button
               type="button"
-              onClick={() => setIsThreadsPanelOpen(false)}
+              onClick={() => {
+                setIsThreadsPanelOpen(false);
+                persistBoolPref("teamChatLeftPanelOpen", false);
+              }}
               className="rounded p-1 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 transition-colors"
               aria-label="Close chats panel"
               title="Close chats panel"
@@ -941,7 +1015,10 @@ export default function TeamChatPage() {
             {!isThreadsPanelOpen && (
               <button
                 type="button"
-                onClick={() => setIsThreadsPanelOpen(true)}
+                onClick={() => {
+                  setIsThreadsPanelOpen(true);
+                  persistBoolPref("teamChatLeftPanelOpen", true);
+                }}
                 className="inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900/50 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800/70 transition-colors"
                 aria-label="Show chats panel"
               >
@@ -951,7 +1028,11 @@ export default function TeamChatPage() {
             )}
             <button
               type="button"
-              onClick={() => setIsMembersPanelOpen((prev) => !prev)}
+              onClick={() => {
+                const next = !isMembersPanelOpen;
+                setIsMembersPanelOpen(next);
+                persistBoolPref("teamChatMembersPanelOpen", next);
+              }}
               className="inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900/50 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800/70 transition-colors"
               aria-label={isMembersPanelOpen ? "Hide members panel" : "Show members panel"}
             >
