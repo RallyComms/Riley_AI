@@ -166,6 +166,141 @@ class GraphService:
             messages.reverse()
             return messages
 
+    async def list_riley_conversations(
+        self, tenant_id: str, user_id: str, limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """List persisted Riley conversations for a user and tenant."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (s:ChatSession {tenant_id: $tenant_id, user_id: $user_id})
+            OPTIONAL MATCH (m:Message)-[:BELONGS_TO]->(s)
+            WITH s, m
+            ORDER BY m.timestamp DESC
+            WITH s, collect(m)[0] as latest
+            RETURN
+                s.id as id,
+                coalesce(s.title, "New Conversation") as title,
+                latest.content as last_message,
+                toString(latest.timestamp) as last_message_at,
+                toString(s.created_at) as created_at
+            ORDER BY coalesce(latest.timestamp, s.created_at) DESC
+            LIMIT $limit
+            """
+            result = await session.run(
+                query,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                limit=limit,
+            )
+
+            conversations: List[Dict[str, Any]] = []
+            async for record in result:
+                conversations.append(
+                    {
+                        "id": record["id"],
+                        "title": record.get("title") or "New Conversation",
+                        "last_message": record.get("last_message") or "",
+                        "last_message_at": record.get("last_message_at"),
+                        "created_at": record.get("created_at"),
+                    }
+                )
+            return conversations
+
+    async def create_riley_conversation(
+        self, tenant_id: str, user_id: str, session_id: Optional[str] = None, title: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create a Riley conversation shell (ChatSession node)."""
+        normalized_title = title.strip() if isinstance(title, str) else None
+        if normalized_title == "":
+            normalized_title = None
+        conversation_id = session_id or f"session_{tenant_id}_{user_id}_{uuid.uuid4()}"
+
+        async with self._driver.session() as session:
+            query = """
+            MERGE (s:ChatSession {id: $session_id, tenant_id: $tenant_id, user_id: $user_id})
+            ON CREATE SET s.created_at = datetime()
+            SET s.title = coalesce($title, s.title, "New Conversation")
+            RETURN
+                s.id as id,
+                s.title as title,
+                toString(s.created_at) as created_at
+            """
+            result = await session.run(
+                query,
+                session_id=conversation_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                title=normalized_title,
+            )
+            record = await result.single()
+            if not record:
+                raise Exception("Failed to create Riley conversation")
+            return {
+                "id": record["id"],
+                "title": record.get("title") or "New Conversation",
+                "created_at": record.get("created_at"),
+            }
+
+    async def get_riley_conversation_messages(
+        self, session_id: str, tenant_id: str, user_id: str, limit: int = 100
+    ) -> List[Dict[str, str]]:
+        """Get messages for a Riley conversation in chronological order."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (m:Message)-[:BELONGS_TO]->(s:ChatSession {
+                id: $session_id,
+                tenant_id: $tenant_id,
+                user_id: $user_id
+            })
+            RETURN m.role as role, m.content as content, toString(m.timestamp) as timestamp
+            ORDER BY m.timestamp ASC
+            LIMIT $limit
+            """
+            result = await session.run(
+                query,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                limit=limit,
+            )
+
+            messages: List[Dict[str, str]] = []
+            async for record in result:
+                messages.append(
+                    {
+                        "role": record["role"],
+                        "content": record["content"],
+                    }
+                )
+            return messages
+
+    async def append_riley_conversation_message(
+        self, session_id: str, tenant_id: str, user_id: str, role: str, content: str
+    ) -> None:
+        """Append a message to an existing Riley conversation."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (s:ChatSession {
+                id: $session_id,
+                tenant_id: $tenant_id,
+                user_id: $user_id
+            })
+            CREATE (m:Message {
+                role: $role,
+                content: $content,
+                timestamp: datetime()
+            })
+            CREATE (m)-[:BELONGS_TO]->(s)
+            """
+            await session.run(
+                query,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                role=role,
+                content=content,
+            )
+
     async def search_campaigns_fuzzy(self, query: str) -> str:
         """Search campaigns in the graph using fuzzy matching on name and description.
         

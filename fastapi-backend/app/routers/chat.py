@@ -65,6 +65,38 @@ class RenameRequest(BaseModel):
     title: str = Field(..., max_length=200, description="New title for the session (max 200 characters)")
 
 
+class RileyConversationResponse(BaseModel):
+    id: str
+    title: str
+    last_message: Optional[str] = None
+    last_message_at: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class RileyConversationsListResponse(BaseModel):
+    conversations: List[RileyConversationResponse]
+
+
+class CreateRileyConversationRequest(BaseModel):
+    tenant_id: str = Field(..., max_length=50, description="Tenant/client identifier (or 'global')")
+    title: Optional[str] = Field(None, max_length=200, description="Optional conversation title")
+
+
+class RileyConversationMessageSchema(BaseModel):
+    role: str = Field(..., description="Message role: 'user' or 'model'")
+    content: str = Field(..., description="Message content text")
+
+
+class RileyConversationMessagesResponse(BaseModel):
+    messages: List[RileyConversationMessageSchema]
+
+
+class CreateRileyConversationMessageRequest(BaseModel):
+    tenant_id: str = Field(..., max_length=50, description="Tenant/client identifier (or 'global')")
+    role: Literal["user", "model"] = Field(..., description="Message role")
+    content: str = Field(..., max_length=2000, description="Message content text")
+
+
 def _get_embedding_model() -> None:
     """Configure the Google Generative AI client with the current API key.
     
@@ -676,6 +708,95 @@ Context Data:
         model_used=model_name,
         sources_count=total_sources,
     )
+
+
+@router.get("/riley/conversations", response_model=RileyConversationsListResponse)
+async def list_riley_conversations(
+    http_request: Request,
+    tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> RileyConversationsListResponse:
+    """List persisted Riley conversations for the current user and tenant."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, tenant_id, http_request)
+
+    conversations = await graph.list_riley_conversations(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        limit=50,
+    )
+    return RileyConversationsListResponse(
+        conversations=[RileyConversationResponse(**conv) for conv in conversations]
+    )
+
+
+@router.post("/riley/conversations", response_model=RileyConversationResponse)
+async def create_riley_conversation(
+    http_request: Request,
+    request: CreateRileyConversationRequest,
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> RileyConversationResponse:
+    """Create a new persisted Riley conversation shell."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, request.tenant_id, http_request)
+
+    conversation = await graph.create_riley_conversation(
+        tenant_id=request.tenant_id,
+        user_id=user_id,
+        title=request.title,
+    )
+    return RileyConversationResponse(
+        id=conversation["id"],
+        title=conversation.get("title") or "New Conversation",
+        created_at=conversation.get("created_at"),
+    )
+
+
+@router.get("/riley/conversations/{conversation_id}/messages", response_model=RileyConversationMessagesResponse)
+async def get_riley_conversation_messages(
+    http_request: Request,
+    conversation_id: str,
+    tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> RileyConversationMessagesResponse:
+    """Get messages for a persisted Riley conversation."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, tenant_id, http_request)
+
+    messages = await graph.get_riley_conversation_messages(
+        session_id=conversation_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        limit=100,
+    )
+    return RileyConversationMessagesResponse(
+        messages=[RileyConversationMessageSchema(**msg) for msg in messages]
+    )
+
+
+@router.post("/riley/conversations/{conversation_id}/messages")
+async def add_riley_conversation_message(
+    http_request: Request,
+    conversation_id: str,
+    request: CreateRileyConversationMessageRequest,
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> Dict[str, str]:
+    """Append a message to a persisted Riley conversation."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, request.tenant_id, http_request)
+
+    await graph.append_riley_conversation_message(
+        session_id=conversation_id,
+        tenant_id=request.tenant_id,
+        user_id=user_id,
+        role=request.role,
+        content=request.content,
+    )
+    return {"status": "ok"}
 
 
 @router.get("/chat/history/{session_id}", response_model=List[MessageSchema])

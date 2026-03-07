@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
-import { Send, Loader2, Sparkles, Zap, Brain, FileText, Pencil, Check, X, Search, MessageSquare, BarChart3 } from "lucide-react";
+import { Send, Loader2, Sparkles, Zap, Brain, FileText, Pencil, Check, X, Search, MessageSquare, BarChart3, ChevronLeft, Users } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import { cn } from "@app/lib/utils";
@@ -38,8 +38,16 @@ interface RileyStudioProps {
   mode?: "fast" | "deep";
 }
 
+type PersistedConversation = {
+  id: string;
+  title: string;
+  last_message?: string | null;
+  last_message_at?: string | null;
+  created_at?: string | null;
+};
+
 export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" }: RileyStudioProps) {
-  const { getToken, userId, isLoaded: authLoaded } = useAuth();
+  const { getToken, isLoaded: authLoaded } = useAuth();
   const { user, isLoaded: userLoaded } = useUser();
   
   // Derive user display name: username ?? firstName ?? primaryEmail ?? "there"
@@ -53,6 +61,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [mode, setMode] = useState<"fast" | "deep">(initialMode);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState("");
@@ -66,22 +75,52 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   // Check if this is Global Riley (Imperial Amber theme)
   const isGlobal = tenantId === "global";
 
-  // Generate collision-proof, scope-aware session ID
-  const createNewSessionId = (): string => {
-    // Ensure tenantId is always included (either "global" or campaignId)
-    const safeTenantId = tenantId || "global";
-    // Use userId from Clerk, fallback to "anonymous" if not available
-    const safeUserId = userId || "anonymous";
-    // Generate timestamp
-    const timestamp = Date.now();
-    // Format: session_{tenantId}_{userId}_{timestamp}
-    return `session_${safeTenantId}_${safeUserId}_${timestamp}`;
-  };
-
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  // Load persisted conversation list for this tenant/user scope.
+  useEffect(() => {
+    async function loadConversations() {
+      if (!authLoaded || !userLoaded || !user || !tenantId) return;
+      try {
+        const token = await getToken();
+        if (!token) return;
+
+        const data = await apiFetch<{ conversations: PersistedConversation[] }>(
+          `/api/v1/riley/conversations?tenant_id=${encodeURIComponent(tenantId)}`,
+          {
+            token,
+            method: "GET",
+          }
+        );
+
+        const mapped: Conversation[] = (data.conversations || []).map((conv) => ({
+          id: conv.id,
+          title: conv.title || "New Conversation",
+          lastMessage: conv.last_message || "",
+          timestamp: conv.last_message_at
+            ? new Date(conv.last_message_at)
+            : conv.created_at
+            ? new Date(conv.created_at)
+            : new Date(),
+        }));
+
+        setConversations(mapped);
+        if (mapped.length > 0) {
+          setActiveConversationId((prev) => prev || mapped[0].id);
+        } else {
+          setActiveConversationId(null);
+          setMessages([]);
+        }
+      } catch (error) {
+        console.error("Failed to load Riley conversations:", error);
+      }
+    }
+
+    loadConversations();
+  }, [authLoaded, userLoaded, user, tenantId, getToken]);
 
   // Build local filename -> asset map for source opening.
   useEffect(() => {
@@ -180,13 +219,14 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           return;
         }
         
-        const history = await apiFetch<Array<{ role: string; content: string }>>(
-          `/api/v1/chat/history/${activeConversationId}`,
+        const historyResponse = await apiFetch<{ messages: Array<{ role: string; content: string }> }>(
+          `/api/v1/riley/conversations/${activeConversationId}/messages?tenant_id=${encodeURIComponent(tenantId)}`,
           {
             token,
             method: "GET",
           }
         );
+        const history = historyResponse.messages || [];
         
         // Guard: Only update if history exists and messages are still empty/only system
         setMessages((prev) => {
@@ -251,7 +291,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     }
 
     loadHistory();
-  }, [activeConversationId, contextName, getToken]);
+  }, [activeConversationId, contextName, getToken, tenantId]);
 
   // Check if send is enabled and why it might be disabled
   const canSend = input.trim().length > 0 && !isLoading && !missingAuth && !missingTenantId;
@@ -265,18 +305,42 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     ? "Sending..." 
     : null;
 
-  const handleNewConversation = () => {
-    // Generate collision-proof, scope-aware session ID
-    const newId = createNewSessionId();
-    setActiveConversationId(newId);
-    setMessages([
-      {
-        id: "system-1",
-        role: "system",
-        content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
-      },
-    ]);
-    setInput("");
+  const handleNewConversation = async () => {
+    try {
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication token not available");
+      }
+
+      const created = await apiFetch<PersistedConversation>("/api/v1/riley/conversations", {
+        token,
+        method: "POST",
+        body: {
+          tenant_id: tenantId,
+          title: "New Conversation",
+        },
+      });
+
+      const newConversation: Conversation = {
+        id: created.id,
+        title: created.title || "New Conversation",
+        lastMessage: "",
+        timestamp: created.created_at ? new Date(created.created_at) : new Date(),
+      };
+
+      setConversations((prev) => [newConversation, ...prev.filter((c) => c.id !== newConversation.id)]);
+      setActiveConversationId(newConversation.id);
+      setMessages([
+        {
+          id: "system-1",
+          role: "system",
+          content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
+        },
+      ]);
+      setInput("");
+    } catch (error) {
+      console.error("Failed to create Riley conversation:", error);
+    }
   };
 
   const handleRenameStart = (e: React.MouseEvent, conv: Conversation) => {
@@ -347,9 +411,25 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     // This prevents history loading from interfering with optimistic updates
     let sessionId = activeConversationId;
     if (!sessionId) {
-      const newId = createNewSessionId();
-      setActiveConversationId(newId);
-      sessionId = newId;
+      try {
+        const token = await getToken();
+        if (!token) {
+          throw new Error("Authentication token not available");
+        }
+        const created = await apiFetch<PersistedConversation>("/api/v1/riley/conversations", {
+          token,
+          method: "POST",
+          body: {
+            tenant_id: tenantId,
+            title: "New Conversation",
+          },
+        });
+        sessionId = created.id;
+        setActiveConversationId(sessionId);
+      } catch (error) {
+        console.error("Failed to initialize conversation:", error);
+        return;
+      }
     }
 
     // Step 2: Capture user input immediately
@@ -424,17 +504,21 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         );
       });
 
-      // Step 10: Update conversation list if this is a new conversation
-      if (sessionId && !conversations.find((c) => c.id === sessionId)) {
-        setConversations((prev) => [
-          {
+      // Step 10: Upsert conversation list entry and move to top
+      if (sessionId) {
+        setConversations((prev) => {
+          const existing = prev.find((c) => c.id === sessionId);
+          const nextTitle = existing?.title && existing.title !== "New Conversation"
+            ? existing.title
+            : userMessage.content.slice(0, 30) + (userMessage.content.length > 30 ? "..." : "");
+          const updated: Conversation = {
             id: sessionId,
-            title: userMessage.content.slice(0, 30) + (userMessage.content.length > 30 ? "..." : ""),
+            title: nextTitle,
             lastMessage: userMessage.content,
             timestamp: new Date(),
-          },
-          ...prev,
-        ]);
+          };
+          return [updated, ...prev.filter((c) => c.id !== sessionId)];
+        });
       }
     } catch (error) {
       // Log error to console for debugging
@@ -502,110 +586,121 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       } : undefined}
     >
       {/* Left Sidebar - Chat History */}
-      <aside className="w-64 bg-zinc-900/50 border-r border-zinc-800 flex flex-col shrink-0">
-        {/* New Conversation Button */}
-        <div className="p-4 border-b border-zinc-800">
-          <button
-            type="button"
-            onClick={handleNewConversation}
-            className={cn(
-              "w-full flex items-center justify-center gap-2 px-4 py-3 rounded-lg transition-colors font-medium",
-              isGlobal
-                ? "bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20"
-                : "bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20"
-            )}
-          >
-            <Sparkles className="h-4 w-4" />
-            <span>New Conversation</span>
-          </button>
-        </div>
+      {isSidebarOpen && (
+        <aside className="w-64 bg-zinc-900/50 border-r border-zinc-800 flex flex-col shrink-0">
+          {/* Sidebar Header */}
+          <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
+            <button
+              type="button"
+              onClick={handleNewConversation}
+              className={cn(
+                "flex-1 mr-2 flex items-center justify-center gap-2 px-4 py-3 rounded-lg transition-colors font-medium",
+                isGlobal
+                  ? "bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20"
+                  : "bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20"
+              )}
+            >
+              <Sparkles className="h-4 w-4" />
+              <span>New Conversation</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsSidebarOpen(false)}
+              className="rounded-lg p-2 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+              aria-label="Close conversations panel"
+              title="Close conversations panel"
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </button>
+          </div>
 
-        {/* Conversation List */}
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {conversations.map((conv) => {
-            const isActive = activeConversationId === conv.id;
-            const isRenaming = renamingSessionId === conv.id;
+          {/* Conversation List */}
+          <div className="flex-1 overflow-y-auto p-2 space-y-1">
+            {conversations.map((conv) => {
+              const isActive = activeConversationId === conv.id;
+              const isRenaming = renamingSessionId === conv.id;
 
-            return (
-              <div
-                key={conv.id}
-                className={cn(
-                  "w-full rounded-lg transition-colors relative group",
-                  isActive
-                    ? "bg-zinc-800/50 border border-amber-500/30"
-                    : "hover:bg-zinc-800/30 border border-transparent"
-                )}
-              >
+              return (
                 <div
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => {
-                    setActiveConversationId(conv.id);
-                  }}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      setActiveConversationId(conv.id);
-                    }
-                  }}
-                  className="w-full text-left p-3 cursor-pointer"
-                >
-                  {isRenaming ? (
-                    <div className="flex items-center gap-2">
-                      <input
-                        ref={renameInputRef}
-                        type="text"
-                        value={renameInput}
-                        onChange={(e) => setRenameInput(e.target.value)}
-                        onKeyDown={(e) => handleRenameKeyDown(e, conv.id)}
-                        onClick={(e) => e.stopPropagation()}
-                        className="flex-1 bg-zinc-900/50 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
-                        disabled={isRenaming}
-                      />
-                      <button
-                        type="button"
-                        onClick={(e) => handleRenameSave(e, conv.id)}
-                        disabled={isRenaming}
-                        className="p-1 rounded transition-colors text-amber-400 hover:bg-amber-500/10"
-                      >
-                        <Check className="h-4 w-4" />
-                      </button>
-                      <button
-                        type="button"
-                        onClick={(e) => handleRenameCancel(e)}
-                        disabled={isRenaming}
-                        className="p-1 rounded text-zinc-500 hover:bg-zinc-800/50 transition-colors"
-                      >
-                        <X className="h-4 w-4" />
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="flex items-start justify-between gap-2">
-                        <div className="flex-1 min-w-0">
-                          <div className="font-medium text-sm text-zinc-100 truncate">{conv.title}</div>
-                          <div className="text-xs text-zinc-500 mt-1 truncate">{conv.lastMessage}</div>
-                          <div className="text-xs text-zinc-600 mt-1">{formatTime(conv.timestamp)}</div>
-                        </div>
-                        {isActive && (
-                          <button
-                            type="button"
-                            onClick={(e) => handleRenameStart(e, conv)}
-                        className="opacity-0 group-hover:opacity-100 p-1.5 rounded transition-all text-amber-400 hover:bg-amber-500/10"
-                            title="Rename conversation"
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </button>
-                        )}
-                      </div>
-                    </>
+                  key={conv.id}
+                  className={cn(
+                    "w-full rounded-lg transition-colors relative group",
+                    isActive
+                      ? "bg-zinc-800/50 border border-amber-500/30"
+                      : "hover:bg-zinc-800/30 border border-transparent"
                   )}
+                >
+                  <div
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => {
+                      setActiveConversationId(conv.id);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        setActiveConversationId(conv.id);
+                      }
+                    }}
+                    className="w-full text-left p-3 cursor-pointer"
+                  >
+                    {isRenaming ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          ref={renameInputRef}
+                          type="text"
+                          value={renameInput}
+                          onChange={(e) => setRenameInput(e.target.value)}
+                          onKeyDown={(e) => handleRenameKeyDown(e, conv.id)}
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex-1 bg-zinc-900/50 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                          disabled={isRenaming}
+                        />
+                        <button
+                          type="button"
+                          onClick={(e) => handleRenameSave(e, conv.id)}
+                          disabled={isRenaming}
+                          className="p-1 rounded transition-colors text-amber-400 hover:bg-amber-500/10"
+                        >
+                          <Check className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => handleRenameCancel(e)}
+                          disabled={isRenaming}
+                          className="p-1 rounded text-zinc-500 hover:bg-zinc-800/50 transition-colors"
+                        >
+                          <X className="h-4 w-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="flex-1 min-w-0">
+                            <div className="font-medium text-sm text-zinc-100 truncate">{conv.title}</div>
+                            <div className="text-xs text-zinc-500 mt-1 truncate">{conv.lastMessage}</div>
+                            <div className="text-xs text-zinc-600 mt-1">{formatTime(conv.timestamp)}</div>
+                          </div>
+                          {isActive && (
+                            <button
+                              type="button"
+                              onClick={(e) => handleRenameStart(e, conv)}
+                          className="opacity-0 group-hover:opacity-100 p-1.5 rounded transition-all text-amber-400 hover:bg-amber-500/10"
+                              title="Rename conversation"
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
-              </div>
-            );
-          })}
-        </div>
-      </aside>
+              );
+            })}
+          </div>
+        </aside>
+      )}
 
       {/* Main Area */}
       <main className="flex-1 flex flex-col min-w-0">
@@ -624,6 +719,17 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             )}>
               {isGlobal ? "Rally Global Brain" : contextName}
             </span>
+            {!isSidebarOpen && (
+              <button
+                type="button"
+                onClick={() => setIsSidebarOpen(true)}
+                className="ml-3 inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-900/50 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 transition-colors"
+                aria-label="Open conversations panel"
+              >
+                <Users className="h-3.5 w-3.5" />
+                <span>Conversations</span>
+              </button>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <button
