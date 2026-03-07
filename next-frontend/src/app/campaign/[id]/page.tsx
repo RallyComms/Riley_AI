@@ -3,6 +3,7 @@
 import { useParams } from "next/navigation";
 import { Users, FileText, Calendar } from "lucide-react";
 import { cn } from "@app/lib/utils";
+import { useCampaignName } from "@app/lib/useCampaignName";
 
 // Mock data
 const recentActivity = [
@@ -24,25 +25,20 @@ const upcomingDeadlines = [
   { id: "3", title: "Campaign Launch Prep", date: "Feb 1, 2024", daysLeft: 10 },
 ];
 
-// Helper function to format campaign name from ID
-function formatCampaignName(campaignId: string): string {
-  return campaignId
-    .split("-")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
-
 export default function CampaignOverviewPage() {
   const params = useParams();
   const campaignId = params.id as string;
-  const campaignName = formatCampaignName(campaignId);
+  const { name: campaignName } = useCampaignName(campaignId);
+  const headerTitle = campaignName?.trim()
+    ? `${campaignName} Dashboard`
+    : "Campaign Dashboard";
 
   return (
     <div className="min-h-full p-6 bg-transparent">
       {/* Header */}
       <div className="mb-8 bg-transparent">
         <h1 className="text-3xl font-bold tracking-tight text-zinc-100 mb-2">
-          {campaignName} Dashboard
+          {headerTitle}
         </h1>
         <p className="text-zinc-500">Campaign Status: <span className="text-emerald-400">Active</span></p>
       </div>
