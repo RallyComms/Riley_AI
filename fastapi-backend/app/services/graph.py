@@ -622,7 +622,364 @@ class GraphService:
                 "id": record["id"],
                 "content": record["content"],
                 "timestamp": record["timestamp"],
-                "author_id": record["author_id"]
+                "author_id": record["author_id"],
+                "edited_at": None,
+                "deleted_at": None,
+            }
+
+    async def create_private_chat_thread(
+        self,
+        campaign_id: str,
+        created_by_user_id: str,
+        member_user_ids: List[str],
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a campaign-scoped private chat thread."""
+        thread_id = str(uuid.uuid4())
+        normalized_name = name.strip() if isinstance(name, str) else None
+        if normalized_name == "":
+            normalized_name = None
+
+        # Thread members must be campaign members. Always include creator.
+        valid_member_ids = await self.get_campaign_member_ids(campaign_id)
+        selected_members = set(member_user_ids or [])
+        selected_members.add(created_by_user_id)
+
+        invalid_members = [member_id for member_id in selected_members if member_id not in valid_member_ids]
+        if invalid_members:
+            raise ValueError("All thread members must be campaign members")
+
+        async with self._driver.session() as session:
+            query = """
+            MATCH (c:Campaign {id: $campaign_id})
+            MERGE (creator:User {id: $created_by_user_id})
+            CREATE (t:ChatThread {
+                id: $thread_id,
+                tenant_id: $campaign_id,
+                name: $name,
+                is_private: true,
+                created_by_user_id: $created_by_user_id,
+                created_at: datetime()
+            })
+            CREATE (t)-[:THREAD_IN]->(c)
+            WITH t
+            UNWIND $member_user_ids as member_id
+            MATCH (u:User {id: member_id})-[:MEMBER_OF]->(:Campaign {id: $campaign_id})
+            MERGE (u)-[:THREAD_MEMBER {added_at: datetime()}]->(t)
+            RETURN
+                t.id as thread_id,
+                t.tenant_id as tenant_id,
+                t.name as name,
+                t.is_private as is_private,
+                t.created_by_user_id as created_by_user_id,
+                toString(t.created_at) as created_at
+            """
+            result = await session.run(
+                query,
+                campaign_id=campaign_id,
+                created_by_user_id=created_by_user_id,
+                thread_id=thread_id,
+                name=normalized_name,
+                member_user_ids=list(selected_members),
+            )
+            record = await result.single()
+            if not record:
+                raise ValueError(f"Campaign {campaign_id} not found")
+
+            return {
+                "thread_id": record["thread_id"],
+                "tenant_id": record["tenant_id"],
+                "name": record.get("name"),
+                "is_private": bool(record["is_private"]),
+                "created_by_user_id": record["created_by_user_id"],
+                "created_at": record["created_at"],
+            }
+
+    async def list_private_chat_threads(
+        self, campaign_id: str, user_id: str
+    ) -> List[Dict[str, Any]]:
+        """List private chat threads in campaign that the user belongs to."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (u:User {id: $user_id})-[:THREAD_MEMBER]->(t:ChatThread {tenant_id: $campaign_id, is_private: true})-[:THREAD_IN]->(:Campaign {id: $campaign_id})
+            RETURN
+                t.id as thread_id,
+                t.tenant_id as tenant_id,
+                t.name as name,
+                t.is_private as is_private,
+                t.created_by_user_id as created_by_user_id,
+                toString(t.created_at) as created_at
+            ORDER BY t.created_at DESC
+            """
+            result = await session.run(
+                query,
+                campaign_id=campaign_id,
+                user_id=user_id,
+            )
+            threads: List[Dict[str, Any]] = []
+            async for record in result:
+                threads.append(
+                    {
+                        "thread_id": record["thread_id"],
+                        "tenant_id": record["tenant_id"],
+                        "name": record.get("name"),
+                        "is_private": bool(record["is_private"]),
+                        "created_by_user_id": record["created_by_user_id"],
+                        "created_at": record["created_at"],
+                    }
+                )
+            return threads
+
+    async def get_private_thread_messages(
+        self, campaign_id: str, thread_id: str, user_id: str, limit: int = 50, since: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get messages from a private campaign thread for an authorized thread member."""
+        async with self._driver.session() as session:
+            membership_query = """
+            MATCH (u:User {id: $user_id})-[:THREAD_MEMBER]->(t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})
+            RETURN t.id as thread_id
+            """
+            membership_result = await session.run(
+                membership_query,
+                campaign_id=campaign_id,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
+            if not await membership_result.single():
+                raise PermissionError("Access denied to this private chat thread")
+
+            if since:
+                query = """
+                MATCH (t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})<-[:IN_THREAD]-(m:ThreadMessage)<-[:SENT_THREAD_MESSAGE]-(u:User)
+                WHERE m.timestamp > datetime($since)
+                RETURN
+                    m.id as id,
+                    m.content as content,
+                    toString(m.timestamp) as timestamp,
+                    u.id as author_id
+                ORDER BY m.timestamp DESC
+                LIMIT $limit
+                """
+                result = await session.run(
+                    query,
+                    campaign_id=campaign_id,
+                    thread_id=thread_id,
+                    since=since,
+                    limit=limit,
+                )
+            else:
+                query = """
+                MATCH (t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})<-[:IN_THREAD]-(m:ThreadMessage)<-[:SENT_THREAD_MESSAGE]-(u:User)
+                RETURN
+                    m.id as id,
+                    m.content as content,
+                    toString(m.timestamp) as timestamp,
+                    u.id as author_id
+                ORDER BY m.timestamp DESC
+                LIMIT $limit
+                """
+                result = await session.run(
+                    query,
+                    campaign_id=campaign_id,
+                    thread_id=thread_id,
+                    limit=limit,
+                )
+
+            messages: List[Dict[str, Any]] = []
+            async for record in result:
+                messages.append(
+                    {
+                        "id": record["id"],
+                        "content": record["content"],
+                        "timestamp": record["timestamp"],
+                        "author_id": record["author_id"],
+                        "edited_at": None,
+                        "deleted_at": None,
+                    }
+                )
+            messages.reverse()
+            return messages
+
+    async def post_private_thread_message(
+        self, campaign_id: str, thread_id: str, user_id: str, content: str
+    ) -> Dict[str, Any]:
+        """Post message to a private campaign thread for an authorized thread member."""
+        content = content.strip()
+        if not content:
+            raise ValueError("Message content cannot be empty")
+        if len(content) > 2000:
+            raise ValueError("Message content cannot exceed 2000 characters")
+
+        async with self._driver.session() as session:
+            membership_query = """
+            MATCH (u:User {id: $user_id})-[:THREAD_MEMBER]->(t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})
+            RETURN t.id as thread_id
+            """
+            membership_result = await session.run(
+                membership_query,
+                campaign_id=campaign_id,
+                thread_id=thread_id,
+                user_id=user_id,
+            )
+            if not await membership_result.single():
+                raise PermissionError("Access denied to this private chat thread")
+
+            message_id = str(uuid.uuid4())
+            query = """
+            MATCH (u:User {id: $user_id})-[:THREAD_MEMBER]->(t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})
+            CREATE (m:ThreadMessage {
+                id: $message_id,
+                content: $content,
+                timestamp: datetime()
+            })
+            CREATE (u)-[:SENT_THREAD_MESSAGE]->(m)-[:IN_THREAD]->(t)
+            RETURN
+                m.id as id,
+                m.content as content,
+                toString(m.timestamp) as timestamp,
+                u.id as author_id
+            """
+            result = await session.run(
+                query,
+                campaign_id=campaign_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                message_id=message_id,
+                content=content,
+            )
+            record = await result.single()
+            if not record:
+                raise Exception("Failed to post thread message")
+
+            return {
+                "id": record["id"],
+                "content": record["content"],
+                "timestamp": record["timestamp"],
+                "author_id": record["author_id"],
+                "edited_at": None,
+                "deleted_at": None,
+            }
+
+    async def update_team_message(
+        self, campaign_id: str, message_id: str, user_id: str, content: str
+    ) -> Dict[str, Any]:
+        """Update an existing team message (author only)."""
+        content = content.strip()
+        if not content:
+            raise ValueError("Message content cannot be empty")
+        if len(content) > 2000:
+            raise ValueError("Message content cannot exceed 2000 characters")
+
+        async with self._driver.session() as session:
+            # Fetch message + author for explicit author check.
+            lookup_query = """
+            MATCH (c:Campaign {id: $campaign_id})<-[:POSTED_IN]-(m:TeamMessage)<-[:SENT]-(u:User)
+            WHERE m.id = $message_id
+            RETURN m.id as id, u.id as author_id, m.deleted_at as deleted_at
+            """
+            lookup_result = await session.run(
+                lookup_query,
+                campaign_id=campaign_id,
+                message_id=message_id,
+            )
+            lookup_record = await lookup_result.single()
+
+            if not lookup_record:
+                raise ValueError(f"Message {message_id} not found")
+
+            if lookup_record["author_id"] != user_id:
+                raise PermissionError("Only the message author can edit this message")
+
+            if lookup_record.get("deleted_at") is not None:
+                raise ValueError("Deleted messages cannot be edited")
+
+            update_query = """
+            MATCH (c:Campaign {id: $campaign_id})<-[:POSTED_IN]-(m:TeamMessage)<-[:SENT]-(u:User {id: $user_id})
+            WHERE m.id = $message_id
+            SET m.content = $content, m.edited_at = datetime()
+            RETURN
+                m.id as id,
+                m.content as content,
+                toString(m.timestamp) as timestamp,
+                u.id as author_id,
+                toString(m.edited_at) as edited_at,
+                toString(m.deleted_at) as deleted_at
+            """
+            update_result = await session.run(
+                update_query,
+                campaign_id=campaign_id,
+                message_id=message_id,
+                user_id=user_id,
+                content=content,
+            )
+            update_record = await update_result.single()
+
+            if not update_record:
+                raise Exception("Failed to update team message")
+
+            return {
+                "id": update_record["id"],
+                "content": update_record["content"],
+                "timestamp": update_record["timestamp"],
+                "author_id": update_record["author_id"],
+                "edited_at": update_record.get("edited_at"),
+                "deleted_at": update_record.get("deleted_at"),
+            }
+
+    async def soft_delete_team_message(
+        self, campaign_id: str, message_id: str, user_id: str
+    ) -> Dict[str, Any]:
+        """Soft-delete a team message (author only)."""
+        async with self._driver.session() as session:
+            lookup_query = """
+            MATCH (c:Campaign {id: $campaign_id})<-[:POSTED_IN]-(m:TeamMessage)<-[:SENT]-(u:User)
+            WHERE m.id = $message_id
+            RETURN m.id as id, u.id as author_id
+            """
+            lookup_result = await session.run(
+                lookup_query,
+                campaign_id=campaign_id,
+                message_id=message_id,
+            )
+            lookup_record = await lookup_result.single()
+
+            if not lookup_record:
+                raise ValueError(f"Message {message_id} not found")
+
+            if lookup_record["author_id"] != user_id:
+                raise PermissionError("Only the message author can delete this message")
+
+            delete_query = """
+            MATCH (c:Campaign {id: $campaign_id})<-[:POSTED_IN]-(m:TeamMessage)<-[:SENT]-(u:User {id: $user_id})
+            WHERE m.id = $message_id
+            SET m.deleted_at = coalesce(m.deleted_at, datetime()),
+                m.content = ""
+            RETURN
+                m.id as id,
+                m.content as content,
+                toString(m.timestamp) as timestamp,
+                u.id as author_id,
+                toString(m.edited_at) as edited_at,
+                toString(m.deleted_at) as deleted_at
+            """
+            delete_result = await session.run(
+                delete_query,
+                campaign_id=campaign_id,
+                message_id=message_id,
+                user_id=user_id,
+            )
+            delete_record = await delete_result.single()
+
+            if not delete_record:
+                raise Exception("Failed to delete team message")
+
+            return {
+                "id": delete_record["id"],
+                "content": delete_record["content"],
+                "timestamp": delete_record["timestamp"],
+                "author_id": delete_record["author_id"],
+                "edited_at": delete_record.get("edited_at"),
+                "deleted_at": delete_record.get("deleted_at"),
             }
 
     async def get_team_messages(
@@ -649,8 +1006,9 @@ class GraphService:
                 query = """
                 MATCH (c:Campaign {id: $campaign_id})<-[:POSTED_IN]-(m:TeamMessage)<-[:SENT]-(u:User)
                 WHERE m.timestamp > datetime($since)
-                RETURN m.id as id, m.content as content, toString(m.timestamp) as timestamp, 
-                       u.id as author_id
+                RETURN m.id as id, m.content as content, toString(m.timestamp) as timestamp,
+                       u.id as author_id, toString(m.edited_at) as edited_at,
+                       toString(m.deleted_at) as deleted_at
                 ORDER BY m.timestamp DESC
                 LIMIT $limit
                 """
@@ -663,8 +1021,9 @@ class GraphService:
             else:
                 query = """
                 MATCH (c:Campaign {id: $campaign_id})<-[:POSTED_IN]-(m:TeamMessage)<-[:SENT]-(u:User)
-                RETURN m.id as id, m.content as content, toString(m.timestamp) as timestamp, 
-                       u.id as author_id
+                RETURN m.id as id, m.content as content, toString(m.timestamp) as timestamp,
+                       u.id as author_id, toString(m.edited_at) as edited_at,
+                       toString(m.deleted_at) as deleted_at
                 ORDER BY m.timestamp DESC
                 LIMIT $limit
                 """
@@ -680,7 +1039,9 @@ class GraphService:
                     "id": record["id"],
                     "content": record["content"],
                     "timestamp": record["timestamp"],
-                    "author_id": record.get("author_id", "unknown")
+                    "author_id": record.get("author_id", "unknown"),
+                    "edited_at": record.get("edited_at"),
+                    "deleted_at": record.get("deleted_at"),
                 })
             
             # Reverse to get chronological order (oldest -> newest)
@@ -735,6 +1096,53 @@ class GraphService:
                 })
             
             return members
+
+    async def list_campaign_members_for_mentions(
+        self, campaign_id: str
+    ) -> List[Dict[str, Any]]:
+        """List campaign members in a minimal, mention-safe shape.
+
+        Returns only users who are members of this campaign.
+        """
+        async with self._driver.session() as session:
+            query = """
+            MATCH (u:User)-[r:MEMBER_OF]->(c:Campaign {id: $campaign_id})
+            RETURN
+                u.id as user_id,
+                coalesce(u.name, u.first_name, u.email, u.id) as display_name,
+                u.avatar_url as avatar_url,
+                r.role as role
+            ORDER BY toLower(coalesce(u.name, u.first_name, u.email, u.id)) ASC
+            """
+
+            result = await session.run(query, campaign_id=campaign_id)
+            members: List[Dict[str, Any]] = []
+            async for record in result:
+                members.append(
+                    {
+                        "user_id": record["user_id"],
+                        "display_name": record["display_name"],
+                        "avatar_url": record.get("avatar_url"),
+                        "role": record.get("role"),
+                    }
+                )
+
+            return members
+
+    async def get_campaign_member_ids(self, campaign_id: str) -> List[str]:
+        """Return all user IDs that are members of a campaign."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (u:User)-[:MEMBER_OF]->(c:Campaign {id: $campaign_id})
+            RETURN u.id as user_id
+            """
+            result = await session.run(query, campaign_id=campaign_id)
+            ids: List[str] = []
+            async for record in result:
+                user_id = record.get("user_id")
+                if user_id:
+                    ids.append(user_id)
+            return ids
 
     async def add_campaign_member(
         self, campaign_id: str, target_user_id: str, target_email: str, role: str

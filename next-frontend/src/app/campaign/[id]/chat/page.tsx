@@ -1,9 +1,9 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { useParams } from "next/navigation";
 import { useAuth, useUser } from "@clerk/nextjs";
-import { Send } from "lucide-react";
+import { Check, ChevronLeft, Pencil, Plus, Send, Trash2, Users, X } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { apiFetch } from "@app/lib/api";
 import { useCampaignName } from "@app/lib/useCampaignName";
@@ -33,6 +33,8 @@ interface BackendMessage {
   content: string;
   timestamp: string; // ISO string
   author_id: string;
+  edited_at?: string | null;
+  deleted_at?: string | null;
 }
 
 // Frontend message shape
@@ -43,10 +45,77 @@ interface TeamMessage {
   content: string;
   timestamp: Date;
   author_id: string;
+  edited_at?: Date | null;
+  deleted_at?: Date | null;
+  mentions?: Array<{ user_id: string; display_name: string }>;
+}
+
+interface MentionMember {
+  user_id: string;
+  display_name: string;
+  avatar_url?: string | null;
+  role?: string | null;
+}
+
+interface ChatThread {
+  thread_id: string;
+  tenant_id: string;
+  name?: string | null;
+  is_private: boolean;
+  created_by_user_id: string;
+  created_at: string;
+}
+
+interface MentionContext {
+  start: number;
+  end: number;
+  query: string;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function extractMentionMetadata(
+  text: string,
+  members: MentionMember[]
+): Array<{ user_id: string; display_name: string }> {
+  const found: Array<{ user_id: string; display_name: string }> = [];
+  for (const member of members) {
+    const pattern = new RegExp(`(^|\\s)@${escapeRegExp(member.display_name)}(?=\\s|$)`, "i");
+    if (pattern.test(text)) {
+      found.push({ user_id: member.user_id, display_name: member.display_name });
+    }
+  }
+  return found;
 }
 
 // TeamMessageBubble component
-function TeamMessageBubble({ message }: { message: TeamMessage }) {
+function TeamMessageBubble({
+  message,
+  isOwnMessage,
+  isEditing,
+  editDraft,
+  isMutating,
+  onStartEdit,
+  onCancelEdit,
+  onEditDraftChange,
+  onSaveEdit,
+  onDelete,
+}: {
+  message: TeamMessage;
+  isOwnMessage: boolean;
+  isEditing: boolean;
+  editDraft: string;
+  isMutating: boolean;
+  onStartEdit: (message: TeamMessage) => void;
+  onCancelEdit: () => void;
+  onEditDraftChange: (value: string) => void;
+  onSaveEdit: (messageId: string) => void;
+  onDelete: (messageId: string) => void;
+}) {
+  const isDeleted = Boolean(message.deleted_at);
+
   // Parse content and highlight mentions
   const renderContent = (text: string) => {
     // Split by spaces but keep the spaces
@@ -84,29 +153,108 @@ function TeamMessageBubble({ message }: { message: TeamMessage }) {
           <span className="text-xs text-zinc-500">
             {formatTime(message.timestamp)}
           </span>
+          {message.edited_at && !isDeleted && (
+            <span className="text-xs text-zinc-500">(edited)</span>
+          )}
+          {isOwnMessage && !isDeleted && !isEditing && (
+            <div className="ml-2 flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onStartEdit(message)}
+                disabled={isMutating}
+                className="text-xs text-zinc-500 hover:text-zinc-300 transition-colors disabled:opacity-50"
+                aria-label="Edit message"
+                title="Edit"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => onDelete(message.id)}
+                disabled={isMutating}
+                className="text-xs text-zinc-500 hover:text-red-400 transition-colors disabled:opacity-50"
+                aria-label="Delete message"
+                title="Delete"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
         </div>
-        <p className="text-sm text-zinc-300 whitespace-pre-wrap break-words">
-          {renderContent(message.content)}
-        </p>
+        {isEditing ? (
+          <div className="space-y-2">
+            <textarea
+              value={editDraft}
+              onChange={(e) => onEditDraftChange(e.target.value)}
+              rows={3}
+              className="w-full resize-y rounded-md border border-zinc-700 bg-zinc-900/70 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-amber-400/50"
+            />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => onSaveEdit(message.id)}
+                disabled={isMutating || editDraft.trim().length === 0}
+                className="inline-flex items-center gap-1 rounded-md bg-amber-500 px-2 py-1 text-xs font-medium text-zinc-900 hover:bg-amber-400 disabled:opacity-50"
+              >
+                <Check className="h-3.5 w-3.5" />
+                Save
+              </button>
+              <button
+                type="button"
+                onClick={onCancelEdit}
+                disabled={isMutating}
+                className="inline-flex items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800/60 disabled:opacity-50"
+              >
+                <X className="h-3.5 w-3.5" />
+                Cancel
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p
+            className={cn(
+              "text-sm whitespace-pre-wrap break-words",
+              isDeleted ? "text-zinc-500 italic" : "text-zinc-300"
+            )}
+          >
+            {isDeleted ? "Message deleted" : renderContent(message.content)}
+          </p>
+        )}
       </div>
     </div>
   );
 }
 
 export default function TeamChatPage() {
+  const MAIN_THREAD_ID = "__team_comms__";
   const params = useParams();
   const campaignId = params.id as string;
   const { user } = useUser();
   const { getToken, isLoaded } = useAuth();
   const [messages, setMessages] = useState<TeamMessage[]>([]);
+  const [threads, setThreads] = useState<ChatThread[]>([]);
+  const [currentThreadId, setCurrentThreadId] = useState<string>(MAIN_THREAD_ID);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [isPosting, setIsPosting] = useState(false);
   const [lastTimestamp, setLastTimestamp] = useState<string | null>(null);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [mutatingMessageId, setMutatingMessageId] = useState<string | null>(null);
+  const [campaignMembers, setCampaignMembers] = useState<MentionMember[]>([]);
+  const [isMembersPanelOpen, setIsMembersPanelOpen] = useState(true);
+  const [isNewThreadOpen, setIsNewThreadOpen] = useState(false);
+  const [newThreadName, setNewThreadName] = useState("");
+  const [selectedThreadMemberIds, setSelectedThreadMemberIds] = useState<string[]>([]);
+  const [isCreatingThread, setIsCreatingThread] = useState(false);
+  const [mentionContext, setMentionContext] = useState<MentionContext | null>(null);
+  const [isMentionOpen, setIsMentionOpen] = useState(false);
+  const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
   
   // Fetch campaign name using shared hook
   const { displayName } = useCampaignName(campaignId);
@@ -128,11 +276,121 @@ export default function TeamChatPage() {
       content: backendMsg.content,
       timestamp: new Date(backendMsg.timestamp),
       author_id: backendMsg.author_id,
+      edited_at: backendMsg.edited_at ? new Date(backendMsg.edited_at) : null,
+      deleted_at: backendMsg.deleted_at ? new Date(backendMsg.deleted_at) : null,
+      mentions: extractMentionMetadata(backendMsg.content, campaignMembers),
     };
   };
 
+  const filteredMentionMembers = useMemo(() => {
+    if (!mentionContext) return [];
+    const query = mentionContext.query.trim().toLowerCase();
+    return campaignMembers.filter((member) => {
+      if (!query) return true;
+      return member.display_name.toLowerCase().includes(query);
+    });
+  }, [campaignMembers, mentionContext]);
+
+  const getThreadLabel = (thread: ChatThread): string => {
+    if (thread.name && thread.name.trim()) return thread.name;
+    return "Private Chat";
+  };
+
+  const closeMentionAutocomplete = () => {
+    setMentionContext(null);
+    setIsMentionOpen(false);
+    setSelectedMentionIndex(0);
+  };
+
+  const updateMentionAutocomplete = (value: string, caretPosition: number | null) => {
+    if (caretPosition === null || caretPosition < 0) {
+      closeMentionAutocomplete();
+      return;
+    }
+
+    const beforeCaret = value.slice(0, caretPosition);
+    const match = beforeCaret.match(/(^|\s)@([a-zA-Z0-9._-]*)$/);
+    if (!match) {
+      closeMentionAutocomplete();
+      return;
+    }
+
+    const prefix = match[1] || "";
+    const start = caretPosition - match[0].length + prefix.length;
+    const query = match[2] || "";
+    setMentionContext({
+      start,
+      end: caretPosition,
+      query,
+    });
+    setIsMentionOpen(true);
+    setSelectedMentionIndex(0);
+  };
+
+  const handleSelectMention = (member: MentionMember) => {
+    if (!mentionContext) return;
+    const insert = `@${member.display_name} `;
+    const nextValue =
+      inputValue.slice(0, mentionContext.start) +
+      insert +
+      inputValue.slice(mentionContext.end);
+
+    setInputValue(nextValue);
+    closeMentionAutocomplete();
+
+    const cursorPosition = mentionContext.start + insert.length;
+    requestAnimationFrame(() => {
+      if (!textareaRef.current) return;
+      textareaRef.current.focus();
+      textareaRef.current.setSelectionRange(cursorPosition, cursorPosition);
+    });
+  };
+
+  const fetchCampaignMembers = async () => {
+    if (!isLoaded || !campaignId) return;
+    try {
+      const token = await getToken();
+      if (!token) return;
+
+      const data = await apiFetch<{ members: MentionMember[] }>(
+        `/api/v1/campaigns/${campaignId}/members?mentions_only=true`,
+        {
+          token,
+          method: "GET",
+        }
+      );
+      setCampaignMembers(data.members || []);
+    } catch (err) {
+      console.error("Error fetching campaign members for mentions:", err);
+      setCampaignMembers([]);
+    }
+  };
+
+  const fetchThreads = async () => {
+    if (!isLoaded || !campaignId) return;
+    try {
+      const token = await getToken();
+      if (!token) return;
+
+      const data = await apiFetch<{ threads: ChatThread[] }>(
+        `/api/v1/campaigns/${campaignId}/chat-threads`,
+        {
+          token,
+          method: "GET",
+        }
+      );
+      setThreads(data.threads || []);
+    } catch (err) {
+      console.error("Error fetching chat threads:", err);
+      setThreads([]);
+    }
+  };
+
   // Fetch messages from API
-  const fetchMessages = async (since: string | null = null) => {
+  const fetchMessages = async (
+    since: string | null = null,
+    threadId: string = currentThreadId
+  ) => {
     if (!isLoaded) return;
 
     try {
@@ -141,16 +399,24 @@ export default function TeamChatPage() {
         throw new Error("No authentication token available");
       }
 
-      const path = `/api/v1/campaigns/${campaignId}/chat?limit=50${since ? `&since=${encodeURIComponent(since)}` : ""}`;
+      const path =
+        threadId === MAIN_THREAD_ID
+          ? `/api/v1/campaigns/${campaignId}/chat?limit=50${since ? `&since=${encodeURIComponent(since)}` : ""}`
+          : `/api/v1/campaigns/${campaignId}/chat-threads/${threadId}/messages?limit=50${since ? `&since=${encodeURIComponent(since)}` : ""}`;
       const data = await apiFetch<{ messages: BackendMessage[] }>(path, {
         token,
         method: "GET",
       });
       const backendMessages: BackendMessage[] = data.messages || [];
 
-      // Build user map (for now, use current user info for all messages)
-      // In production, you might want to fetch user details from Clerk or backend
+      // Build user map from campaign members (authorized users only).
       const userMap = new Map<string, { name: string; initials: string }>();
+      for (const member of campaignMembers) {
+        userMap.set(member.user_id, {
+          name: member.display_name,
+          initials: getInitials(member.display_name),
+        });
+      }
       const currentUserName =
         user?.firstName ||
         user?.emailAddresses[0]?.emailAddress ||
@@ -203,11 +469,15 @@ export default function TeamChatPage() {
 
   // Initial fetch on mount
   useEffect(() => {
+    if (isLoaded && campaignId) {
+      fetchCampaignMembers();
+      fetchThreads();
+    }
     if (isLoaded && campaignId && user?.id) {
       fetchMessages(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLoaded, campaignId, user?.id]);
+  }, [isLoaded, campaignId, user?.id, currentThreadId]);
 
   // Set up polling (every 12 seconds)
   useEffect(() => {
@@ -221,10 +491,10 @@ export default function TeamChatPage() {
     // Poll for new messages
     pollingIntervalRef.current = setInterval(() => {
       if (lastTimestamp) {
-        fetchMessages(lastTimestamp);
+        fetchMessages(lastTimestamp, currentThreadId);
       } else {
         // If no lastTimestamp yet, fetch all messages
-        fetchMessages(null);
+        fetchMessages(null, currentThreadId);
       }
     }, 12000); // 12 seconds
 
@@ -234,7 +504,7 @@ export default function TeamChatPage() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLoaded, campaignId, lastTimestamp, isLoading, error, user?.id]);
+  }, [isLoaded, campaignId, lastTimestamp, isLoading, error, user?.id, currentThreadId]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -249,6 +519,40 @@ export default function TeamChatPage() {
     }
   }, [inputValue]);
 
+  // Keep mention navigation index in range.
+  useEffect(() => {
+    if (selectedMentionIndex < filteredMentionMembers.length) return;
+    setSelectedMentionIndex(0);
+  }, [filteredMentionMembers.length, selectedMentionIndex]);
+
+  // Close mention dropdown when clicking outside composer area.
+  useEffect(() => {
+    if (!isMentionOpen) return;
+
+    const onMouseDown = (event: MouseEvent) => {
+      if (!composerRef.current) return;
+      const target = event.target as Node;
+      if (!composerRef.current.contains(target)) {
+        closeMentionAutocomplete();
+      }
+    };
+
+    document.addEventListener("mousedown", onMouseDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+    };
+  }, [isMentionOpen]);
+
+  const handleComposerChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const value = e.target.value;
+    setInputValue(value);
+    updateMentionAutocomplete(value, e.target.selectionStart);
+  };
+
+  const handleComposerSelectionChange = () => {
+    if (!textareaRef.current) return;
+    updateMentionAutocomplete(textareaRef.current.value, textareaRef.current.selectionStart);
+  };
 
   const handleSend = async () => {
     if (!inputValue.trim() || !user || isPosting) return;
@@ -263,7 +567,12 @@ export default function TeamChatPage() {
         throw new Error("No authentication token available");
       }
 
-      await apiFetch(`/api/v1/campaigns/${campaignId}/chat`, {
+      const sendPath =
+        currentThreadId === MAIN_THREAD_ID
+          ? `/api/v1/campaigns/${campaignId}/chat`
+          : `/api/v1/campaigns/${campaignId}/chat-threads/${currentThreadId}/messages`;
+
+      await apiFetch(sendPath, {
         token,
         method: "POST",
         body: {
@@ -273,13 +582,14 @@ export default function TeamChatPage() {
 
       // Clear input
       setInputValue("");
+      closeMentionAutocomplete();
 
       // Immediately re-fetch messages since lastTimestamp to get the new message
       if (lastTimestamp) {
-        await fetchMessages(lastTimestamp);
+        await fetchMessages(lastTimestamp, currentThreadId);
       } else {
         // If no lastTimestamp, fetch all messages
-        await fetchMessages(null);
+        await fetchMessages(null, currentThreadId);
       }
 
       // Check for mentions and dispatch notification event
@@ -308,21 +618,281 @@ export default function TeamChatPage() {
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (isMentionOpen) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeMentionAutocomplete();
+        return;
+      }
+
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        if (filteredMentionMembers.length === 0) return;
+        setSelectedMentionIndex((prev) =>
+          (prev + 1) % filteredMentionMembers.length
+        );
+        return;
+      }
+
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        if (filteredMentionMembers.length === 0) return;
+        setSelectedMentionIndex((prev) =>
+          prev === 0 ? filteredMentionMembers.length - 1 : prev - 1
+        );
+        return;
+      }
+
+      if (e.key === "Enter" && filteredMentionMembers.length > 0) {
+        e.preventDefault();
+        const selected = filteredMentionMembers[selectedMentionIndex];
+        if (selected) {
+          handleSelectMention(selected);
+        }
+        return;
+      }
+    }
+
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
   };
 
+  const handleStartEdit = (message: TeamMessage) => {
+    setEditingMessageId(message.id);
+    setEditDraft(message.content);
+    setError(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingMessageId(null);
+    setEditDraft("");
+  };
+
+  const handleSaveEdit = async (messageId: string) => {
+    const nextContent = editDraft.trim();
+    if (!nextContent) return;
+
+    try {
+      setMutatingMessageId(messageId);
+      setError(null);
+      const token = await getToken();
+      if (!token) {
+        throw new Error("No authentication token available");
+      }
+
+      const updated = await apiFetch<BackendMessage>(
+        `/api/v1/campaigns/${campaignId}/messages/${messageId}`,
+        {
+          token,
+          method: "PATCH",
+          body: {
+            content: nextContent,
+          },
+        }
+      );
+
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === messageId
+            ? {
+                ...msg,
+                content: updated.content,
+                edited_at: updated.edited_at ? new Date(updated.edited_at) : new Date(),
+                mentions: extractMentionMetadata(updated.content, campaignMembers),
+              }
+            : msg
+        )
+      );
+
+      setEditingMessageId(null);
+      setEditDraft("");
+    } catch (err) {
+      console.error("Error updating message:", err);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to update message. Please try again."
+      );
+    } finally {
+      setMutatingMessageId(null);
+    }
+  };
+
+  const handleDeleteMessage = async (messageId: string) => {
+    if (currentThreadId !== MAIN_THREAD_ID) return;
+    if (!window.confirm("Delete this message?")) {
+      return;
+    }
+
+    try {
+      setMutatingMessageId(messageId);
+      setError(null);
+      const token = await getToken();
+      if (!token) {
+        throw new Error("No authentication token available");
+      }
+
+      const deleted = await apiFetch<BackendMessage>(
+        `/api/v1/campaigns/${campaignId}/messages/${messageId}`,
+        {
+          token,
+          method: "DELETE",
+        }
+      );
+
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === messageId
+            ? {
+                ...msg,
+                content: deleted.content,
+                deleted_at: deleted.deleted_at ? new Date(deleted.deleted_at) : new Date(),
+                mentions: [],
+              }
+            : msg
+        )
+      );
+
+      if (editingMessageId === messageId) {
+        setEditingMessageId(null);
+        setEditDraft("");
+      }
+    } catch (err) {
+      console.error("Error deleting message:", err);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to delete message. Please try again."
+      );
+    } finally {
+      setMutatingMessageId(null);
+    }
+  };
+
+  const handleSelectThread = (threadId: string) => {
+    if (threadId === currentThreadId) return;
+    setCurrentThreadId(threadId);
+    setMessages([]);
+    setLastTimestamp(null);
+    setIsLoading(true);
+    setError(null);
+    setEditingMessageId(null);
+    setEditDraft("");
+    closeMentionAutocomplete();
+  };
+
+  const toggleThreadMember = (memberId: string) => {
+    setSelectedThreadMemberIds((prev) =>
+      prev.includes(memberId)
+        ? prev.filter((id) => id !== memberId)
+        : [...prev, memberId]
+    );
+  };
+
+  const handleCreatePrivateThread = async () => {
+    try {
+      setIsCreatingThread(true);
+      setError(null);
+      const token = await getToken();
+      if (!token) {
+        throw new Error("No authentication token available");
+      }
+
+      const created = await apiFetch<ChatThread>(
+        `/api/v1/campaigns/${campaignId}/chat-threads`,
+        {
+          token,
+          method: "POST",
+          body: {
+            name: newThreadName.trim() || null,
+            member_user_ids: selectedThreadMemberIds,
+          },
+        }
+      );
+
+      setThreads((prev) => [created, ...prev.filter((t) => t.thread_id !== created.thread_id)]);
+      setIsNewThreadOpen(false);
+      setNewThreadName("");
+      setSelectedThreadMemberIds([]);
+      handleSelectThread(created.thread_id);
+    } catch (err) {
+      console.error("Error creating private thread:", err);
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Failed to create private chat. Please try again."
+      );
+    } finally {
+      setIsCreatingThread(false);
+    }
+  };
+
   return (
     <div className="flex h-full relative">
+      <aside className="w-64 border-r border-white/5 bg-slate-900/40 backdrop-blur-md flex flex-col">
+        <div className="px-4 py-3 border-b border-white/5">
+          <h2 className="text-sm font-semibold text-zinc-100">Chats</h2>
+        </div>
+        <div className="p-3 space-y-2">
+          <button
+            type="button"
+            onClick={() => handleSelectThread(MAIN_THREAD_ID)}
+            className={cn(
+              "w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
+              currentThreadId === MAIN_THREAD_ID
+                ? "bg-amber-500/20 text-amber-200 border border-amber-500/30"
+                : "text-zinc-200 border border-zinc-700 hover:bg-zinc-800/60"
+            )}
+          >
+            Team Comms
+          </button>
+          {threads.map((thread) => (
+            <button
+              key={thread.thread_id}
+              type="button"
+              onClick={() => handleSelectThread(thread.thread_id)}
+              className={cn(
+                "w-full rounded-md px-3 py-2 text-left text-sm transition-colors",
+                currentThreadId === thread.thread_id
+                  ? "bg-amber-500/20 text-amber-200 border border-amber-500/30"
+                  : "text-zinc-200 border border-zinc-700 hover:bg-zinc-800/60"
+              )}
+            >
+              <span className="block truncate">{getThreadLabel(thread)}</span>
+            </button>
+          ))}
+        </div>
+        <div className="p-3 border-t border-white/5 mt-auto">
+          <button
+            type="button"
+            onClick={() => setIsNewThreadOpen(true)}
+            className="w-full rounded-md border border-zinc-700 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800/70 transition-colors inline-flex items-center justify-center gap-2"
+          >
+            <Plus className="h-4 w-4" />
+            New Private Chat
+          </button>
+        </div>
+      </aside>
+
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col overflow-hidden bg-transparent">
         {/* Header */}
         <header className="flex items-center justify-between p-6 border-b border-white/5 bg-slate-900/50 backdrop-blur-md">
           <h1 className="text-2xl font-bold text-zinc-100">
-            Team Comms | <span className="text-amber-400">{displayName}</span>
+            {currentThreadId === MAIN_THREAD_ID ? "Team Comms" : "Private Chat"} |{" "}
+            <span className="text-amber-400">{displayName}</span>
           </h1>
+          <button
+            type="button"
+            onClick={() => setIsMembersPanelOpen((prev) => !prev)}
+            className="inline-flex items-center gap-2 rounded-md border border-zinc-700 bg-zinc-900/50 px-3 py-1.5 text-sm text-zinc-200 hover:bg-zinc-800/70 transition-colors"
+            aria-label={isMembersPanelOpen ? "Hide members panel" : "Show members panel"}
+          >
+            {isMembersPanelOpen ? <ChevronLeft className="h-4 w-4" /> : <Users className="h-4 w-4" />}
+            <span>Members</span>
+          </button>
         </header>
 
         {/* Loading State */}
@@ -338,7 +908,7 @@ export default function TeamChatPage() {
             <div className="rounded-lg border border-red-500/50 bg-red-500/10 p-4 text-center max-w-md">
               <p className="text-red-400 font-medium mb-2">{error}</p>
               <button
-                onClick={() => fetchMessages(null)}
+                onClick={() => fetchMessages(null, currentThreadId)}
                 className="rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-zinc-900 hover:bg-amber-500 transition-colors"
               >
                 Retry
@@ -357,7 +927,19 @@ export default function TeamChatPage() {
                 </div>
               ) : (
                 messages.map((message) => (
-                  <TeamMessageBubble key={message.id} message={message} />
+                  <TeamMessageBubble
+                    key={message.id}
+                    message={message}
+                    isOwnMessage={Boolean(currentThreadId === MAIN_THREAD_ID && user?.id && message.author_id === user.id)}
+                    isEditing={Boolean(currentThreadId === MAIN_THREAD_ID && editingMessageId === message.id)}
+                    editDraft={editingMessageId === message.id ? editDraft : message.content}
+                    isMutating={mutatingMessageId === message.id}
+                    onStartEdit={handleStartEdit}
+                    onCancelEdit={handleCancelEdit}
+                    onEditDraftChange={setEditDraft}
+                    onSaveEdit={handleSaveEdit}
+                    onDelete={handleDeleteMessage}
+                  />
                 ))
               )}
               <div ref={messagesEndRef} />
@@ -367,13 +949,46 @@ export default function TeamChatPage() {
 
         {/* Input Area - Fixed Bottom */}
         <div className="flex-shrink-0 border-t border-white/5 bg-slate-900/50 backdrop-blur-md px-4 py-4">
-          <div className="flex items-end gap-3 max-w-4xl mx-auto">
+          <div ref={composerRef} className="flex items-end gap-3 max-w-4xl mx-auto">
             <div className="flex-1 relative">
+              {isMentionOpen && (
+                <div className="absolute bottom-full left-0 right-0 mb-2 z-30 overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-lg">
+                  {filteredMentionMembers.length === 0 ? (
+                    <div className="px-3 py-2 text-sm text-zinc-400">
+                      No members found
+                    </div>
+                  ) : (
+                    filteredMentionMembers.slice(0, 8).map((member, idx) => (
+                      <button
+                        key={member.user_id}
+                        type="button"
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          handleSelectMention(member);
+                        }}
+                        className={cn(
+                          "flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors",
+                          idx === selectedMentionIndex
+                            ? "bg-amber-500/20 text-amber-100"
+                            : "text-zinc-200 hover:bg-zinc-800"
+                        )}
+                      >
+                        <span className="truncate">@{member.display_name}</span>
+                        {member.role && (
+                          <span className="ml-3 text-xs text-zinc-400">{member.role}</span>
+                        )}
+                      </button>
+                    ))
+                  )}
+                </div>
+              )}
               <textarea
                 ref={textareaRef}
                 value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
+                onChange={handleComposerChange}
                 onKeyDown={handleKeyDown}
+                onClick={handleComposerSelectionChange}
+                onKeyUp={handleComposerSelectionChange}
                 placeholder="Type a message... (Use @Name to mention someone)"
                 disabled={isPosting || isLoading || !!error}
                 className={cn(
@@ -404,6 +1019,116 @@ export default function TeamChatPage() {
           </div>
         </div>
       </div>
+
+      {isNewThreadOpen && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-md rounded-lg border border-zinc-700 bg-zinc-900 p-4 shadow-xl">
+            <h3 className="text-lg font-semibold text-zinc-100">New Private Chat</h3>
+            <p className="mt-1 text-xs text-zinc-400">Only campaign members can be added.</p>
+            <div className="mt-4 space-y-3">
+              <div>
+                <label className="text-xs text-zinc-400">Name (optional)</label>
+                <input
+                  type="text"
+                  value={newThreadName}
+                  onChange={(e) => setNewThreadName(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-2 focus:ring-amber-400/50"
+                  placeholder="e.g., Creative Review"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-zinc-400">Members</label>
+                <div className="mt-1 max-h-44 overflow-y-auto rounded-md border border-zinc-700 bg-zinc-950">
+                  {campaignMembers.filter((member) => member.user_id !== user?.id).length === 0 ? (
+                    <div className="px-3 py-2 text-sm text-zinc-400">No other campaign members found</div>
+                  ) : (
+                    campaignMembers
+                      .filter((member) => member.user_id !== user?.id)
+                      .map((member) => (
+                        <label
+                          key={member.user_id}
+                          className="flex items-center gap-2 px-3 py-2 text-sm text-zinc-200 hover:bg-zinc-800/50"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={selectedThreadMemberIds.includes(member.user_id)}
+                            onChange={() => toggleThreadMember(member.user_id)}
+                            className="h-4 w-4 rounded border-zinc-600 bg-zinc-900"
+                          />
+                          <span className="truncate">{member.display_name}</span>
+                        </label>
+                      ))
+                  )}
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (isCreatingThread) return;
+                  setIsNewThreadOpen(false);
+                  setNewThreadName("");
+                  setSelectedThreadMemberIds([]);
+                }}
+                className="rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800/60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleCreatePrivateThread}
+                disabled={isCreatingThread}
+                className="rounded-md bg-amber-500 px-3 py-1.5 text-sm font-medium text-zinc-900 hover:bg-amber-400 disabled:opacity-50"
+              >
+                {isCreatingThread ? "Creating..." : "Create"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isMembersPanelOpen && (
+        <aside className="w-72 border-l border-white/5 bg-slate-900/40 backdrop-blur-md flex flex-col">
+          <div className="px-4 py-3 border-b border-white/5">
+            <h2 className="text-sm font-semibold text-zinc-100">Campaign Members</h2>
+            <p className="text-xs text-zinc-400 mt-0.5">{campaignMembers.length} authorized</p>
+          </div>
+          <div className="flex-1 overflow-y-auto">
+            {campaignMembers.length === 0 ? (
+              <div className="px-4 py-4 text-sm text-zinc-400">No members found</div>
+            ) : (
+              <ul className="py-2">
+                {campaignMembers.map((member) => (
+                  <li key={member.user_id} className="px-3 py-2">
+                    <div className="flex items-center gap-3 rounded-md px-2 py-1.5 hover:bg-zinc-800/40 transition-colors">
+                      {member.avatar_url ? (
+                        <img
+                          src={member.avatar_url}
+                          alt={member.display_name}
+                          className="h-8 w-8 rounded-full object-cover border border-zinc-700"
+                        />
+                      ) : (
+                        <div className="h-8 w-8 rounded-full border border-zinc-700 bg-zinc-800 flex items-center justify-center text-xs font-medium text-zinc-200">
+                          {getInitials(member.display_name)}
+                        </div>
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm text-zinc-200 truncate">{member.display_name}</p>
+                      </div>
+                      {member.role && (
+                        <span className="rounded-full border border-amber-400/30 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-300">
+                          {member.role}
+                        </span>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </aside>
+      )}
     </div>
   );
 }

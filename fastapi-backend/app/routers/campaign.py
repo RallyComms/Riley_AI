@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from fastapi import APIRouter, HTTPException, Depends, Query, status
 from pydantic import BaseModel, Field
 
@@ -51,11 +51,17 @@ class PostMessageRequest(BaseModel):
     content: str = Field(..., max_length=2000, description="Message content (max 2000 characters)")
 
 
+class UpdateMessageRequest(BaseModel):
+    content: str = Field(..., max_length=2000, description="Updated message content (max 2000 characters)")
+
+
 class TeamMessageResponse(BaseModel):
     id: str
     content: str
     timestamp: str
     author_id: str
+    edited_at: Optional[str] = None
+    deleted_at: Optional[str] = None
 
 
 class TeamMessagesResponse(BaseModel):
@@ -75,6 +81,35 @@ class MemberResponse(BaseModel):
 
 class MembersListResponse(BaseModel):
     members: List[MemberResponse]
+
+
+class MentionMemberResponse(BaseModel):
+    user_id: str
+    display_name: str
+    avatar_url: Optional[str] = None
+    role: Optional[str] = None
+
+
+class MentionMembersListResponse(BaseModel):
+    members: List[MentionMemberResponse]
+
+
+class ChatThreadResponse(BaseModel):
+    thread_id: str
+    tenant_id: str
+    name: Optional[str] = None
+    is_private: bool
+    created_by_user_id: str
+    created_at: str
+
+
+class ChatThreadsResponse(BaseModel):
+    threads: List[ChatThreadResponse]
+
+
+class CreateChatThreadRequest(BaseModel):
+    member_user_ids: List[str] = Field(default_factory=list, description="Campaign member IDs to include in private thread")
+    name: Optional[str] = Field(None, max_length=120, description="Optional thread name")
 
 
 @router.post("/campaigns", response_model=CampaignResponse)
@@ -300,12 +335,222 @@ async def post_team_message(
         ) from exc
 
 
-@router.get("/campaigns/{id}/members", response_model=MembersListResponse)
-async def get_campaign_members(
-    id: str,
+@router.patch("/campaigns/{tenant_id}/messages/{message_id}", response_model=TeamMessageResponse)
+async def update_team_message(
+    tenant_id: str,
+    message_id: str,
+    request: UpdateMessageRequest,
     current_user: Dict = Depends(verify_tenant_access),
     graph: GraphService = Depends(get_graph)
-) -> MembersListResponse:
+) -> TeamMessageResponse:
+    """Edit a team message (author-only)."""
+    user_id = current_user.get("id", "unknown")
+
+    try:
+        message = await graph.update_team_message(
+            campaign_id=tenant_id,
+            message_id=message_id,
+            user_id=user_id,
+            content=request.content,
+        )
+        return TeamMessageResponse(**message)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        detail = str(exc)
+        if "not found" in detail.lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=detail,
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update team message: {exc}",
+        ) from exc
+
+
+@router.delete("/campaigns/{tenant_id}/messages/{message_id}", response_model=TeamMessageResponse)
+async def delete_team_message(
+    tenant_id: str,
+    message_id: str,
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph)
+) -> TeamMessageResponse:
+    """Soft-delete a team message (author-only)."""
+    user_id = current_user.get("id", "unknown")
+
+    try:
+        message = await graph.soft_delete_team_message(
+            campaign_id=tenant_id,
+            message_id=message_id,
+            user_id=user_id,
+        )
+        return TeamMessageResponse(**message)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        detail = str(exc)
+        if "not found" in detail.lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=detail,
+            ) from exc
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail,
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete team message: {exc}",
+        ) from exc
+
+
+@router.get("/campaigns/{tenant_id}/chat-threads", response_model=ChatThreadsResponse)
+async def list_chat_threads(
+    tenant_id: str,
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> ChatThreadsResponse:
+    """List private campaign chat threads that include current user."""
+    user_id = current_user.get("id", "unknown")
+    try:
+        threads = await graph.list_private_chat_threads(
+            campaign_id=tenant_id,
+            user_id=user_id,
+        )
+        return ChatThreadsResponse(
+            threads=[ChatThreadResponse(**thread) for thread in threads]
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list chat threads: {exc}",
+        ) from exc
+
+
+@router.post("/campaigns/{tenant_id}/chat-threads", response_model=ChatThreadResponse)
+async def create_chat_thread(
+    tenant_id: str,
+    request: CreateChatThreadRequest,
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> ChatThreadResponse:
+    """Create a private campaign-scoped chat thread."""
+    user_id = current_user.get("id", "unknown")
+    try:
+        thread = await graph.create_private_chat_thread(
+            campaign_id=tenant_id,
+            created_by_user_id=user_id,
+            member_user_ids=request.member_user_ids,
+            name=request.name,
+        )
+        return ChatThreadResponse(**thread)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create chat thread: {exc}",
+        ) from exc
+
+
+@router.get("/campaigns/{tenant_id}/chat-threads/{thread_id}/messages", response_model=TeamMessagesResponse)
+async def get_chat_thread_messages(
+    tenant_id: str,
+    thread_id: str,
+    since: Optional[str] = Query(None, description="ISO timestamp - only return messages after this time"),
+    limit: int = Query(50, ge=1, le=100, description="Maximum number of messages to return"),
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> TeamMessagesResponse:
+    """Get messages for a private campaign thread (thread members only)."""
+    user_id = current_user.get("id", "unknown")
+    try:
+        messages = await graph.get_private_thread_messages(
+            campaign_id=tenant_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            limit=limit,
+            since=since,
+        )
+        return TeamMessagesResponse(
+            messages=[TeamMessageResponse(**msg) for msg in messages]
+        )
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get thread messages: {exc}",
+        ) from exc
+
+
+@router.post("/campaigns/{tenant_id}/chat-threads/{thread_id}/messages", response_model=TeamMessageResponse)
+async def post_chat_thread_message(
+    tenant_id: str,
+    thread_id: str,
+    request: PostMessageRequest,
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> TeamMessageResponse:
+    """Post message to a private campaign thread (thread members only)."""
+    user_id = current_user.get("id", "unknown")
+    try:
+        message = await graph.post_private_thread_message(
+            campaign_id=tenant_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            content=request.content,
+        )
+        return TeamMessageResponse(**message)
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to post thread message: {exc}",
+        ) from exc
+
+
+@router.get(
+    "/campaigns/{id}/members",
+    response_model=Union[MembersListResponse, MentionMembersListResponse],
+)
+async def get_campaign_members(
+    id: str,
+    mentions_only: bool = Query(
+        False,
+        description="When true, returns mention-safe member fields only",
+    ),
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph)
+) -> Union[MembersListResponse, MentionMembersListResponse]:
     """Get all members of a campaign.
     
     SECURITY: Requires authentication and campaign membership (enforced by verify_tenant_access).
@@ -319,6 +564,12 @@ async def get_campaign_members(
         List of campaign members with their roles
     """
     try:
+        if mentions_only:
+            members = await graph.list_campaign_members_for_mentions(campaign_id=id)
+            return MentionMembersListResponse(
+                members=[MentionMemberResponse(**member) for member in members]
+            )
+
         members = await graph.list_campaign_members(campaign_id=id)
         return MembersListResponse(
             members=[MemberResponse(**member) for member in members]
