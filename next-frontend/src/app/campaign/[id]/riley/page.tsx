@@ -7,12 +7,13 @@ import { useCampaignName } from "@app/lib/useCampaignName";
 export default function CampaignRileyPage() {
   const params = useParams();
   const campaignId = params.id as string;
-  const { displayName } = useCampaignName(campaignId);
+  const { name } = useCampaignName(campaignId);
+  const contextName = name || "Campaign";
 
   return (
     <div className="flex h-full relative">
       <div className="flex-1 flex flex-col overflow-hidden bg-transparent">
-        <RileyStudio contextName={displayName} tenantId={campaignId} />
+        <RileyStudio contextName={contextName} tenantId={campaignId} />
       </div>
     </div>
   );

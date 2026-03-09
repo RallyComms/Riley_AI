@@ -931,36 +931,39 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           {/* Sidebar Header */}
           <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
             <div className="flex-1 mr-2 flex items-center gap-2">
-              <button
-                type="button"
-                onClick={handleNewConversation}
-                className={cn(
-                  "flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-lg transition-colors font-medium text-sm",
-                  isGlobal
-                    ? "bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20"
-                    : "bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20"
-                )}
-              >
-                <Sparkles className="h-4 w-4" />
-                <span>New Conversation</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setIsCreatingProject((prev) => !prev)}
-                className="inline-flex items-center justify-center gap-1 rounded-lg border border-zinc-700 bg-zinc-900/60 px-3 py-2.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800/70 transition-colors"
-              >
-                <FolderPlus className="h-3.5 w-3.5" />
-                <span>New Project</span>
-              </button>
+              <div className="flex-1 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={handleNewConversation}
+                  className={cn(
+                    "inline-flex items-center justify-center gap-1.5 h-10 rounded-lg border px-3 text-xs font-medium transition-colors",
+                    "border-amber-500/20 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20"
+                  )}
+                >
+                  <Sparkles className="h-3.5 w-3.5" />
+                  <span>New Conversation</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsCreatingProject((prev) => !prev)}
+                  className={cn(
+                    "inline-flex items-center justify-center gap-1.5 h-10 rounded-lg border px-3 text-xs font-medium transition-colors",
+                    "border-zinc-700 bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800/70"
+                  )}
+                >
+                  <FolderPlus className="h-3.5 w-3.5" />
+                  <span>New Project</span>
+                </button>
+              </div>
             </div>
             <button
               type="button"
               onClick={() => setIsSidebarOpen(false)}
-              className="rounded-lg p-2 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+              className="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-700 bg-zinc-900/60 text-zinc-300 transition-colors hover:bg-zinc-800/80 hover:text-zinc-100"
               aria-label="Close conversations panel"
               title="Close conversations panel"
             >
-              <ChevronLeft className="h-4 w-4" />
+              <ChevronLeft className="h-5 w-5" />
             </button>
           </div>
 
