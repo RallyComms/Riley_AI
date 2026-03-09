@@ -499,8 +499,9 @@ async def chat(
     chat_history: List[Dict[str, str]] = []
     if request.session_id and graph:
         try:
-            # Extract user_id from session_id (format: session_{tenantId}_{userId}_{timestamp})
-            user_id = _extract_user_id_from_session(request.session_id)
+            # Use authenticated user identity for scope enforcement.
+            # Parsing from session_id is unreliable for IDs containing underscores (e.g., Clerk IDs).
+            user_id = current_user.get("id", "unknown")
             chat_history = await graph.get_chat_history(
                 session_id=request.session_id,
                 tenant_id=request.tenant_id,
@@ -683,8 +684,8 @@ Context Data:
 
     # Step G: Save messages to Neo4j using background tasks (non-blocking)
     if request.session_id and graph:
-        # Extract user_id from session_id (format: session_{tenantId}_{userId}_{timestamp})
-        user_id = _extract_user_id_from_session(request.session_id)
+        # Use authenticated user identity for scope enforcement.
+        user_id = current_user.get("id", "unknown")
         
         background_tasks.add_task(
             graph.save_message,
