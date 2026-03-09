@@ -180,6 +180,7 @@ class GraphService:
             RETURN
                 s.id as id,
                 coalesce(s.title, "New Conversation") as title,
+                s.project_id as project_id,
                 latest.content as last_message,
                 toString(latest.timestamp) as last_message_at,
                 toString(s.created_at) as created_at
@@ -199,12 +200,192 @@ class GraphService:
                     {
                         "id": record["id"],
                         "title": record.get("title") or "New Conversation",
+                        "project_id": record.get("project_id"),
                         "last_message": record.get("last_message") or "",
                         "last_message_at": record.get("last_message_at"),
                         "created_at": record.get("created_at"),
                     }
                 )
             return conversations
+
+    async def list_riley_projects(
+        self, tenant_id: str, user_id: str, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """List Riley projects for a user and tenant scope."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (p:RileyProject {tenant_id: $tenant_id, user_id: $user_id})
+            RETURN
+                p.id as id,
+                p.name as name,
+                toString(p.created_at) as created_at,
+                toString(p.updated_at) as updated_at
+            ORDER BY coalesce(p.updated_at, p.created_at) DESC
+            LIMIT $limit
+            """
+            result = await session.run(
+                query,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                limit=limit,
+            )
+
+            projects: List[Dict[str, Any]] = []
+            async for record in result:
+                projects.append(
+                    {
+                        "id": record["id"],
+                        "name": record.get("name") or "Untitled Project",
+                        "created_at": record.get("created_at"),
+                        "updated_at": record.get("updated_at"),
+                    }
+                )
+            return projects
+
+    async def create_riley_project(
+        self, tenant_id: str, user_id: str, name: str, project_id: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Create a Riley project for a user and tenant scope."""
+        normalized_name = name.strip()
+        if normalized_name == "":
+            normalized_name = "Untitled Project"
+        next_project_id = project_id or f"riley_project_{uuid.uuid4()}"
+
+        async with self._driver.session() as session:
+            query = """
+            CREATE (p:RileyProject {
+                id: $project_id,
+                tenant_id: $tenant_id,
+                user_id: $user_id,
+                name: $name,
+                created_at: datetime(),
+                updated_at: datetime()
+            })
+            RETURN
+                p.id as id,
+                p.name as name,
+                toString(p.created_at) as created_at,
+                toString(p.updated_at) as updated_at
+            """
+            result = await session.run(
+                query,
+                project_id=next_project_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                name=normalized_name,
+            )
+            record = await result.single()
+            if not record:
+                raise Exception("Failed to create Riley project")
+            return {
+                "id": record["id"],
+                "name": record.get("name") or "Untitled Project",
+                "created_at": record.get("created_at"),
+                "updated_at": record.get("updated_at"),
+            }
+
+    async def update_riley_project(
+        self, project_id: str, tenant_id: str, user_id: str, name: str
+    ) -> Dict[str, Any]:
+        """Rename a Riley project in scope."""
+        normalized_name = name.strip()
+        if normalized_name == "":
+            raise Exception("Project name cannot be empty")
+
+        async with self._driver.session() as session:
+            query = """
+            MATCH (p:RileyProject {id: $project_id, tenant_id: $tenant_id, user_id: $user_id})
+            SET p.name = $name, p.updated_at = datetime()
+            RETURN
+                p.id as id,
+                p.name as name,
+                toString(p.created_at) as created_at,
+                toString(p.updated_at) as updated_at
+            """
+            result = await session.run(
+                query,
+                project_id=project_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                name=normalized_name,
+            )
+            record = await result.single()
+            if not record:
+                raise Exception("Riley project not found")
+            return {
+                "id": record["id"],
+                "name": record.get("name") or "Untitled Project",
+                "created_at": record.get("created_at"),
+                "updated_at": record.get("updated_at"),
+            }
+
+    async def delete_riley_project(self, project_id: str, tenant_id: str, user_id: str) -> None:
+        """Delete a Riley project and unassign conversations in scope."""
+        async with self._driver.session() as session:
+            query = """
+            OPTIONAL MATCH (s:ChatSession {tenant_id: $tenant_id, user_id: $user_id, project_id: $project_id})
+            SET s.project_id = null
+            WITH count(s) as _
+            MATCH (p:RileyProject {id: $project_id, tenant_id: $tenant_id, user_id: $user_id})
+            DETACH DELETE p
+            """
+            await session.run(
+                query,
+                project_id=project_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+
+    async def assign_riley_conversation_project(
+        self,
+        session_id: str,
+        tenant_id: str,
+        user_id: str,
+        project_id: Optional[str],
+    ) -> Dict[str, Any]:
+        """Assign or clear a Riley conversation's project."""
+        async with self._driver.session() as session:
+            if project_id is None:
+                clear_query = """
+                MATCH (s:ChatSession {id: $session_id, tenant_id: $tenant_id, user_id: $user_id})
+                SET s.project_id = null
+                RETURN s.id as id, s.project_id as project_id
+                """
+                result = await session.run(
+                    clear_query,
+                    session_id=session_id,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                )
+                record = await result.single()
+                if not record:
+                    raise Exception("Conversation not found")
+                return {
+                    "id": record["id"],
+                    "project_id": record.get("project_id"),
+                }
+
+            assign_query = """
+            MATCH (p:RileyProject {id: $project_id, tenant_id: $tenant_id, user_id: $user_id})
+            WITH p
+            MATCH (s:ChatSession {id: $session_id, tenant_id: $tenant_id, user_id: $user_id})
+            SET s.project_id = $project_id
+            RETURN s.id as id, s.project_id as project_id
+            """
+            result = await session.run(
+                assign_query,
+                project_id=project_id,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+            record = await result.single()
+            if not record:
+                raise Exception("Conversation or project not found in scope")
+            return {
+                "id": record["id"],
+                "project_id": record.get("project_id"),
+            }
 
     async def create_riley_conversation(
         self, tenant_id: str, user_id: str, session_id: Optional[str] = None, title: Optional[str] = None

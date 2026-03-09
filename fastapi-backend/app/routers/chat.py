@@ -68,6 +68,7 @@ class RenameRequest(BaseModel):
 class RileyConversationResponse(BaseModel):
     id: str
     title: str
+    project_id: Optional[str] = None
     last_message: Optional[str] = None
     last_message_at: Optional[str] = None
     created_at: Optional[str] = None
@@ -95,6 +96,31 @@ class CreateRileyConversationMessageRequest(BaseModel):
     tenant_id: str = Field(..., max_length=50, description="Tenant/client identifier (or 'global')")
     role: Literal["user", "model"] = Field(..., description="Message role")
     content: str = Field(..., max_length=2000, description="Message content text")
+
+
+class RileyProjectResponse(BaseModel):
+    id: str
+    name: str
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class RileyProjectsListResponse(BaseModel):
+    projects: List[RileyProjectResponse]
+
+
+class CreateRileyProjectRequest(BaseModel):
+    tenant_id: str = Field(..., max_length=50, description="Tenant/client identifier (or 'global')")
+    name: str = Field(..., max_length=200, description="Project name")
+
+
+class UpdateRileyProjectRequest(BaseModel):
+    name: str = Field(..., max_length=200, description="Project name")
+
+
+class AssignRileyConversationProjectRequest(BaseModel):
+    tenant_id: str = Field(..., max_length=50, description="Tenant/client identifier (or 'global')")
+    project_id: Optional[str] = Field(None, description="Project ID or null to unassign")
 
 
 def _get_embedding_model() -> None:
@@ -751,6 +777,7 @@ async def create_riley_conversation(
     return RileyConversationResponse(
         id=conversation["id"],
         title=conversation.get("title") or "New Conversation",
+        project_id=conversation.get("project_id"),
         created_at=conversation.get("created_at"),
     )
 
@@ -798,6 +825,107 @@ async def add_riley_conversation_message(
         content=request.content,
     )
     return {"status": "ok"}
+
+
+@router.get("/riley/projects", response_model=RileyProjectsListResponse)
+async def list_riley_projects(
+    http_request: Request,
+    tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> RileyProjectsListResponse:
+    """List Riley projects for the current user and tenant scope."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, tenant_id, http_request)
+
+    projects = await graph.list_riley_projects(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        limit=100,
+    )
+    return RileyProjectsListResponse(projects=[RileyProjectResponse(**project) for project in projects])
+
+
+@router.post("/riley/projects", response_model=RileyProjectResponse)
+async def create_riley_project(
+    http_request: Request,
+    request: CreateRileyProjectRequest,
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> RileyProjectResponse:
+    """Create a Riley project for the current user and tenant scope."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, request.tenant_id, http_request)
+
+    project = await graph.create_riley_project(
+        tenant_id=request.tenant_id,
+        user_id=user_id,
+        name=request.name,
+    )
+    return RileyProjectResponse(**project)
+
+
+@router.patch("/riley/projects/{project_id}", response_model=RileyProjectResponse)
+async def update_riley_project(
+    http_request: Request,
+    project_id: str,
+    request: UpdateRileyProjectRequest,
+    tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> RileyProjectResponse:
+    """Rename a Riley project in scope."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, tenant_id, http_request)
+
+    project = await graph.update_riley_project(
+        project_id=project_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        name=request.name,
+    )
+    return RileyProjectResponse(**project)
+
+
+@router.delete("/riley/projects/{project_id}")
+async def delete_riley_project(
+    http_request: Request,
+    project_id: str,
+    tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> Dict[str, str]:
+    """Delete a Riley project and unassign its conversations."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, tenant_id, http_request)
+
+    await graph.delete_riley_project(
+        project_id=project_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+    return {"status": "ok"}
+
+
+@router.patch("/riley/conversations/{conversation_id}/project")
+async def assign_riley_conversation_project(
+    http_request: Request,
+    conversation_id: str,
+    request: AssignRileyConversationProjectRequest,
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> Dict[str, Optional[str]]:
+    """Assign or clear the project for a Riley conversation."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, request.tenant_id, http_request)
+
+    updated = await graph.assign_riley_conversation_project(
+        session_id=conversation_id,
+        tenant_id=request.tenant_id,
+        user_id=user_id,
+        project_id=request.project_id,
+    )
+    return {"id": updated["id"], "project_id": updated.get("project_id")}
 
 
 @router.patch("/riley/conversations/{conversation_id}", response_model=RileyConversationResponse)
