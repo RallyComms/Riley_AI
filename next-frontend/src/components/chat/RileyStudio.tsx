@@ -61,6 +61,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingConversations, setIsLoadingConversations] = useState(true);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [mode, setMode] = useState<"fast" | "deep">(initialMode);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
@@ -86,6 +87,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   useEffect(() => {
     async function loadConversations() {
       if (!authLoaded || !userLoaded || !user || !tenantId) return;
+      setIsLoadingConversations(true);
       try {
         const token = await getToken();
         if (!token) return;
@@ -130,6 +132,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         }
       } catch (error) {
         console.error("Failed to load Riley conversations:", error);
+      } finally {
+        setIsLoadingConversations(false);
       }
     }
 
@@ -571,6 +575,13 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   ];
 
   const isEmpty = messages.length === 0 || (messages.length === 1 && messages[0].role === "system");
+  const hasThinkingPlaceholder = messages.some((msg) => msg.status === "thinking");
+  const showWelcome =
+    isEmpty &&
+    !isLoading &&
+    !isLoadingConversations &&
+    conversations.length === 0 &&
+    !activeConversationId;
 
   return (
     <div 
@@ -760,7 +771,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
         {/* Message Area */}
         <div className="flex-1 overflow-y-auto">
-          {isEmpty ? (
+          {showWelcome ? (
             /* Empty State */
             <div className="h-full flex flex-col items-center justify-center px-6 py-12">
               <div className="max-w-2xl w-full text-center">
@@ -909,8 +920,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 );
               })}
 
-              {/* Thinking Indicator - Shows when isLoading is true */}
-              {isLoading && (
+              {/* Thinking Indicator for non-optimistic loading only */}
+              {isLoading && !hasThinkingPlaceholder && (
                 <div className="flex gap-4 justify-start">
                   <div className="flex-shrink-0 h-8 w-8 rounded-full border flex items-center justify-center bg-amber-500/10 border-amber-500/20">
                     <Sparkles className="h-4 w-4 text-amber-400" />
