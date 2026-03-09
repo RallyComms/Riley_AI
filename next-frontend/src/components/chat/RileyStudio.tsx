@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
-import { Send, Loader2, Sparkles, Zap, Brain, FileText, Pencil, Check, X, Search, MessageSquare, BarChart3, ChevronLeft, Users, FolderPlus, Folder } from "lucide-react";
+import { Send, Loader2, Sparkles, Zap, Brain, FileText, Check, X, Search, MessageSquare, BarChart3, ChevronLeft, Users, FolderPlus, Folder, MoreHorizontal, ChevronDown, ChevronRight } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import { cn } from "@app/lib/utils";
@@ -86,6 +86,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [isRenamingRequest, setIsRenamingRequest] = useState(false);
   const [isCreatingProject, setIsCreatingProject] = useState(false);
   const [projectInput, setProjectInput] = useState("");
+  const [openConversationMenuId, setOpenConversationMenuId] = useState<string | null>(null);
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<Record<string, boolean>>({});
   const [assetByFilename, setAssetByFilename] = useState<Record<string, Asset>>({});
   const [selectedSourceAsset, setSelectedSourceAsset] = useState<Asset | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -96,6 +98,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const isGlobal = tenantId === "global";
   const selectedConversationStorageKey =
     tenantId && user?.id ? `rileySelectedConversation:${tenantId}:${user.id}` : null;
+  const collapsedProjectsStorageKey =
+    tenantId && user?.id ? `rileyCollapsedProjects:${tenantId}:${user.id}` : null;
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -199,6 +203,32 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     }
     localStorage.setItem(selectedConversationStorageKey, activeConversationId);
   }, [selectedConversationStorageKey, activeConversationId]);
+
+  useEffect(() => {
+    if (!collapsedProjectsStorageKey) return;
+    try {
+      const raw = localStorage.getItem(collapsedProjectsStorageKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, boolean>;
+      setCollapsedProjectIds(parsed || {});
+    } catch {
+      setCollapsedProjectIds({});
+    }
+  }, [collapsedProjectsStorageKey]);
+
+  useEffect(() => {
+    if (!collapsedProjectsStorageKey) return;
+    localStorage.setItem(collapsedProjectsStorageKey, JSON.stringify(collapsedProjectIds));
+  }, [collapsedProjectsStorageKey, collapsedProjectIds]);
+
+  useEffect(() => {
+    if (!openConversationMenuId) return;
+    const handleWindowClick = () => setOpenConversationMenuId(null);
+    window.addEventListener("click", handleWindowClick);
+    return () => {
+      window.removeEventListener("click", handleWindowClick);
+    };
+  }, [openConversationMenuId]);
 
   // Build local filename -> asset map for source opening.
   useEffect(() => {
@@ -396,17 +426,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     }
   };
 
-  const handleRenameStart = (e: React.MouseEvent, conv: Conversation) => {
-    e.stopPropagation();
-    setRenamingSessionId(conv.id);
-    setRenameInput(conv.title);
-    // Focus input after state update
-    setTimeout(() => {
-      renameInputRef.current?.focus();
-      renameInputRef.current?.select();
-    }, 0);
-  };
-
   const handleRenameCancel = (e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     setRenamingSessionId(null);
@@ -512,6 +531,38 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     } catch (error) {
       console.error("Failed to assign Riley project:", error);
     }
+  };
+
+  const handleDeleteConversation = async (conversationId: string) => {
+    try {
+      const token = await getToken();
+      if (!token) return;
+
+      await apiFetch(`/api/v1/riley/conversations/${conversationId}?tenant_id=${encodeURIComponent(tenantId)}`, {
+        token,
+        method: "DELETE",
+      });
+
+      let nextConversationId: string | null = null;
+      setConversations((prev) => {
+        const remaining = prev.filter((conv) => conv.id !== conversationId);
+        nextConversationId = remaining.length > 0 ? remaining[0].id : null;
+        return remaining;
+      });
+      if (activeConversationId === conversationId) {
+        setActiveConversationId(nextConversationId);
+      }
+      setOpenConversationMenuId(null);
+    } catch (error) {
+      console.error("Failed to delete Riley conversation:", error);
+    }
+  };
+
+  const toggleProjectCollapsed = (projectId: string) => {
+    setCollapsedProjectIds((prev) => ({
+      ...prev,
+      [projectId]: !prev[projectId],
+    }));
   };
 
   const handleSend = async () => {
@@ -701,6 +752,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const renderConversationRow = (conv: Conversation, nested: boolean = false) => {
     const isActive = activeConversationId === conv.id;
     const isRowRenaming = renamingSessionId === conv.id;
+    const isMenuOpen = openConversationMenuId === conv.id;
+    const currentProject = projects.find((project) => project.id === conv.projectId);
 
     return (
       <div
@@ -718,6 +771,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           tabIndex={0}
           onClick={() => {
             setActiveConversationId(conv.id);
+            setOpenConversationMenuId(null);
           }}
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") {
@@ -764,35 +818,95 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   <div className="text-xs text-zinc-500 mt-1 truncate">{conv.lastMessage}</div>
                   <div className="text-xs text-zinc-600 mt-1">{formatTime(conv.timestamp)}</div>
                 </div>
-                {isActive && (
+                <div className="relative">
                   <button
                     type="button"
-                    onClick={(e) => handleRenameStart(e, conv)}
-                    className="opacity-0 group-hover:opacity-100 p-1.5 rounded transition-all text-amber-400 hover:bg-amber-500/10"
-                    title="Rename conversation"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setOpenConversationMenuId((prev) => (prev === conv.id ? null : conv.id));
+                    }}
+                    className={cn(
+                      "p-1.5 rounded transition-all hover:bg-zinc-700/70",
+                      isMenuOpen || isActive ? "text-zinc-300" : "text-zinc-500 opacity-0 group-hover:opacity-100"
+                    )}
+                    title="Conversation actions"
                   >
-                    <Pencil className="h-3.5 w-3.5" />
+                    <MoreHorizontal className="h-3.5 w-3.5" />
                   </button>
-                )}
-              </div>
-              <div className="mt-2">
-                <select
-                  value={conv.projectId ?? ""}
-                  onChange={(e) => {
-                    e.stopPropagation();
-                    const nextProjectId = e.target.value || null;
-                    void handleAssignProject(conv.id, nextProjectId);
-                  }}
-                  onClick={(e) => e.stopPropagation()}
-                  className="w-full rounded-md border border-zinc-700 bg-zinc-900/60 px-2 py-1 text-xs text-zinc-300 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
-                >
-                  <option value="">Loose Conversation</option>
-                  {projects.map((project) => (
-                    <option key={project.id} value={project.id}>
-                      {project.name}
-                    </option>
-                  ))}
-                </select>
+                  {isMenuOpen && (
+                    <div
+                      className="absolute right-0 top-8 z-20 min-w-[180px] rounded-lg border border-zinc-700 bg-zinc-900/95 p-1 shadow-xl"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setOpenConversationMenuId(null);
+                          setRenamingSessionId(conv.id);
+                          setRenameInput(conv.title);
+                          setTimeout(() => {
+                            renameInputRef.current?.focus();
+                            renameInputRef.current?.select();
+                          }, 0);
+                        }}
+                        className="w-full rounded-md px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
+                      >
+                        Rename
+                      </button>
+                      {projects.length > 0 && (
+                        <>
+                          <div className="my-1 border-t border-zinc-800" />
+                          <div className="px-2 py-1 text-[10px] uppercase tracking-wide text-zinc-500">
+                            {conv.projectId ? "Move to Project" : "Add to Project"}
+                          </div>
+                          {projects.map((project) => (
+                            <button
+                              key={project.id}
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setOpenConversationMenuId(null);
+                                void handleAssignProject(conv.id, project.id);
+                              }}
+                              className={cn(
+                                "w-full rounded-md px-2 py-1.5 text-left text-xs hover:bg-zinc-800",
+                                conv.projectId === project.id ? "text-amber-300" : "text-zinc-200"
+                              )}
+                            >
+                              {project.name}
+                            </button>
+                          ))}
+                        </>
+                      )}
+                      {conv.projectId && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpenConversationMenuId(null);
+                            void handleAssignProject(conv.id, null);
+                          }}
+                          className="mt-1 w-full rounded-md px-2 py-1.5 text-left text-xs text-zinc-200 hover:bg-zinc-800"
+                        >
+                          Remove from Project{currentProject ? ` (${currentProject.name})` : ""}
+                        </button>
+                      )}
+                      <div className="my-1 border-t border-zinc-800" />
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (!window.confirm("Delete this conversation?")) return;
+                          void handleDeleteConversation(conv.id);
+                        }}
+                        className="w-full rounded-md px-2 py-1.5 text-left text-xs text-rose-300 hover:bg-rose-500/10"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
               </div>
             </>
           )}
@@ -891,19 +1005,31 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 ) : (
                   projects.map((project) => {
                     const projectConversations = conversations.filter((conv) => conv.projectId === project.id);
+                    const isCollapsed = Boolean(collapsedProjectIds[project.id]);
                     return (
                       <div key={project.id} className="rounded-lg border border-zinc-800/80 bg-zinc-900/30 p-2">
-                        <div className="flex items-center gap-2 px-1 py-1">
+                        <button
+                          type="button"
+                          onClick={() => toggleProjectCollapsed(project.id)}
+                          className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-zinc-800/40"
+                        >
+                          {isCollapsed ? (
+                            <ChevronRight className="h-3.5 w-3.5 text-zinc-500" />
+                          ) : (
+                            <ChevronDown className="h-3.5 w-3.5 text-zinc-500" />
+                          )}
                           <Folder className="h-3.5 w-3.5 text-zinc-400" />
                           <div className="truncate text-xs font-medium text-zinc-300">{project.name}</div>
-                        </div>
-                        <div className="space-y-1">
-                          {projectConversations.length === 0 ? (
-                            <div className="ml-4 px-2 py-1 text-xs text-zinc-600">No conversations.</div>
-                          ) : (
-                            projectConversations.map((conv) => renderConversationRow(conv, true))
-                          )}
-                        </div>
+                        </button>
+                        {!isCollapsed && (
+                          <div className="space-y-1">
+                            {projectConversations.length === 0 ? (
+                              <div className="ml-4 px-2 py-1 text-xs text-zinc-600">No conversations.</div>
+                            ) : (
+                              projectConversations.map((conv) => renderConversationRow(conv, true))
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })
@@ -912,10 +1038,10 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             </div>
 
             <div>
-              <div className="px-2 pb-1 text-[11px] uppercase tracking-wide text-zinc-500">Loose Conversations</div>
+              <div className="px-2 pb-1 text-[11px] uppercase tracking-wide text-zinc-500">Conversations</div>
               <div className="space-y-1">
                 {looseConversations.length === 0 ? (
-                  <div className="px-2 py-1 text-xs text-zinc-600">No loose conversations.</div>
+                  <div className="px-2 py-1 text-xs text-zinc-600">No conversations.</div>
                 ) : (
                   looseConversations.map((conv) => renderConversationRow(conv))
                 )}

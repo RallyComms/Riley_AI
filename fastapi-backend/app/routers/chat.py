@@ -928,6 +928,26 @@ async def assign_riley_conversation_project(
     return {"id": updated["id"], "project_id": updated.get("project_id")}
 
 
+@router.delete("/riley/conversations/{conversation_id}")
+async def delete_riley_conversation(
+    http_request: Request,
+    conversation_id: str,
+    tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> Dict[str, str]:
+    """Delete a Riley conversation and its persisted messages."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, tenant_id, http_request)
+
+    await graph.delete_riley_conversation(
+        session_id=conversation_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+    )
+    return {"status": "ok"}
+
+
 @router.patch("/riley/conversations/{conversation_id}", response_model=RileyConversationResponse)
 async def rename_riley_conversation(
     http_request: Request,

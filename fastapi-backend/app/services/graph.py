@@ -387,6 +387,23 @@ class GraphService:
                 "project_id": record.get("project_id"),
             }
 
+    async def delete_riley_conversation(self, session_id: str, tenant_id: str, user_id: str) -> None:
+        """Delete a Riley conversation and all messages in scope."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (s:ChatSession {id: $session_id, tenant_id: $tenant_id, user_id: $user_id})
+            OPTIONAL MATCH (m:Message)-[:BELONGS_TO]->(s)
+            WITH s, collect(m) as messages
+            FOREACH (msg IN messages | DETACH DELETE msg)
+            DETACH DELETE s
+            """
+            await session.run(
+                query,
+                session_id=session_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+
     async def create_riley_conversation(
         self, tenant_id: str, user_id: str, session_id: Optional[str] = None, title: Optional[str] = None
     ) -> Dict[str, Any]:
