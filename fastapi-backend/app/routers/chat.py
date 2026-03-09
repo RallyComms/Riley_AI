@@ -799,6 +799,31 @@ async def add_riley_conversation_message(
     return {"status": "ok"}
 
 
+@router.patch("/riley/conversations/{conversation_id}", response_model=RileyConversationResponse)
+async def rename_riley_conversation(
+    http_request: Request,
+    conversation_id: str,
+    request: RenameRequest,
+    tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> RileyConversationResponse:
+    """Rename a persisted Riley conversation."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, tenant_id, http_request)
+
+    updated_title = await graph.update_session_title(
+        session_id=conversation_id,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        title=request.title,
+    )
+    return RileyConversationResponse(
+        id=conversation_id,
+        title=updated_title,
+    )
+
+
 @router.get("/chat/history/{session_id}", response_model=List[MessageSchema])
 async def get_chat_session_history(
     session_id: str,

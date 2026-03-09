@@ -65,7 +65,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [mode, setMode] = useState<"fast" | "deep">(initialMode);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState("");
-  const [isRenaming, setIsRenaming] = useState(false);
+  const [isRenamingRequest, setIsRenamingRequest] = useState(false);
   const [assetByFilename, setAssetByFilename] = useState<Record<string, Asset>>({});
   const [selectedSourceAsset, setSelectedSourceAsset] = useState<Asset | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -74,6 +74,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   
   // Check if this is Global Riley (Imperial Amber theme)
   const isGlobal = tenantId === "global";
+  const selectedConversationStorageKey =
+    tenantId && user?.id ? `rileySelectedConversation:${tenantId}:${user.id}` : null;
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -109,10 +111,22 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
         setConversations(mapped);
         if (mapped.length > 0) {
-          setActiveConversationId((prev) => prev || mapped[0].id);
+          const savedConversationId = selectedConversationStorageKey
+            ? localStorage.getItem(selectedConversationStorageKey)
+            : null;
+          const preferredId =
+            savedConversationId && mapped.some((conv) => conv.id === savedConversationId)
+              ? savedConversationId
+              : mapped[0].id;
+          setActiveConversationId((prev) =>
+            prev && mapped.some((conv) => conv.id === prev) ? prev : preferredId
+          );
         } else {
           setActiveConversationId(null);
           setMessages([]);
+          if (selectedConversationStorageKey) {
+            localStorage.removeItem(selectedConversationStorageKey);
+          }
         }
       } catch (error) {
         console.error("Failed to load Riley conversations:", error);
@@ -120,7 +134,16 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     }
 
     loadConversations();
-  }, [authLoaded, userLoaded, user, tenantId, getToken]);
+  }, [authLoaded, userLoaded, user, tenantId, getToken, selectedConversationStorageKey]);
+
+  useEffect(() => {
+    if (!selectedConversationStorageKey) return;
+    if (!activeConversationId) {
+      localStorage.removeItem(selectedConversationStorageKey);
+      return;
+    }
+    localStorage.setItem(selectedConversationStorageKey, activeConversationId);
+  }, [selectedConversationStorageKey, activeConversationId]);
 
   // Build local filename -> asset map for source opening.
   useEffect(() => {
@@ -195,21 +218,11 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       return;
     }
 
-    // Only load history if messages are empty or only contain system message
-    // This prevents overwriting optimistic updates
-    setMessages((prev) => {
-      const hasUserOrAssistantMessages = prev.some(
-        (msg) => msg.role === "user" || msg.role === "assistant"
-      );
-      // If we have user/assistant messages, don't load history (preserve optimistic updates)
-      if (hasUserOrAssistantMessages) {
-        return prev;
-      }
-      // Otherwise, clear and load history
-      return [];
-    });
-    
     setIsLoading(true);
+    // Reset to a clean per-conversation state before loading history.
+    setMessages([]);
+    let cancelled = false;
+    const targetConversationId = activeConversationId;
 
     async function loadHistory() {
       try {
@@ -220,77 +233,61 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         }
         
         const historyResponse = await apiFetch<{ messages: Array<{ role: string; content: string }> }>(
-          `/api/v1/riley/conversations/${activeConversationId}/messages?tenant_id=${encodeURIComponent(tenantId)}`,
+          `/api/v1/riley/conversations/${targetConversationId}/messages?tenant_id=${encodeURIComponent(tenantId)}`,
           {
             token,
             method: "GET",
           }
         );
         const history = historyResponse.messages || [];
-        
-        // Guard: Only update if history exists and messages are still empty/only system
-        setMessages((prev) => {
-          const hasUserOrAssistantMessages = prev.some(
-            (msg) => msg.role === "user" || msg.role === "assistant"
+        if (cancelled) return;
+
+        if (history && Array.isArray(history) && history.length > 0) {
+          const historyMessages: Message[] = history.map(
+            (msg: { role: string; content: string }, idx: number) => ({
+              id: `history-${targetConversationId}-${idx}`,
+              role: msg.role === "user" ? "user" : "assistant",
+              content: msg.content,
+            })
           );
-          // Don't overwrite if user/assistant messages exist
-          if (hasUserOrAssistantMessages) {
-            return prev;
-          }
-          
-          if (history && Array.isArray(history) && history.length > 0) {
-            const historyMessages: Message[] = history.map(
-              (msg: { role: string; content: string }, idx: number) => ({
-                id: `history-${Date.now()}-${idx}`,
-                role: msg.role === "user" ? "user" : "assistant",
-                content: msg.content,
-              })
-            );
-            return [
-              {
-                id: "system-1",
-                role: "system",
-                content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
-              },
-              ...historyMessages,
-            ];
-          } else {
-            // Empty history - keep system message only if messages are still empty
-            return prev.length === 0 || (prev.length === 1 && prev[0].role === "system")
-              ? [
-                  {
-                    id: "system-1",
-                    role: "system",
-                    content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
-                  },
-                ]
-              : prev;
-          }
-        });
-      } catch (error) {
-        console.error("Failed to load chat history:", error);
-        // Guard: Only set system message if messages are still empty
-        setMessages((prev) => {
-          const hasUserOrAssistantMessages = prev.some(
-            (msg) => msg.role === "user" || msg.role === "assistant"
-          );
-          if (hasUserOrAssistantMessages) {
-            return prev;
-          }
-          return [
+          setMessages([
             {
               id: "system-1",
               role: "system",
               content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
             },
-          ];
-        });
+            ...historyMessages,
+          ]);
+        } else {
+          setMessages([
+            {
+              id: "system-1",
+              role: "system",
+              content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
+            },
+          ]);
+        }
+      } catch (error) {
+        console.error("Failed to load chat history:", error);
+        if (cancelled) return;
+        setMessages([
+          {
+            id: "system-1",
+            role: "system",
+            content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
+          },
+        ]);
       } finally {
-        setIsLoading(false);
+        if (!cancelled) {
+          setIsLoading(false);
+        }
       }
     }
 
     loadHistory();
+    return () => {
+      cancelled = true;
+    };
   }, [activeConversationId, contextName, getToken, tenantId]);
 
   // Check if send is enabled and why it might be disabled
@@ -369,12 +366,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       return;
     }
 
-    setIsRenaming(true);
+    setIsRenamingRequest(true);
     try {
       const token = await getToken();
       if (!token) return;
       
-      await apiFetch(`/api/v1/sessions/${sessionId}`, {
+      await apiFetch(`/api/v1/riley/conversations/${sessionId}?tenant_id=${encodeURIComponent(tenantId)}`, {
         token,
         method: "PATCH",
         body: { title: newTitle },
@@ -390,7 +387,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     } catch (error) {
       console.error("Error renaming session:", error);
     } finally {
-      setIsRenaming(false);
+      setIsRenamingRequest(false);
     }
   };
 
@@ -618,7 +615,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           <div className="flex-1 overflow-y-auto p-2 space-y-1">
             {conversations.map((conv) => {
               const isActive = activeConversationId === conv.id;
-              const isRenaming = renamingSessionId === conv.id;
+            const isRowRenaming = renamingSessionId === conv.id;
 
               return (
                 <div
@@ -644,7 +641,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     }}
                     className="w-full text-left p-3 cursor-pointer"
                   >
-                    {isRenaming ? (
+                    {isRowRenaming ? (
                       <div className="flex items-center gap-2">
                         <input
                           ref={renameInputRef}
@@ -654,12 +651,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           onKeyDown={(e) => handleRenameKeyDown(e, conv.id)}
                           onClick={(e) => e.stopPropagation()}
                           className="flex-1 bg-zinc-900/50 border border-zinc-700 rounded px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
-                          disabled={isRenaming}
+                          disabled={isRenamingRequest}
                         />
                         <button
                           type="button"
                           onClick={(e) => handleRenameSave(e, conv.id)}
-                          disabled={isRenaming}
+                          disabled={isRenamingRequest}
                           className="p-1 rounded transition-colors text-amber-400 hover:bg-amber-500/10"
                         >
                           <Check className="h-4 w-4" />
@@ -667,7 +664,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         <button
                           type="button"
                           onClick={(e) => handleRenameCancel(e)}
-                          disabled={isRenaming}
+                          disabled={isRenamingRequest}
                           className="p-1 rounded text-zinc-500 hover:bg-zinc-800/50 transition-colors"
                         >
                           <X className="h-4 w-4" />
