@@ -121,7 +121,15 @@ class VectorService:
                 )
             )
         
-        tenant_filter = Filter(must=filter_conditions)
+        tenant_filter = Filter(
+            must=filter_conditions,
+            must_not=[
+                FieldCondition(
+                    key="record_type",
+                    match=MatchValue(value="file"),
+                )
+            ],
+        )
 
         search_result = await self._client.search(
             collection_name=collection_name,
@@ -166,10 +174,22 @@ class VectorService:
                 "For global files, use Filter with is_global=True condition."
             )
         
+        query_filter = Filter(
+            must=filter.must or [],
+            should=filter.should or [],
+            must_not=[
+                *(filter.must_not or []),
+                FieldCondition(
+                    key="record_type",
+                    match=MatchValue(value="file"),
+                ),
+            ],
+        )
+
         search_result = await self._client.search(
             collection_name=collection_name,
             query_vector=query_vector,
-            query_filter=filter,  # SECURITY: Always use explicit filter
+            query_filter=query_filter,  # SECURITY: Always use explicit filter
             limit=limit,
             with_payload=True,  # Ensure payload (including filename) is returned
         )
@@ -211,7 +231,13 @@ class VectorService:
                         key="is_global",
                         match=MatchValue(value=True),
                     )
-                ]
+                ],
+                must_not=[
+                    FieldCondition(
+                        key="record_type",
+                        match=MatchValue(value="chunk"),
+                    )
+                ],
             )
         else:
             # Standard tenant-scoped filter
@@ -221,7 +247,13 @@ class VectorService:
                         key="client_id",
                         match=MatchValue(value=tenant_id),
                     )
-                ]
+                ],
+                must_not=[
+                    FieldCondition(
+                        key="record_type",
+                        match=MatchValue(value="chunk"),
+                    )
+                ],
             )
 
         # Use scroll to get all matching points
@@ -252,6 +284,9 @@ class VectorService:
                 "preview_url": payload.get("preview_url"),
                 "preview_type": payload.get("preview_type"),
                 "preview_status": payload.get("preview_status"),
+                "ingestion_status": payload.get("ingestion_status"),
+                "extracted_char_count": payload.get("extracted_char_count"),
+                "chunk_count": payload.get("chunk_count"),
             })
 
         return files
@@ -288,7 +323,13 @@ class VectorService:
                     key="is_global",
                     match=MatchValue(value=True),
                 )
-            ]
+            ],
+            must_not=[
+                FieldCondition(
+                    key="record_type",
+                    match=MatchValue(value="chunk"),
+                )
+            ],
         )
 
         # Use scroll to get all matching points
@@ -322,6 +363,9 @@ class VectorService:
                 "preview_url": payload.get("preview_url"),
                 "preview_type": payload.get("preview_type"),
                 "preview_status": payload.get("preview_status"),
+                "ingestion_status": payload.get("ingestion_status"),
+                "extracted_char_count": payload.get("extracted_char_count"),
+                "chunk_count": payload.get("chunk_count"),
             })
 
         return files
@@ -387,6 +431,47 @@ class VectorService:
             collection_name=settings.QDRANT_COLLECTION_TIER_1,
             points=[global_point]
         )
+
+        # Also promote chunk records linked to this file so global retrieval
+        # can use chunked vectors instead of only the parent document point.
+        chunk_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="parent_file_id",
+                    match=MatchValue(value=file_id),
+                ),
+                FieldCondition(
+                    key="record_type",
+                    match=MatchValue(value="chunk"),
+                ),
+            ]
+        )
+        chunk_points, _ = await self._client.scroll(
+            collection_name=settings.QDRANT_COLLECTION_TIER_2,
+            scroll_filter=chunk_filter,
+            limit=5000,
+            with_payload=True,
+            with_vectors=True,
+        )
+        if chunk_points:
+            promoted_chunks: List[PointStruct] = []
+            for chunk in chunk_points:
+                chunk_payload = (chunk.payload or {}).copy()
+                chunk_payload["is_global"] = True
+                chunk_payload["promoted_at"] = datetime.now().isoformat()
+                if "client_id" in chunk_payload:
+                    del chunk_payload["client_id"]
+                promoted_chunks.append(
+                    PointStruct(
+                        id=str(chunk.id),
+                        vector=chunk.vector,
+                        payload=chunk_payload,
+                    )
+                )
+            await self._client.upsert(
+                collection_name=settings.QDRANT_COLLECTION_TIER_1,
+                points=promoted_chunks,
+            )
 
     async def delete_tenant_data(self, tenant_id: str) -> List[str]:
         """Delete all data for a tenant from Qdrant and return list of file URLs.
