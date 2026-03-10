@@ -656,13 +656,32 @@ async def _delete_chunk_points(collection_name: str, parent_file_id: str) -> Non
             FieldCondition(key="record_type", match=MatchValue(value="chunk")),
         ]
     )
-    points, _ = await vector_service.client.scroll(
-        collection_name=collection_name,
-        scroll_filter=chunk_filter,
-        limit=5000,
-        with_payload=False,
-        with_vectors=False,
-    )
+    try:
+        points, _ = await vector_service.client.scroll(
+            collection_name=collection_name,
+            scroll_filter=chunk_filter,
+            limit=5000,
+            with_payload=False,
+            with_vectors=False,
+        )
+    except Exception as exc:
+        message = str(exc).lower()
+        if "index required but not found" not in message:
+            raise
+        fallback_filter = Filter(
+            must=[FieldCondition(key="parent_file_id", match=MatchValue(value=parent_file_id))]
+        )
+        points, _ = await vector_service.client.scroll(
+            collection_name=collection_name,
+            scroll_filter=fallback_filter,
+            limit=5000,
+            with_payload=True,
+            with_vectors=False,
+        )
+        points = [
+            point for point in points
+            if (point.payload or {}).get("record_type") == "chunk"
+        ]
     if points:
         await vector_service.client.delete(
             collection_name=collection_name,

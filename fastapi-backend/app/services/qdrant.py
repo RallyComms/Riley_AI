@@ -46,6 +46,36 @@ class VectorService:
         settings = get_settings()
         await self._ensure_collection(settings.QDRANT_COLLECTION_TIER_1)
         await self._ensure_collection(settings.QDRANT_COLLECTION_TIER_2)
+        await self._ensure_payload_indexes(settings.QDRANT_COLLECTION_TIER_1)
+        await self._ensure_payload_indexes(settings.QDRANT_COLLECTION_TIER_2)
+
+    @staticmethod
+    def _is_missing_payload_index_error(exc: Exception, field_name: str) -> bool:
+        message = str(exc).lower()
+        return (
+            "index required but not found" in message
+            and field_name.lower() in message
+        )
+
+    async def _ensure_payload_indexes(self, collection_name: str) -> None:
+        """Ensure required payload indexes exist (idempotent)."""
+        try:
+            await self._client.create_payload_index(
+                collection_name=collection_name,
+                field_name="record_type",
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            # If index already exists or backend version differs, don't fail startup.
+            pass
+        try:
+            await self._client.create_payload_index(
+                collection_name=collection_name,
+                field_name="parent_file_id",
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            pass
 
     async def _ensure_collection(self, collection_name: str) -> None:
         """Create a collection if it doesn't exist, using the configured vector params."""
@@ -131,13 +161,30 @@ class VectorService:
             ],
         )
 
-        search_result = await self._client.search(
-            collection_name=collection_name,
-            query_vector=query_vector,
-            query_filter=tenant_filter,  # SECURITY: Always use tenant filter
-            limit=limit,
-            with_payload=True,  # Ensure payload (including filename) is returned
-        )
+        try:
+            search_result = await self._client.search(
+                collection_name=collection_name,
+                query_vector=query_vector,
+                query_filter=tenant_filter,  # SECURITY: Always use tenant filter
+                limit=limit,
+                with_payload=True,  # Ensure payload (including filename) is returned
+            )
+        except Exception as exc:
+            if not self._is_missing_payload_index_error(exc, "record_type"):
+                raise
+            # Compatibility fallback for collections created before payload indexing.
+            legacy_filter = Filter(must=filter_conditions)
+            search_result = await self._client.search(
+                collection_name=collection_name,
+                query_vector=query_vector,
+                query_filter=legacy_filter,
+                limit=limit,
+                with_payload=True,
+            )
+            search_result = [
+                point for point in search_result
+                if (point.payload or {}).get("record_type") != "file"
+            ]
 
         return [point.dict() for point in search_result]
 
@@ -186,13 +233,28 @@ class VectorService:
             ],
         )
 
-        search_result = await self._client.search(
-            collection_name=collection_name,
-            query_vector=query_vector,
-            query_filter=query_filter,  # SECURITY: Always use explicit filter
-            limit=limit,
-            with_payload=True,  # Ensure payload (including filename) is returned
-        )
+        try:
+            search_result = await self._client.search(
+                collection_name=collection_name,
+                query_vector=query_vector,
+                query_filter=query_filter,  # SECURITY: Always use explicit filter
+                limit=limit,
+                with_payload=True,  # Ensure payload (including filename) is returned
+            )
+        except Exception as exc:
+            if not self._is_missing_payload_index_error(exc, "record_type"):
+                raise
+            search_result = await self._client.search(
+                collection_name=collection_name,
+                query_vector=query_vector,
+                query_filter=filter,
+                limit=limit,
+                with_payload=True,
+            )
+            search_result = [
+                point for point in search_result
+                if (point.payload or {}).get("record_type") != "file"
+            ]
 
         return [point.dict() for point in search_result]
 
@@ -257,15 +319,34 @@ class VectorService:
             )
 
         # Use scroll to get all matching points
-        scroll_result = await self._client.scroll(
-            collection_name=collection_name,
-            scroll_filter=tenant_filter,
-            limit=limit,
-            with_payload=True,
-        )
+        try:
+            scroll_result = await self._client.scroll(
+                collection_name=collection_name,
+                scroll_filter=tenant_filter,
+                limit=limit,
+                with_payload=True,
+            )
+            points = scroll_result[0]
+        except Exception as exc:
+            if not self._is_missing_payload_index_error(exc, "record_type"):
+                raise
+            legacy_filter = Filter(
+                must=tenant_filter.must or [],
+                should=tenant_filter.should or [],
+            )
+            scroll_result = await self._client.scroll(
+                collection_name=collection_name,
+                scroll_filter=legacy_filter,
+                limit=limit,
+                with_payload=True,
+            )
+            points = [
+                point for point in scroll_result[0]
+                if (point.payload or {}).get("record_type") != "chunk"
+            ]
 
         files = []
-        for point in scroll_result[0]:  # scroll_result is a tuple: (points, next_page_offset)
+        for point in points:
             payload = point.payload or {}
             filename = payload.get("filename") or payload.get("name", "Unknown")
             file_type = payload.get("type") or payload.get("file_type", "")
@@ -276,6 +357,10 @@ class VectorService:
                 "filename": filename,
                 "type": file_type,
                 "year": year,
+                "url": payload.get("url", ""),
+                "tags": payload.get("tags", []),
+                "size": payload.get("size", "Unknown"),
+                "upload_date": payload.get("upload_date", datetime.now().isoformat()),
                 "ai_enabled": payload.get("ai_enabled"),
                 "ocr_enabled": payload.get("ocr_enabled"),
                 "ocr_status": payload.get("ocr_status"),
@@ -284,6 +369,7 @@ class VectorService:
                 "preview_url": payload.get("preview_url"),
                 "preview_type": payload.get("preview_type"),
                 "preview_status": payload.get("preview_status"),
+                "preview_error": payload.get("preview_error"),
                 "ingestion_status": payload.get("ingestion_status"),
                 "extracted_char_count": payload.get("extracted_char_count"),
                 "chunk_count": payload.get("chunk_count"),
@@ -333,16 +419,36 @@ class VectorService:
         )
 
         # Use scroll to get all matching points
-        scroll_result = await self._client.scroll(
-            collection_name=collection_name,
-            scroll_filter=global_filter,
-            limit=limit,
-            with_payload=True,
-            with_vectors=False,  # Don't need vectors for listing
-        )
+        try:
+            scroll_result = await self._client.scroll(
+                collection_name=collection_name,
+                scroll_filter=global_filter,
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,  # Don't need vectors for listing
+            )
+            points = scroll_result[0]
+        except Exception as exc:
+            if not self._is_missing_payload_index_error(exc, "record_type"):
+                raise
+            legacy_filter = Filter(
+                must=global_filter.must or [],
+                should=global_filter.should or [],
+            )
+            scroll_result = await self._client.scroll(
+                collection_name=collection_name,
+                scroll_filter=legacy_filter,
+                limit=limit,
+                with_payload=True,
+                with_vectors=False,
+            )
+            points = [
+                point for point in scroll_result[0]
+                if (point.payload or {}).get("record_type") != "chunk"
+            ]
 
         files = []
-        for point in scroll_result[0]:  # scroll_result is a tuple: (points, next_page_offset)
+        for point in points:
             payload = point.payload or {}
             filename = payload.get("filename") or payload.get("name", "Unknown")
             file_type = payload.get("type") or payload.get("file_type", "")
@@ -446,13 +552,31 @@ class VectorService:
                 ),
             ]
         )
-        chunk_points, _ = await self._client.scroll(
-            collection_name=settings.QDRANT_COLLECTION_TIER_2,
-            scroll_filter=chunk_filter,
-            limit=5000,
-            with_payload=True,
-            with_vectors=True,
-        )
+        try:
+            chunk_points, _ = await self._client.scroll(
+                collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                scroll_filter=chunk_filter,
+                limit=5000,
+                with_payload=True,
+                with_vectors=True,
+            )
+        except Exception as exc:
+            if not self._is_missing_payload_index_error(exc, "record_type"):
+                raise
+            fallback_filter = Filter(
+                must=[FieldCondition(key="parent_file_id", match=MatchValue(value=file_id))]
+            )
+            chunk_points, _ = await self._client.scroll(
+                collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                scroll_filter=fallback_filter,
+                limit=5000,
+                with_payload=True,
+                with_vectors=True,
+            )
+            chunk_points = [
+                point for point in chunk_points
+                if (point.payload or {}).get("record_type") == "chunk"
+            ]
         if chunk_points:
             promoted_chunks: List[PointStruct] = []
             for chunk in chunk_points:

@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile, Form, Query, Depends, Request, Header
+from fastapi import APIRouter, HTTPException, UploadFile, Form, Query, Depends, Request
 from pydantic import BaseModel
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.dependencies.auth import verify_clerk_token, verify_tenant_access, check_tenant_membership
 from app.services.ocr import run_ocr, is_image_ext
 from app.services.qdrant import vector_service
-from app.services.ingestion import process_upload, delete_file, untag_file, _generate_embedding, run_ingestion_job
+from app.services.ingestion import process_upload, delete_file, untag_file, _generate_embedding
 from app.services.storage import StorageService
 from qdrant_client.http.models import PointStruct
 
@@ -100,12 +100,6 @@ class AIEnabledRequest(BaseModel):
 class DeleteResponse(BaseModel):
     status: str
     message: str
-
-
-class IngestionWorkerRequest(BaseModel):
-    job_id: str
-    file_id: str
-    collection_name: str
 
 
 @router.get("/files/{tenant_id}", response_model=FilesResponse)
@@ -218,70 +212,37 @@ async def list_files(
                     chunk_count=file_data.get("chunk_count"),
                 ))
         else:
-            # Standard tenant-scoped query (Tier 2)
-            # Create tenant filter for strict isolation
-            tenant_filter = Filter(
-                must=[
-                    FieldCondition(
-                        key="client_id",
-                        match=MatchValue(value=tenant_id)
-                    )
-                ],
-                must_not=[
-                    FieldCondition(
-                        key="record_type",
-                        match=MatchValue(value="chunk")
-                    )
-                ]
-            )
-            
-            # Scroll points from Qdrant filtered by tenant_id (source of truth)
-            scroll_result = await vector_service.client.scroll(
+            tenant_files = await vector_service.list_tenant_files(
                 collection_name=settings.QDRANT_COLLECTION_TIER_2,
-                scroll_filter=tenant_filter,  # SECURITY: Always use tenant filter
-                limit=1000,  # Get all files for this tenant
-                with_payload=True,
-                with_vectors=False,
+                tenant_id=tenant_id,
+                limit=1000,
             )
-            
-            # Process each Qdrant point
-            for point in scroll_result[0]:
-                payload = point.payload or {}
-                filename = payload.get("filename")
-                
+            for file_data in tenant_files:
+                filename = file_data.get("filename")
                 if not filename:
-                    continue  # Skip points without filename
-                
-                # Get upload date from payload, fallback to current time for old files
-                file_date = payload.get("upload_date", datetime.now().isoformat())
-                
-                # Get file size from payload, fallback to "Unknown" for old files
-                size_str = payload.get("size", "Unknown")
-                
-                # Determine file type from extension or payload
+                    continue
                 extension = Path(filename).suffix.lower().lstrip(".")
-                file_type = payload.get("type") or extension or "unknown"
-                
+                file_type = file_data.get("type") or extension or "unknown"
                 files.append(FileListItem(
-                    id=str(point.id),  # UUID from Qdrant
+                    id=file_data.get("id", ""),
                     name=filename,
-                    url=payload.get("url", ""),  # GCS public URL from payload
+                    url=file_data.get("url", ""),
                     type=file_type,
-                    date=file_date,
-                    size=size_str,
-                    tags=payload.get("tags", []),
-                    ai_enabled=payload.get("ai_enabled"),
-                    ocr_enabled=payload.get("ocr_enabled"),
-                    ocr_status=payload.get("ocr_status"),
-                    ocr_confidence=payload.get("ocr_confidence"),
-                    ocr_extracted_at=payload.get("ocr_extracted_at"),
-                    preview_url=payload.get("preview_url"),
-                    preview_type=payload.get("preview_type"),
-                    preview_status=payload.get("preview_status"),
-                    preview_error=payload.get("preview_error"),
-                    ingestion_status=payload.get("ingestion_status"),
-                    extracted_char_count=payload.get("extracted_char_count"),
-                    chunk_count=payload.get("chunk_count"),
+                    date=file_data.get("upload_date", datetime.now().isoformat()),
+                    size=file_data.get("size", "Unknown"),
+                    tags=file_data.get("tags", []),
+                    ai_enabled=file_data.get("ai_enabled"),
+                    ocr_enabled=file_data.get("ocr_enabled"),
+                    ocr_status=file_data.get("ocr_status"),
+                    ocr_confidence=file_data.get("ocr_confidence"),
+                    ocr_extracted_at=file_data.get("ocr_extracted_at"),
+                    preview_url=file_data.get("preview_url"),
+                    preview_type=file_data.get("preview_type"),
+                    preview_status=file_data.get("preview_status"),
+                    preview_error=file_data.get("preview_error"),
+                    ingestion_status=file_data.get("ingestion_status"),
+                    extracted_char_count=file_data.get("extracted_char_count"),
+                    chunk_count=file_data.get("chunk_count"),
                 ))
         
         # Sort by date (newest first)
@@ -371,25 +332,6 @@ async def upload_file(
             status_code=500,
             detail=f"Upload failed: {exc}"
         ) from exc
-
-
-@router.post("/internal/ingestion/run")
-async def run_ingestion_worker(
-    payload: IngestionWorkerRequest,
-    x_ingestion_worker_token: Optional[str] = Header(None),
-) -> Dict[str, str]:
-    """Cloud Tasks worker endpoint for durable ingestion execution."""
-    settings = get_settings()
-    if settings.INGESTION_WORKER_TOKEN:
-        if x_ingestion_worker_token != settings.INGESTION_WORKER_TOKEN:
-            raise HTTPException(status_code=401, detail="Invalid ingestion worker token")
-
-    await run_ingestion_job(
-        job_id=payload.job_id,
-        file_id=payload.file_id,
-        collection_name=payload.collection_name,
-    )
-    return {"status": "ok"}
 
 
 @router.post("/files/rename", response_model=RenameResponse)
@@ -769,13 +711,37 @@ async def toggle_ai_enabled(
                 ),
             ]
         )
-        chunk_points, _ = await vector_service.client.scroll(
-            collection_name=settings.QDRANT_COLLECTION_TIER_2,
-            scroll_filter=chunk_filter,
-            limit=1000,
-            with_payload=False,
-            with_vectors=False,
-        )
+        try:
+            chunk_points, _ = await vector_service.client.scroll(
+                collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                scroll_filter=chunk_filter,
+                limit=1000,
+                with_payload=False,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            message = str(exc).lower()
+            if "index required but not found" not in message:
+                raise
+            fallback_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="parent_file_id",
+                        match=MatchValue(value=file_id),
+                    )
+                ]
+            )
+            points_with_payload, _ = await vector_service.client.scroll(
+                collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                scroll_filter=fallback_filter,
+                limit=1000,
+                with_payload=True,
+                with_vectors=False,
+            )
+            chunk_points = [
+                point for point in points_with_payload
+                if (point.payload or {}).get("record_type") == "chunk"
+            ]
         if chunk_points:
             await vector_service.client.set_payload(
                 collection_name=settings.QDRANT_COLLECTION_TIER_2,
