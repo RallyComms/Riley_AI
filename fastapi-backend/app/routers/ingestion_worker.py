@@ -1,4 +1,5 @@
 import hmac
+import logging
 from typing import Dict, Optional
 
 from fastapi import APIRouter, Header, HTTPException
@@ -9,6 +10,7 @@ from app.services.ingestion import run_ingestion_job
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class IngestionWorkerRequest(BaseModel):
@@ -33,9 +35,19 @@ async def run_ingestion_worker(
     ):
         raise HTTPException(status_code=401, detail="Invalid ingestion worker token")
 
-    await run_ingestion_job(
-        job_id=payload.job_id,
-        file_id=payload.file_id,
-        collection_name=payload.collection_name,
-    )
+    try:
+        await run_ingestion_job(
+            job_id=payload.job_id,
+            file_id=payload.file_id,
+            collection_name=payload.collection_name,
+        )
+    except Exception as exc:
+        logger.exception(
+            "ingestion_worker_request_failed job_id=%s file_id=%s collection=%s error=%s",
+            payload.job_id,
+            payload.file_id,
+            payload.collection_name,
+            exc,
+        )
+        raise
     return {"status": "ok"}

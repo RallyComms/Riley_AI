@@ -586,6 +586,11 @@ def _estimate_tokens(text: str) -> int:
     return max(1, int(len(text) / 4))
 
 
+def _chunk_point_uuid(parent_file_id: str, chunk_index: int) -> str:
+    """Deterministic UUID for chunk point IDs (Qdrant-safe)."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"riley-chunk:{parent_file_id}:{chunk_index}"))
+
+
 def _clean_extracted_text(text: str) -> str:
     """Normalize whitespace to improve quality checks and chunking stability."""
     normalized = (text or "").replace("\x00", " ").strip()
@@ -687,6 +692,27 @@ async def _delete_chunk_points(collection_name: str, parent_file_id: str) -> Non
             collection_name=collection_name,
             points_selector=[str(point.id) for point in points],
         )
+
+
+async def _mark_job_failed(
+    *,
+    collection_name: str,
+    file_id: str,
+    job_id: Optional[str],
+    error_message: str,
+) -> None:
+    """Persist deterministic failed status for worker-level failures."""
+    await vector_service.client.set_payload(
+        collection_name=collection_name,
+        payload={
+            "ingestion_status": "failed",
+            "ingestion_error": error_message,
+            "ingestion_job_status": "failed" if job_id else None,
+            "ingestion_job_error_message": error_message if job_id else None,
+            "ingestion_job_completed_at": datetime.now().isoformat() if job_id else None,
+        },
+        points=[file_id],
+    )
 
 
 def _build_worker_payload(job_id: str, file_id: str, collection_name: str) -> Dict[str, str]:
@@ -902,6 +928,7 @@ async def _run_ingestion_pipeline(
             vector = await _generate_embedding(chunk_text)
             token_estimate = _estimate_tokens(chunk_text)
             total_tokens += token_estimate
+            point_uuid = _chunk_point_uuid(point_id, chunk_idx)
             chunk_payload: Dict[str, Any] = {
                 "record_type": "chunk",
                 "parent_file_id": point_id,
@@ -926,7 +953,7 @@ async def _run_ingestion_pipeline(
             }
             chunk_points.append(
                 PointStruct(
-                    id=f"{point_id}::chunk::{chunk_idx}",
+                    id=point_uuid,
                     vector=vector,
                     payload=chunk_payload,
                 )
@@ -1257,70 +1284,94 @@ async def run_ingestion_job(
     collection_name: str,
 ) -> None:
     """Worker entrypoint: load job context and execute ingestion pipeline."""
-    points = await vector_service.client.retrieve(
-        collection_name=collection_name,
-        ids=[file_id],
-        with_payload=True,
-        with_vectors=False,
-    )
-    if not points:
-        raise HTTPException(status_code=404, detail=f"File with ID {file_id} not found")
-    payload = points[0].payload or {}
-    if payload.get("record_type") == "chunk":
-        return
-
-    current_job_id = payload.get("ingestion_job_id")
-    if current_job_id and current_job_id != job_id:
-        # Stale task; a newer job exists for this file.
-        return
-
-    filename = payload.get("filename") or "unknown"
-    file_type = (payload.get("file_type") or payload.get("type") or "").lower()
-    file_url = payload.get("url")
-    if not file_url:
-        raise HTTPException(status_code=400, detail=f"File {file_id} has no URL")
-
-    if file_type not in TEXT_NATIVE_EXTENSIONS:
-        await vector_service.client.set_payload(
+    try:
+        points = await vector_service.client.retrieve(
             collection_name=collection_name,
-            payload={
-                "ingestion_status": "failed",
-                "ingestion_error": f"Unsupported file type for Phase 1A: {file_type or 'unknown'}",
-                "ingestion_job_status": "failed",
-                "ingestion_job_error_message": f"Unsupported file type: {file_type or 'unknown'}",
-                "ingestion_job_completed_at": datetime.now().isoformat(),
-            },
-            points=[file_id],
+            ids=[file_id],
+            with_payload=True,
+            with_vectors=False,
         )
-        return
+        if not points:
+            raise HTTPException(status_code=404, detail=f"File with ID {file_id} not found")
+        payload = points[0].payload or {}
+        if payload.get("record_type") == "chunk":
+            return
 
-    file_bytes = await StorageService.download_file(file_url)
-    tenant_id = payload.get("client_id") or "global"
-    is_global = bool(payload.get("is_global")) or collection_name == get_settings().QDRANT_COLLECTION_TIER_1
-    tags = payload.get("tags", []) if isinstance(payload.get("tags"), list) else []
-    upload_date = payload.get("upload_date") or datetime.now().isoformat()
-    size_bytes = payload.get("size_bytes") or len(file_bytes)
-    size_str = payload.get("size") or _format_file_size(int(size_bytes))
+        current_job_id = payload.get("ingestion_job_id")
+        if current_job_id and current_job_id != job_id:
+            # Stale task; a newer job exists for this file.
+            return
 
-    await _run_ingestion_pipeline(
-        job_id=job_id,
-        collection_name=collection_name,
-        point_id=str(file_id),
-        file_bytes=file_bytes,
-        filename=filename,
-        file_type=file_type,
-        tenant_id=tenant_id,
-        is_global=is_global,
-        tags=tags,
-        file_url=file_url,
-        size_str=size_str,
-        file_size=int(size_bytes),
-        upload_date=upload_date,
-        preview_url=payload.get("preview_url"),
-        preview_type=payload.get("preview_type"),
-        preview_status=payload.get("preview_status", "not_requested"),
-        preview_error=payload.get("preview_error"),
-    )
+        filename = payload.get("filename") or "unknown"
+        file_type = (payload.get("file_type") or payload.get("type") or "").lower()
+        file_url = payload.get("url")
+        if not file_url:
+            raise HTTPException(status_code=400, detail=f"File {file_id} has no URL")
+
+        if file_type not in TEXT_NATIVE_EXTENSIONS:
+            await vector_service.client.set_payload(
+                collection_name=collection_name,
+                payload={
+                    "ingestion_status": "failed",
+                    "ingestion_error": f"Unsupported file type for Phase 1A: {file_type or 'unknown'}",
+                    "ingestion_job_status": "failed",
+                    "ingestion_job_error_message": f"Unsupported file type: {file_type or 'unknown'}",
+                    "ingestion_job_completed_at": datetime.now().isoformat(),
+                },
+                points=[file_id],
+            )
+            return
+
+        file_bytes = await StorageService.download_file(file_url)
+        tenant_id = payload.get("client_id") or "global"
+        is_global = bool(payload.get("is_global")) or collection_name == get_settings().QDRANT_COLLECTION_TIER_1
+        tags = payload.get("tags", []) if isinstance(payload.get("tags"), list) else []
+        upload_date = payload.get("upload_date") or datetime.now().isoformat()
+        size_bytes = payload.get("size_bytes") or len(file_bytes)
+        size_str = payload.get("size") or _format_file_size(int(size_bytes))
+
+        await _run_ingestion_pipeline(
+            job_id=job_id,
+            collection_name=collection_name,
+            point_id=str(file_id),
+            file_bytes=file_bytes,
+            filename=filename,
+            file_type=file_type,
+            tenant_id=tenant_id,
+            is_global=is_global,
+            tags=tags,
+            file_url=file_url,
+            size_str=size_str,
+            file_size=int(size_bytes),
+            upload_date=upload_date,
+            preview_url=payload.get("preview_url"),
+            preview_type=payload.get("preview_type"),
+            preview_status=payload.get("preview_status", "not_requested"),
+            preview_error=payload.get("preview_error"),
+        )
+    except Exception as exc:
+        logger.exception(
+            "ingestion_worker_job_failed job_id=%s file_id=%s collection=%s error=%s",
+            job_id,
+            file_id,
+            collection_name,
+            exc,
+        )
+        try:
+            await _mark_job_failed(
+                collection_name=collection_name,
+                file_id=str(file_id),
+                job_id=job_id,
+                error_message=str(exc),
+            )
+        except Exception as status_exc:
+            logger.exception(
+                "ingestion_worker_status_update_failed job_id=%s file_id=%s error=%s",
+                job_id,
+                file_id,
+                status_exc,
+            )
+        raise
 
 
 async def backfill_reindex_supported_files(
