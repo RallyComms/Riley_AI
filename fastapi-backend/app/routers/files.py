@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile, Form, Query, Depends, Request
+from fastapi import APIRouter, HTTPException, UploadFile, Form, Query, Depends, Request, Header
 from pydantic import BaseModel
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
@@ -11,7 +11,7 @@ from app.core.config import get_settings
 from app.dependencies.auth import verify_clerk_token, verify_tenant_access, check_tenant_membership
 from app.services.ocr import run_ocr, is_image_ext
 from app.services.qdrant import vector_service
-from app.services.ingestion import process_upload, delete_file, untag_file, _generate_embedding
+from app.services.ingestion import process_upload, delete_file, untag_file, _generate_embedding, run_ingestion_job
 from app.services.storage import StorageService
 from qdrant_client.http.models import PointStruct
 
@@ -55,6 +55,10 @@ class FileListItem(BaseModel):
     preview_url: Optional[str] = None
     preview_type: Optional[str] = None
     preview_status: Optional[str] = None
+    preview_error: Optional[str] = None
+    ingestion_status: Optional[str] = None
+    extracted_char_count: Optional[int] = None
+    chunk_count: Optional[int] = None
 
 
 class FileListResponse(BaseModel):
@@ -96,6 +100,12 @@ class AIEnabledRequest(BaseModel):
 class DeleteResponse(BaseModel):
     status: str
     message: str
+
+
+class IngestionWorkerRequest(BaseModel):
+    job_id: str
+    file_id: str
+    collection_name: str
 
 
 @router.get("/files/{tenant_id}", response_model=FilesResponse)
@@ -186,12 +196,16 @@ async def list_files(
                 extension = Path(filename).suffix.lower().lstrip(".")
                 file_type = file_data.get("type") or extension or "unknown"
                 
+                # Ensure date is always a string
+                promoted_at = file_data.get("promoted_at")
+                date = promoted_at if isinstance(promoted_at, str) and promoted_at else datetime.now().isoformat()
+                
                 files.append(FileListItem(
                     id=file_data.get("id", ""),
                     name=filename,
                     url=file_data.get("url", ""),
                     type=file_type,
-                    date=file_data.get("promoted_at", datetime.now().isoformat()),
+                    date=date,
                     size="Unknown",  # Global files may not have size
                     tags=[],  # Global files don't have tags
                     ai_enabled=file_data.get("ai_enabled"),
@@ -199,6 +213,9 @@ async def list_files(
                     ocr_status=file_data.get("ocr_status"),
                     ocr_confidence=file_data.get("ocr_confidence"),
                     ocr_extracted_at=file_data.get("ocr_extracted_at"),
+                    ingestion_status=file_data.get("ingestion_status"),
+                    extracted_char_count=file_data.get("extracted_char_count"),
+                    chunk_count=file_data.get("chunk_count"),
                 ))
         else:
             # Standard tenant-scoped query (Tier 2)
@@ -208,6 +225,12 @@ async def list_files(
                     FieldCondition(
                         key="client_id",
                         match=MatchValue(value=tenant_id)
+                    )
+                ],
+                must_not=[
+                    FieldCondition(
+                        key="record_type",
+                        match=MatchValue(value="chunk")
                     )
                 ]
             )
@@ -252,6 +275,13 @@ async def list_files(
                     ocr_status=payload.get("ocr_status"),
                     ocr_confidence=payload.get("ocr_confidence"),
                     ocr_extracted_at=payload.get("ocr_extracted_at"),
+                    preview_url=payload.get("preview_url"),
+                    preview_type=payload.get("preview_type"),
+                    preview_status=payload.get("preview_status"),
+                    preview_error=payload.get("preview_error"),
+                    ingestion_status=payload.get("ingestion_status"),
+                    extracted_char_count=payload.get("extracted_char_count"),
+                    chunk_count=payload.get("chunk_count"),
                 ))
         
         # Sort by date (newest first)
@@ -271,6 +301,7 @@ async def list_files(
 @router.post("/upload", response_model=UploadResponse)
 async def upload_file(
     file: UploadFile,
+    request: Request,
     tenant_id: str = Form(...),
     tags: str = Form(""),  # Comma-separated tags
     overwrite: bool = Query(False, description="Overwrite existing file if it exists"),
@@ -287,6 +318,10 @@ async def upload_file(
     # Log user_id + tenant_id for every request
     user_id = current_user.get("id", "unknown")
     print(f"Upload file request: user_id={user_id}, tenant_id={tenant_id}")
+
+    # SECURITY: verify_tenant_access cannot read multipart FormData tenant_id automatically.
+    # Enforce membership explicitly using the parsed form tenant_id.
+    await check_tenant_membership(user_id, tenant_id, request)
     
     settings = get_settings()
 
@@ -326,7 +361,7 @@ async def upload_file(
             file=file,
             tenant_id=tenant_id,
             tags=tag_list,
-            overwrite=overwrite
+            overwrite=overwrite,
         )
         return UploadResponse(**result)
     except HTTPException:
@@ -336,6 +371,25 @@ async def upload_file(
             status_code=500,
             detail=f"Upload failed: {exc}"
         ) from exc
+
+
+@router.post("/internal/ingestion/run")
+async def run_ingestion_worker(
+    payload: IngestionWorkerRequest,
+    x_ingestion_worker_token: Optional[str] = Header(None),
+) -> Dict[str, str]:
+    """Cloud Tasks worker endpoint for durable ingestion execution."""
+    settings = get_settings()
+    if settings.INGESTION_WORKER_TOKEN:
+        if x_ingestion_worker_token != settings.INGESTION_WORKER_TOKEN:
+            raise HTTPException(status_code=401, detail="Invalid ingestion worker token")
+
+    await run_ingestion_job(
+        job_id=payload.job_id,
+        file_id=payload.file_id,
+        collection_name=payload.collection_name,
+    )
+    return {"status": "ok"}
 
 
 @router.post("/files/rename", response_model=RenameResponse)
@@ -701,6 +755,33 @@ async def toggle_ai_enabled(
             payload={"ai_enabled": request.ai_enabled},
             points=[file_id]
         )
+
+        # Keep chunk records aligned with parent AI toggle.
+        chunk_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="parent_file_id",
+                    match=MatchValue(value=file_id),
+                ),
+                FieldCondition(
+                    key="record_type",
+                    match=MatchValue(value="chunk"),
+                ),
+            ]
+        )
+        chunk_points, _ = await vector_service.client.scroll(
+            collection_name=settings.QDRANT_COLLECTION_TIER_2,
+            scroll_filter=chunk_filter,
+            limit=1000,
+            with_payload=False,
+            with_vectors=False,
+        )
+        if chunk_points:
+            await vector_service.client.set_payload(
+                collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                payload={"ai_enabled": request.ai_enabled},
+                points=[str(point.id) for point in chunk_points],
+            )
         
         status_text = "enabled" if request.ai_enabled else "disabled"
         return DeleteResponse(

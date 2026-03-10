@@ -63,6 +63,15 @@ class Settings(BaseSettings):
     PREVIEW_URL_TTL_SECONDS: int = 3600
     SIGNING_SERVICE_ACCOUNT_EMAIL: Optional[str] = None  # Service account email for IAM-based signed URLs
 
+    # Durable ingestion worker (Cloud Tasks)
+    INGESTION_USE_CLOUD_TASKS: bool = True
+    GCP_PROJECT_ID: Optional[str] = None
+    INGESTION_TASKS_QUEUE: str = "riley-ingestion-jobs"
+    INGESTION_TASKS_LOCATION: str = "us-central1"
+    INGESTION_WORKER_URL: Optional[str] = None
+    INGESTION_WORKER_TOKEN: Optional[str] = None
+    INGESTION_TASKS_SERVICE_ACCOUNT_EMAIL: Optional[str] = None
+
     # Clerk JWT authentication configuration
     # Either CLERK_JWKS_URL (direct JWKS endpoint) or CLERK_ISSUER (to derive JWKS URL)
     CLERK_JWKS_URL: Optional[str] = None

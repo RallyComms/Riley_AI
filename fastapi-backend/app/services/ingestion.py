@@ -1,12 +1,18 @@
 import io
 import logging
+import csv
+import json
+import re
 import uuid
+import time
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import UploadFile, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from qdrant_client.http.models import PointStruct
+from qdrant_client.http.models import PointStruct, Filter, FieldCondition, MatchValue
+from google.cloud import tasks_v2
+from google.api_core.exceptions import AlreadyExists
 
 from app.core.config import get_settings
 from app.services.genai_client import get_genai_client
@@ -25,6 +31,19 @@ XLSX_MAX_SHEETS = 3
 XLSX_MAX_ROWS = 100
 XLSX_MAX_COLS = 25
 PPTX_MAX_SLIDES = 50
+CSV_MAX_ROWS = 300
+CSV_MAX_COLS = 40
+CHUNK_SIZE_TOKENS = 850
+CHUNK_OVERLAP_TOKENS = 120
+MIN_EXTRACTED_CHARS = 120
+EMBEDDING_COST_PER_1K_TOKENS_USD = 0.0001
+
+TEXT_NATIVE_EXTENSIONS = {
+    "pdf", "docx", "doc", "pptx", "ppt", "txt", "md", "rtf",
+    "html", "htm", "csv", "xlsx", "xls", "json", "tsv",
+}
+
+IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "tiff"}
 
 
 def _format_file_size(size_bytes: int) -> str:
@@ -74,15 +93,29 @@ async def extract_text(
             return await _extract_text_from_doc(file_bytes)
         elif file_ext == "pptx":
             return await _extract_text_from_pptx(file_bytes)
+        elif file_ext == "ppt":
+            return await _extract_text_from_ppt(file_bytes)
         elif file_ext == "xlsx":
             return await _extract_text_from_xlsx(file_bytes)
+        elif file_ext == "xls":
+            return await _extract_text_from_xls(file_bytes)
         elif file_ext in ("html", "htm"):
             return await _extract_text_from_html(file_bytes)
+        elif file_ext in ("txt", "md"):
+            return await _extract_text_from_plain_text(file_bytes)
+        elif file_ext == "csv":
+            return await _extract_text_from_csv_like(file_bytes, delimiter=",")
+        elif file_ext == "tsv":
+            return await _extract_text_from_csv_like(file_bytes, delimiter="\t")
+        elif file_ext == "json":
+            return await _extract_text_from_json(file_bytes)
+        elif file_ext == "rtf":
+            return await _extract_text_from_rtf(file_bytes)
         elif file_ext in ("png", "jpg", "jpeg", "webp", "tiff"):
             # OCR is never performed during extraction - must use dedicated endpoint
             return await _extract_text_from_image(file_bytes, enable_ocr=False)
         else:
-            return f"File: {filename}"
+            return "[Unsupported file type for text extraction]"
     except Exception as exc:
         logger.warning(f"Text extraction failed for {filename}: {type(exc).__name__}: {exc}")
         return "[Binary file — no text extracted]"
@@ -370,6 +403,98 @@ async def _extract_text_from_html(file_content: bytes) -> str:
         return "[Binary file — no text extracted]"
 
 
+async def _extract_text_from_plain_text(file_content: bytes) -> str:
+    """Extract text from plain UTF-family text files."""
+    def _read_text() -> str:
+        text = file_content.decode("utf-8", errors="ignore")
+        return text[:MAX_CHARS_TOTAL]
+    return await run_in_threadpool(_read_text)
+
+
+async def _extract_text_from_csv_like(file_content: bytes, delimiter: str) -> str:
+    """Extract text from CSV/TSV files as row-wise comma-separated lines."""
+    def _read_csv() -> str:
+        decoded = file_content.decode("utf-8", errors="ignore")
+        stream = io.StringIO(decoded)
+        reader = csv.reader(stream, delimiter=delimiter)
+        lines: List[str] = []
+        for row_idx, row in enumerate(reader):
+            if row_idx >= CSV_MAX_ROWS:
+                break
+            clipped = [str(value) for value in row[:CSV_MAX_COLS]]
+            if any(cell.strip() for cell in clipped):
+                lines.append(", ".join(clipped))
+        text = "\n".join(lines)
+        return text[:MAX_CHARS_TOTAL]
+    return await run_in_threadpool(_read_csv)
+
+
+async def _extract_text_from_json(file_content: bytes) -> str:
+    """Extract text from JSON by pretty-printing parsed content."""
+    def _read_json() -> str:
+        decoded = file_content.decode("utf-8", errors="ignore")
+        try:
+            obj = json.loads(decoded)
+            normalized = json.dumps(obj, ensure_ascii=True, indent=2)
+        except Exception:
+            normalized = decoded
+        return normalized[:MAX_CHARS_TOTAL]
+    return await run_in_threadpool(_read_json)
+
+
+async def _extract_text_from_rtf(file_content: bytes) -> str:
+    """Extract text from RTF using striprtf if available, fallback regex cleanup."""
+    def _read_rtf() -> str:
+        raw = file_content.decode("utf-8", errors="ignore")
+        try:
+            from striprtf.striprtf import rtf_to_text
+            cleaned = rtf_to_text(raw)
+        except Exception:
+            cleaned = re.sub(r"\\[a-zA-Z]+-?\d* ?", " ", raw)
+            cleaned = cleaned.replace("{", " ").replace("}", " ")
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned[:MAX_CHARS_TOTAL]
+    return await run_in_threadpool(_read_rtf)
+
+
+async def _extract_text_from_ppt(file_content: bytes) -> str:
+    """Extract text from legacy PPT via textract."""
+    try:
+        import textract
+
+        def _read_ppt() -> str:
+            payload = textract.process(io.BytesIO(file_content), extension="ppt", encoding="utf-8")
+            if isinstance(payload, bytes):
+                payload = payload.decode("utf-8", errors="ignore")
+            return payload[:MAX_CHARS_TOTAL]
+
+        return await run_in_threadpool(_read_ppt)
+    except ImportError:
+        return "[PPT extraction unavailable — textract not installed]"
+    except Exception as exc:
+        logger.warning(f"PPT extraction failed: {exc}")
+        return "[Binary file — no text extracted]"
+
+
+async def _extract_text_from_xls(file_content: bytes) -> str:
+    """Extract text from legacy XLS via textract."""
+    try:
+        import textract
+
+        def _read_xls() -> str:
+            payload = textract.process(io.BytesIO(file_content), extension="xls", encoding="utf-8")
+            if isinstance(payload, bytes):
+                payload = payload.decode("utf-8", errors="ignore")
+            return payload[:MAX_CHARS_TOTAL]
+
+        return await run_in_threadpool(_read_xls)
+    except ImportError:
+        return "[XLS extraction unavailable — textract not installed]"
+    except Exception as exc:
+        logger.warning(f"XLS extraction failed: {exc}")
+        return "[Binary file — no text extracted]"
+
+
 async def _extract_text_from_image(file_content: bytes, enable_ocr: bool = False) -> str:
     """Extract text from an image file using OCR (if enabled).
     
@@ -454,11 +579,423 @@ async def _generate_embedding(text: str) -> List[float]:
         ) from exc
 
 
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate used for chunk/cost telemetry."""
+    if not text:
+        return 0
+    return max(1, int(len(text) / 4))
+
+
+def _clean_extracted_text(text: str) -> str:
+    """Normalize whitespace to improve quality checks and chunking stability."""
+    normalized = (text or "").replace("\x00", " ").strip()
+    normalized = re.sub(r"\r\n?", "\n", normalized)
+    normalized = re.sub(r"[ \t]+", " ", normalized)
+    normalized = re.sub(r"\n{3,}", "\n\n", normalized)
+    return normalized
+
+
+def _assess_extraction_quality(text: str, filename: str, file_size_bytes: int) -> Tuple[str, str]:
+    """Classify extraction quality and return (status, reason)."""
+    cleaned = _clean_extracted_text(text)
+    ext = filename.split(".")[-1].lower() if "." in filename else ""
+
+    if not cleaned:
+        if ext == "pdf":
+            return "ocr_needed", "No extractable native PDF text detected"
+        return "low_text", "No extractable text detected"
+
+    if len(cleaned) < MIN_EXTRACTED_CHARS and file_size_bytes > 10_000:
+        if ext == "pdf":
+            return "ocr_needed", "PDF appears image-based or text-poor"
+        return "low_text", "Extracted text too short for file size"
+
+    unique_ratio = len(set(cleaned.lower())) / max(1, len(cleaned))
+    if unique_ratio < 0.03:
+        return "low_text", "Low-information repetitive text"
+
+    lowered = cleaned.lower()
+    placeholder_markers = [
+        "[binary file",
+        "no text extracted",
+        "extraction unavailable",
+        "unsupported file type",
+    ]
+    if any(marker in lowered for marker in placeholder_markers):
+        return "low_text", "Extraction returned placeholder text"
+
+    return "indexed", "Extraction passed quality gate"
+
+
+def _chunk_text_by_tokens(text: str, chunk_size_tokens: int = CHUNK_SIZE_TOKENS, overlap_tokens: int = CHUNK_OVERLAP_TOKENS) -> List[str]:
+    """Split text into overlapping token-ish chunks using whitespace tokenization."""
+    normalized = _clean_extracted_text(text)
+    tokens = normalized.split()
+    if not tokens:
+        return []
+
+    chunks: List[str] = []
+    step = max(1, chunk_size_tokens - overlap_tokens)
+    start = 0
+    while start < len(tokens):
+        end = min(len(tokens), start + chunk_size_tokens)
+        chunk = " ".join(tokens[start:end]).strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= len(tokens):
+            break
+        start += step
+    return chunks
+
+
+async def _delete_chunk_points(collection_name: str, parent_file_id: str) -> None:
+    """Delete all chunk points for a parent file before reindexing."""
+    chunk_filter = Filter(
+        must=[
+            FieldCondition(key="parent_file_id", match=MatchValue(value=parent_file_id)),
+            FieldCondition(key="record_type", match=MatchValue(value="chunk")),
+        ]
+    )
+    points, _ = await vector_service.client.scroll(
+        collection_name=collection_name,
+        scroll_filter=chunk_filter,
+        limit=5000,
+        with_payload=False,
+        with_vectors=False,
+    )
+    if points:
+        await vector_service.client.delete(
+            collection_name=collection_name,
+            points_selector=[str(point.id) for point in points],
+        )
+
+
+def _build_worker_payload(job_id: str, file_id: str, collection_name: str) -> Dict[str, str]:
+    return {
+        "job_id": job_id,
+        "file_id": file_id,
+        "collection_name": collection_name,
+    }
+
+
+async def _enqueue_cloud_task(job_id: str, file_id: str, collection_name: str) -> None:
+    """Create a durable Cloud Task for ingestion worker execution."""
+    settings = get_settings()
+    if not settings.INGESTION_USE_CLOUD_TASKS:
+        return
+    if not settings.GCP_PROJECT_ID or not settings.INGESTION_WORKER_URL:
+        raise RuntimeError("Cloud Tasks ingestion is enabled but GCP_PROJECT_ID/INGESTION_WORKER_URL is missing")
+
+    payload = _build_worker_payload(job_id, file_id, collection_name)
+
+    def _create_task_sync() -> None:
+        client = tasks_v2.CloudTasksClient()
+        parent = client.queue_path(
+            settings.GCP_PROJECT_ID,
+            settings.INGESTION_TASKS_LOCATION,
+            settings.INGESTION_TASKS_QUEUE,
+        )
+        task_name = f"{parent}/tasks/{job_id}"
+        headers = {"Content-Type": "application/json"}
+        if settings.INGESTION_WORKER_TOKEN:
+            headers["X-Ingestion-Worker-Token"] = settings.INGESTION_WORKER_TOKEN
+
+        http_request: Dict[str, Any] = {
+            "http_method": tasks_v2.HttpMethod.POST,
+            "url": settings.INGESTION_WORKER_URL,
+            "headers": headers,
+            "body": json.dumps(payload).encode("utf-8"),
+        }
+
+        if settings.INGESTION_TASKS_SERVICE_ACCOUNT_EMAIL:
+            http_request["oidc_token"] = {
+                "service_account_email": settings.INGESTION_TASKS_SERVICE_ACCOUNT_EMAIL,
+                "audience": settings.INGESTION_WORKER_URL,
+            }
+
+        task = {"name": task_name, "http_request": http_request}
+        try:
+            client.create_task(request={"parent": parent, "task": task})
+        except AlreadyExists:
+            # Task already exists for this job_id; treat as idempotent enqueue.
+            return
+
+    await run_in_threadpool(_create_task_sync)
+
+
+async def create_ingestion_job(
+    *,
+    collection_name: str,
+    file_id: str,
+    tenant_id: str,
+    initial_status: str = "queued",
+) -> str:
+    """Create/attach a durable ingestion job record on the parent file payload."""
+    job_id = str(uuid.uuid4())
+    now = datetime.now().isoformat()
+    await vector_service.client.set_payload(
+        collection_name=collection_name,
+        payload={
+            "ingestion_job_id": job_id,
+            "ingestion_job_status": initial_status,
+            "ingestion_job_attempt_count": 0,
+            "ingestion_job_created_at": now,
+            "ingestion_job_started_at": None,
+            "ingestion_job_completed_at": None,
+            "ingestion_job_error_message": None,
+            "ingestion_job_processing_duration_ms": None,
+            "ingestion_status": initial_status,
+            "ingestion_queue_provider": "cloud_tasks" if get_settings().INGESTION_USE_CLOUD_TASKS else "inline",
+            "tenant_scope": tenant_id,
+        },
+        points=[file_id],
+    )
+    return job_id
+
+
+async def enqueue_ingestion_job(
+    *,
+    collection_name: str,
+    file_id: str,
+    tenant_id: str,
+) -> str:
+    """Create job metadata and enqueue durable worker task."""
+    job_id = await create_ingestion_job(
+        collection_name=collection_name,
+        file_id=file_id,
+        tenant_id=tenant_id,
+        initial_status="queued",
+    )
+    await _enqueue_cloud_task(job_id, file_id, collection_name)
+    return job_id
+
+
+async def _run_ingestion_pipeline(
+    *,
+    job_id: Optional[str],
+    collection_name: str,
+    point_id: str,
+    file_bytes: bytes,
+    filename: str,
+    file_type: str,
+    tenant_id: str,
+    is_global: bool,
+    tags: List[str],
+    file_url: str,
+    size_str: str,
+    file_size: int,
+    upload_date: str,
+    preview_url: Optional[str],
+    preview_type: Optional[str],
+    preview_status: str,
+    preview_error: Optional[str],
+) -> None:
+    """Async extraction -> quality gate -> chunk embedding pipeline."""
+    settings = get_settings()
+    started = time.perf_counter()
+
+    try:
+        started_at = datetime.now().isoformat()
+        attempt_count = 1
+        if job_id:
+            existing = await vector_service.client.retrieve(
+                collection_name=collection_name,
+                ids=[point_id],
+                with_payload=True,
+                with_vectors=False,
+            )
+            payload = existing[0].payload if existing else {}
+            attempt_count = int((payload or {}).get("ingestion_job_attempt_count") or 0) + 1
+        await vector_service.client.set_payload(
+            collection_name=collection_name,
+            payload={
+                "ingestion_status": "processing",
+                "ingestion_started_at": started_at,
+                "ingestion_job_status": "processing" if job_id else None,
+                "ingestion_job_started_at": started_at if job_id else None,
+                "ingestion_job_attempt_count": attempt_count if job_id else None,
+                "ingestion_job_error_message": None if job_id else None,
+            },
+            points=[point_id],
+        )
+
+        extracted_text = await extract_text(file_bytes, filename)
+        cleaned_text = _clean_extracted_text(extracted_text)[:MAX_CHARS_TOTAL]
+        quality_status, quality_reason = _assess_extraction_quality(cleaned_text, filename, file_size)
+
+        if quality_status != "indexed":
+            await _delete_chunk_points(collection_name, point_id)
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            completed_at = datetime.now().isoformat()
+            await vector_service.client.set_payload(
+                collection_name=collection_name,
+                payload={
+                    "record_type": "file",
+                    "filename": filename,
+                    "file_type": file_type,
+                    "type": file_type,
+                    "url": file_url,
+                    "is_global": is_global,
+                    "client_id": None if is_global else tenant_id,
+                    "tags": tags,
+                    "size": size_str,
+                    "size_bytes": file_size,
+                    "upload_date": upload_date,
+                    "uploaded_at": upload_date,
+                    "preview_url": preview_url,
+                    "preview_type": preview_type,
+                    "preview_status": preview_status,
+                    "preview_error": preview_error,
+                    "content": cleaned_text[:MAX_CHARS_TOTAL],
+                    "content_preview": cleaned_text[:CONTENT_PREVIEW_LENGTH],
+                    "ai_enabled": False,
+                    "ingestion_status": quality_status,
+                    "ingestion_error": quality_reason,
+                    "extracted_char_count": len(cleaned_text),
+                    "chunk_count": 0,
+                    "embedding_model": settings.EMBEDDING_MODEL,
+                    "embedding_tokens_estimate": 0,
+                    "embedding_cost_estimate_usd": 0.0,
+                    "processing_duration_ms": duration_ms,
+                    "ingestion_job_status": quality_status if job_id else None,
+                    "ingestion_job_completed_at": completed_at if job_id else None,
+                    "ingestion_job_error_message": quality_reason if job_id else None,
+                    "ingestion_job_processing_duration_ms": duration_ms if job_id else None,
+                    "ocr_status": "not_requested" if file_type in IMAGE_EXTENSIONS else None,
+                },
+                points=[point_id],
+            )
+            logger.info(
+                "ingestion_complete file_id=%s tenant=%s status=%s chars=%s chunks=0 reason=%s duration_ms=%s",
+                point_id, tenant_id, quality_status, len(cleaned_text), quality_reason, duration_ms
+            )
+            return
+
+        chunks = _chunk_text_by_tokens(cleaned_text)
+        if not chunks:
+            chunks = [cleaned_text[:MAX_CHARS_TOTAL]]
+
+        await _delete_chunk_points(collection_name, point_id)
+
+        chunk_points: List[PointStruct] = []
+        total_tokens = 0
+        for chunk_idx, chunk_text in enumerate(chunks):
+            vector = await _generate_embedding(chunk_text)
+            token_estimate = _estimate_tokens(chunk_text)
+            total_tokens += token_estimate
+            chunk_payload: Dict[str, Any] = {
+                "record_type": "chunk",
+                "parent_file_id": point_id,
+                "chunk_id": f"{point_id}::chunk::{chunk_idx}",
+                "chunk_index": chunk_idx,
+                "filename": filename,
+                "file_type": file_type,
+                "type": file_type,
+                "client_id": None if is_global else tenant_id,
+                "is_global": is_global,
+                "tenant_id": tenant_id,
+                "url": file_url,
+                "tags": tags,
+                "ai_enabled": True,
+                "ingestion_status": "indexed",
+                "text": chunk_text,
+                "content": chunk_text,
+                "content_preview": chunk_text[:CONTENT_PREVIEW_LENGTH],
+                "upload_date": upload_date,
+                "uploaded_at": upload_date,
+                "chunk_token_estimate": token_estimate,
+            }
+            chunk_points.append(
+                PointStruct(
+                    id=f"{point_id}::chunk::{chunk_idx}",
+                    vector=vector,
+                    payload=chunk_payload,
+                )
+            )
+
+        await vector_service.client.upsert(
+            collection_name=collection_name,
+            points=chunk_points,
+        )
+
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        embedding_cost_estimate = round((total_tokens / 1000.0) * EMBEDDING_COST_PER_1K_TOKENS_USD, 6)
+        parent_payload: Dict[str, Any] = {
+            "record_type": "file",
+            "filename": filename,
+            "file_type": file_type,
+            "type": file_type,
+            "url": file_url,
+            "is_global": is_global,
+            "tags": tags,
+            "content": cleaned_text[:MAX_CHARS_TOTAL],
+            "content_preview": cleaned_text[:CONTENT_PREVIEW_LENGTH],
+            "size": size_str,
+            "size_bytes": file_size,
+            "upload_date": upload_date,
+            "uploaded_at": upload_date,
+            "preview_url": preview_url,
+            "preview_type": preview_type,
+            "preview_status": preview_status,
+            "preview_error": preview_error,
+            "ai_enabled": True,
+            "ingestion_status": "indexed",
+            "ingestion_error": None,
+            "extracted_char_count": len(cleaned_text),
+            "chunk_count": len(chunk_points),
+            "embedding_model": settings.EMBEDDING_MODEL,
+            "embedding_tokens_estimate": total_tokens,
+            "embedding_cost_estimate_usd": embedding_cost_estimate,
+            "processing_duration_ms": duration_ms,
+        }
+        if not is_global:
+            parent_payload["client_id"] = tenant_id
+        completed_at = datetime.now().isoformat()
+        await vector_service.client.set_payload(
+            collection_name=collection_name,
+            payload=parent_payload,
+            points=[point_id],
+        )
+        if job_id:
+            await vector_service.client.set_payload(
+                collection_name=collection_name,
+                payload={
+                    "ingestion_job_status": "indexed",
+                    "ingestion_job_completed_at": completed_at,
+                    "ingestion_job_error_message": None,
+                    "ingestion_job_processing_duration_ms": duration_ms,
+                },
+                points=[point_id],
+            )
+        logger.info(
+            "ingestion_complete file_id=%s tenant=%s status=indexed chars=%s chunks=%s duration_ms=%s tokens=%s est_cost_usd=%s",
+            point_id, tenant_id, len(cleaned_text), len(chunk_points), duration_ms, total_tokens, embedding_cost_estimate
+        )
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        logger.exception("ingestion_failed file_id=%s tenant=%s error=%s", point_id, tenant_id, exc)
+        completed_at = datetime.now().isoformat()
+        await vector_service.client.set_payload(
+            collection_name=collection_name,
+            payload={
+                "ingestion_status": "failed",
+                "ingestion_error": str(exc),
+                "processing_duration_ms": duration_ms,
+                "ai_enabled": False,
+                "ingestion_job_status": "failed" if job_id else None,
+                "ingestion_job_completed_at": completed_at if job_id else None,
+                "ingestion_job_error_message": str(exc) if job_id else None,
+                "ingestion_job_processing_duration_ms": duration_ms if job_id else None,
+            },
+            points=[point_id],
+        )
+
+
 async def process_upload(
     file: UploadFile,
     tenant_id: str,
     tags: List[str],
-    overwrite: bool = False
+    overwrite: bool = False,
 ) -> dict:
     """
     Process an uploaded file: upload to GCS, extract text, vectorize, and index in Qdrant.
@@ -486,70 +1023,48 @@ async def process_upload(
             - type: The file type/extension
     """
     settings = get_settings()
-    
-    # Generate unique filename
+
     if file.filename:
-        # Use original filename but make it unique with UUID prefix to avoid collisions
         file_extension = "." + file.filename.split(".")[-1] if "." in file.filename else ""
         base_name = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
         unique_filename = f"{uuid.uuid4()}_{base_name}{file_extension}"
     else:
-        # Generate unique filename if no filename provided
-        file_extension = ""
-        unique_filename = f"{uuid.uuid4()}{file_extension}"
-    
+        unique_filename = str(uuid.uuid4())
+
     try:
-        # Read file content into memory for text extraction
         file_content = await file.read()
-        
-        # Calculate file size and upload date before upload
         file_size = len(file_content)
         size_str = _format_file_size(file_size)
         upload_date = datetime.now().isoformat()
-        
-        # Extract text using the router function
-        file_type = file.filename.split(".")[-1].lower() if file.filename else "unknown"
         filename = file.filename or "unknown"
+        file_type = filename.split(".")[-1].lower() if "." in filename else "unknown"
+        is_global_upload = tenant_id == "global"
+        is_supported_text = file_type in TEXT_NATIVE_EXTENSIONS
         is_image = is_image_ext(filename)
-        
-        # Extract text (OCR is never performed during upload - must use dedicated endpoint)
-        text = await extract_text(file_content, filename)
-        
-        # Ensure text doesn't exceed MAX_CHARS_TOTAL (safety check)
-        if len(text) > MAX_CHARS_TOTAL:
-            text = text[:MAX_CHARS_TOTAL]
-        
-        # Rewind file stream before uploading to GCS
-        await file.seek(0)
-        
-        # Generate point_id early so it can be used for preview object naming
-        point_id = str(uuid.uuid4())
-        
-        # Upload original to GCS
-        file_url = await StorageService.upload_file(file, unique_filename)
 
-        # Optional: generate and upload PDF preview for Office/HTML documents
+        point_id = str(uuid.uuid4())
+
+        # Upload original bytes first.
+        file_url = await StorageService.upload_bytes(
+            unique_filename,
+            file_content,
+            content_type=file.content_type or "application/octet-stream",
+        )
+
         preview_url: Optional[str] = None
         preview_type: Optional[str] = None
         preview_status: str = "not_requested"
         preview_error: Optional[str] = None
-
         if settings.ENABLE_PREVIEW_GENERATION and is_office_or_html(filename):
             preview_status = "processing"
             try:
                 pdf_bytes = await generate_pdf_preview(file_content, filename)
-
-                # Use point_id-based name so previews are stable per document
                 preview_object_name = f"{settings.PREVIEW_BUCKET_PATH_PREFIX}/{point_id}.pdf"
-
-                # Upload preview PDF
                 preview_public_url = await StorageService.upload_bytes(
                     preview_object_name,
                     pdf_bytes,
                     content_type="application/pdf",
                 )
-
-                # Optionally sign the preview URL
                 if settings.SIGN_PREVIEW_URLS:
                     preview_url = await StorageService.generate_signed_url(
                         preview_object_name,
@@ -557,157 +1072,116 @@ async def process_upload(
                     )
                 else:
                     preview_url = preview_public_url
-
                 preview_type = "pdf"
                 preview_status = "complete"
-                preview_error = None
             except HTTPException as exc:
-                # Controlled failure - record status and let upload succeed
                 preview_status = "failed"
                 preview_error = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
             except Exception as exc:
                 preview_status = "failed"
                 preview_error = str(exc)
-        
-        # Generate embedding
-        if text.strip():
-            vector = await _generate_embedding(text)
-        else:
-            # If no text extracted, generate a minimal embedding from filename
-            # This ensures we can still index the file even without extractable text
-            fallback_text = f"File: {file.filename or 'unknown'}"
-            vector = await _generate_embedding(fallback_text)
-        
-        # Prepare Qdrant payload
-        # (point_id already generated above for preview naming)
-        
-        # Determine ai_enabled based on file type
-        # Default: pdf, docx, doc, pptx, xlsx, html -> ai_enabled = true
-        # Images -> ai_enabled = false by default (conservative, requires explicit OCR)
-        # All other file types -> ai_enabled = false
-        # Special case: .doc files that fail extraction get ai_enabled = false
-        ai_enabled_file_types = {"pdf", "docx", "doc", "pptx", "xlsx", "html", "htm"}
-        image_types = {"png", "jpg", "jpeg", "webp", "tiff"}
-        
-        # Check if .doc extraction failed (returns fallback string)
-        doc_extraction_failed = (
-            file_type == "doc" and 
-            (text.startswith("[DOC extraction unavailable") or 
-             text.startswith("[Binary file — no text extracted]"))
+
+        target_collection = (
+            settings.QDRANT_COLLECTION_TIER_1 if is_global_upload
+            else settings.QDRANT_COLLECTION_TIER_2
         )
-        
-        if doc_extraction_failed:
-            ai_enabled = False
-            logger.warning(
-                f"DOC extraction failed for {filename}; "
-                f"ai_enabled set to False. Recommend converting to .docx format."
-            )
-        elif file_type in ai_enabled_file_types:
-            ai_enabled = True
-        elif file_type in image_types:
-            ai_enabled = False  # Images default to false, require explicit OCR + ai_enabled toggle
-        else:
-            ai_enabled = False
-        
-        # Initialize OCR fields for images (or any file type for consistency)
-        ocr_enabled = False
-        ocr_status = "not_requested"
-        ocr_text: Optional[str] = None
-        ocr_confidence: Optional[float] = None
-        ocr_language: Optional[str] = None
-        ocr_error: Optional[str] = None
-        ocr_extracted_at: Optional[str] = None
-        
-        # For images, set OCR fields even if not requested
+        ingestion_status = "uploaded"
         if is_image:
-            ocr_status = "not_requested"
-        
-        # Prepare content fields:
-        # - content: full extracted text (capped at MAX_CHARS_TOTAL) for RAG
-        # - content_preview: first 1000 chars for UI display
-        content_full = text  # Already capped at MAX_CHARS_TOTAL
-        content_preview = text[:CONTENT_PREVIEW_LENGTH]
-        
-        # For images, keep placeholder in content
-        if is_image:
-            content_full = "[Image file — OCR not requested]"
-            content_preview = content_full
-        
-        # Determine collection and payload flags based on tenant_id
-        # Global uploads (tenant_id == "global") -> Tier 1 with is_global=True
-        # Campaign uploads (tenant_id != "global") -> Tier 2 with client_id=tenant_id, is_global=False
-        is_global_upload = tenant_id == "global"
-        
-        if is_global_upload:
-            # Global archive: Tier 1, is_global=True, no client_id
-            target_collection = settings.QDRANT_COLLECTION_TIER_1
-            is_global_flag = True
-            client_id_value = None  # Don't set client_id for global files
-        else:
-            # Campaign upload: Tier 2, is_global=False, client_id=tenant_id
-            target_collection = settings.QDRANT_COLLECTION_TIER_2
-            is_global_flag = False
-            client_id_value = tenant_id
-        
-        payload = {
-            "filename": file.filename or "unknown",
-            "file_type": file_type,  # Normalized extension
-            "type": file_type,  # Keep for backward compatibility
-            "url": file_url,  # GCS public URL
-            "is_global": is_global_flag,  # Critical flag for collection routing
+            ingestion_status = "ocr_needed"
+
+        payload: Dict[str, Any] = {
+            "record_type": "file",
+            "filename": filename,
+            "file_type": file_type,
+            "type": file_type,
+            "url": file_url,
+            "is_global": is_global_upload,
             "tags": tags,
-            "content": content_full,  # FULL TEXT for RAG (capped at MAX_CHARS_TOTAL)
-            "content_preview": content_preview,  # Preview for UI (first 1000 chars)
-            "size": size_str,  # Human-readable file size (e.g., "5.2 MB")
-            "size_bytes": file_size,  # Raw size in bytes for sorting/filtering
-            "upload_date": upload_date,  # ISO format timestamp
-            "uploaded_at": upload_date,  # Alias for consistency
-            "ai_enabled": ai_enabled,  # AI Memory toggle
-            # Preview fields (read-only PDF previews for Office/HTML)
+            "size": size_str,
+            "size_bytes": file_size,
+            "upload_date": upload_date,
+            "uploaded_at": upload_date,
+            "ai_enabled": False,
+            "content": "",
+            "content_preview": "",
+            "ingestion_status": ingestion_status,
+            "ingestion_error": None,
+            "extracted_char_count": 0,
+            "chunk_count": 0,
+            "embedding_model": settings.EMBEDDING_MODEL,
+            "embedding_tokens_estimate": 0,
+            "embedding_cost_estimate_usd": 0.0,
             "preview_url": preview_url,
             "preview_type": preview_type,
             "preview_status": preview_status,
             "preview_error": preview_error,
-            # OCR fields (always included for consistency, especially for images)
-            "ocr_enabled": ocr_enabled,
-            "ocr_status": ocr_status,
-            "ocr_text": ocr_text,
-            "ocr_confidence": ocr_confidence,
-            "ocr_language": ocr_language,
-            "ocr_error": ocr_error,
-            "ocr_extracted_at": ocr_extracted_at,
+            "ocr_enabled": False,
+            "ocr_status": "not_requested" if is_image else None,
         }
-        
-        # Only set client_id for campaign uploads (not global)
-        if client_id_value is not None:
-            payload["client_id"] = client_id_value
-        
-        # Create Qdrant point
-        point = PointStruct(
-            id=point_id,
-            vector=vector,
-            payload=payload
-        )
-        
-        # Upsert into Qdrant with collection routing based on tenant_id
+        if not is_global_upload:
+            payload["client_id"] = tenant_id
+        if is_image:
+            payload["content"] = "[Image file — OCR not requested]"
+            payload["content_preview"] = payload["content"]
+
+        placeholder_vector = [0.0] * int(settings.EMBEDDING_DIM)
         await vector_service.client.upsert(
             collection_name=target_collection,
-            points=[point]
+            points=[PointStruct(id=point_id, vector=placeholder_vector, payload=payload)],
         )
-        
-        # Log collection routing for debugging
+
+        if is_supported_text:
+            try:
+                job_id = await enqueue_ingestion_job(
+                    collection_name=target_collection,
+                    file_id=point_id,
+                    tenant_id=tenant_id,
+                )
+                await vector_service.client.set_payload(
+                    collection_name=target_collection,
+                    payload={
+                        "ingestion_status": "queued",
+                        "ingestion_job_id": job_id,
+                    },
+                    points=[point_id],
+                )
+            except Exception as enqueue_exc:
+                await vector_service.client.set_payload(
+                    collection_name=target_collection,
+                    payload={
+                        "ingestion_status": "failed",
+                        "ingestion_error": f"Failed to enqueue ingestion job: {enqueue_exc}",
+                        "ingestion_job_status": "failed",
+                        "ingestion_job_error_message": str(enqueue_exc),
+                    },
+                    points=[point_id],
+                )
+                logger.exception("ingestion_enqueue_failed file_id=%s tenant=%s", point_id, tenant_id)
+        elif not is_image:
+            await vector_service.client.set_payload(
+                collection_name=target_collection,
+                payload={
+                    "ingestion_status": "failed",
+                    "ingestion_error": f"Unsupported file type for Phase 1A: {file_type}",
+                },
+                points=[point_id],
+            )
+
         logger.info(
-            f"UPSERT collection={target_collection} tenant_id={tenant_id} id={point_id} "
-            f"is_global={is_global_flag}"
+            "upload_staged file_id=%s tenant=%s file_type=%s collection=%s async_ingestion=%s status=%s",
+            point_id,
+            tenant_id,
+            file_type,
+            target_collection,
+            is_supported_text,
+            ingestion_status,
         )
-        
         return {
             "id": point_id,
             "url": file_url,
-            "filename": file.filename or "unknown",
+            "filename": filename,
             "type": file_type,
         }
-        
     except HTTPException:
         raise
     except Exception as exc:
@@ -715,6 +1189,169 @@ async def process_upload(
             status_code=500,
             detail=f"Failed to process upload: {exc}"
         ) from exc
+
+
+async def reindex_existing_file(
+    file_id: str,
+    collection_name: str,
+) -> Optional[str]:
+    """Create and enqueue a durable reindex job for an existing file."""
+    points = await vector_service.client.retrieve(
+        collection_name=collection_name,
+        ids=[file_id],
+        with_payload=True,
+        with_vectors=False,
+    )
+    if not points:
+        raise HTTPException(status_code=404, detail=f"File with ID {file_id} not found")
+
+    point = points[0]
+    payload = point.payload or {}
+    if payload.get("record_type") == "chunk":
+        return None
+
+    file_type = (payload.get("file_type") or payload.get("type") or "").lower()
+    if file_type not in TEXT_NATIVE_EXTENSIONS:
+        await vector_service.client.set_payload(
+            collection_name=collection_name,
+            payload={
+                "ingestion_status": "failed",
+                "ingestion_error": f"Unsupported file type for Phase 1A: {file_type or 'unknown'}",
+            },
+            points=[file_id],
+        )
+        return None
+
+    tenant_id = payload.get("client_id") or "global"
+    job_id = await enqueue_ingestion_job(
+        collection_name=collection_name,
+        file_id=str(file_id),
+        tenant_id=tenant_id,
+    )
+    return job_id
+
+
+async def run_ingestion_job(
+    *,
+    job_id: str,
+    file_id: str,
+    collection_name: str,
+) -> None:
+    """Worker entrypoint: load job context and execute ingestion pipeline."""
+    points = await vector_service.client.retrieve(
+        collection_name=collection_name,
+        ids=[file_id],
+        with_payload=True,
+        with_vectors=False,
+    )
+    if not points:
+        raise HTTPException(status_code=404, detail=f"File with ID {file_id} not found")
+    payload = points[0].payload or {}
+    if payload.get("record_type") == "chunk":
+        return
+
+    current_job_id = payload.get("ingestion_job_id")
+    if current_job_id and current_job_id != job_id:
+        # Stale task; a newer job exists for this file.
+        return
+
+    filename = payload.get("filename") or "unknown"
+    file_type = (payload.get("file_type") or payload.get("type") or "").lower()
+    file_url = payload.get("url")
+    if not file_url:
+        raise HTTPException(status_code=400, detail=f"File {file_id} has no URL")
+
+    if file_type not in TEXT_NATIVE_EXTENSIONS:
+        await vector_service.client.set_payload(
+            collection_name=collection_name,
+            payload={
+                "ingestion_status": "failed",
+                "ingestion_error": f"Unsupported file type for Phase 1A: {file_type or 'unknown'}",
+                "ingestion_job_status": "failed",
+                "ingestion_job_error_message": f"Unsupported file type: {file_type or 'unknown'}",
+                "ingestion_job_completed_at": datetime.now().isoformat(),
+            },
+            points=[file_id],
+        )
+        return
+
+    file_bytes = await StorageService.download_file(file_url)
+    tenant_id = payload.get("client_id") or "global"
+    is_global = bool(payload.get("is_global")) or collection_name == get_settings().QDRANT_COLLECTION_TIER_1
+    tags = payload.get("tags", []) if isinstance(payload.get("tags"), list) else []
+    upload_date = payload.get("upload_date") or datetime.now().isoformat()
+    size_bytes = payload.get("size_bytes") or len(file_bytes)
+    size_str = payload.get("size") or _format_file_size(int(size_bytes))
+
+    await _run_ingestion_pipeline(
+        job_id=job_id,
+        collection_name=collection_name,
+        point_id=str(file_id),
+        file_bytes=file_bytes,
+        filename=filename,
+        file_type=file_type,
+        tenant_id=tenant_id,
+        is_global=is_global,
+        tags=tags,
+        file_url=file_url,
+        size_str=size_str,
+        file_size=int(size_bytes),
+        upload_date=upload_date,
+        preview_url=payload.get("preview_url"),
+        preview_type=payload.get("preview_type"),
+        preview_status=payload.get("preview_status", "not_requested"),
+        preview_error=payload.get("preview_error"),
+    )
+
+
+async def backfill_reindex_supported_files(
+    tenant_id: Optional[str] = None,
+    include_global: bool = True,
+    limit: int = 500,
+) -> Dict[str, int]:
+    """Backfill existing file points by enqueueing durable Phase 1A jobs."""
+    settings = get_settings()
+    totals = {"seen": 0, "enqueued": 0, "skipped": 0, "failed": 0}
+
+    targets: List[Tuple[str, Optional[Filter]]] = []
+    tenant_filter = None
+    if tenant_id and tenant_id != "global":
+        tenant_filter = Filter(
+            must=[FieldCondition(key="client_id", match=MatchValue(value=tenant_id))]
+        )
+    targets.append((settings.QDRANT_COLLECTION_TIER_2, tenant_filter))
+    if include_global:
+        global_filter = Filter(must=[FieldCondition(key="is_global", match=MatchValue(value=True))])
+        targets.append((settings.QDRANT_COLLECTION_TIER_1, global_filter))
+
+    for collection_name, collection_filter in targets:
+        points, _ = await vector_service.client.scroll(
+            collection_name=collection_name,
+            scroll_filter=collection_filter,
+            limit=limit,
+            with_payload=True,
+            with_vectors=False,
+        )
+        for point in points:
+            totals["seen"] += 1
+            payload = point.payload or {}
+            if payload.get("record_type") == "chunk":
+                totals["skipped"] += 1
+                continue
+            file_type = (payload.get("file_type") or payload.get("type") or "").lower()
+            if file_type not in TEXT_NATIVE_EXTENSIONS:
+                totals["skipped"] += 1
+                continue
+            try:
+                job_id = await reindex_existing_file(str(point.id), collection_name)
+                if job_id:
+                    totals["enqueued"] += 1
+                else:
+                    totals["skipped"] += 1
+            except Exception:
+                totals["failed"] += 1
+                logger.exception("backfill_reindex_failed file_id=%s collection=%s", point.id, collection_name)
+    return totals
 
 
 async def delete_file(file_id: str, collection_name: str) -> None:
@@ -769,6 +1406,9 @@ async def delete_file(file_id: str, collection_name: str) -> None:
             collection_name=collection_name,
             points_selector=[file_id]
         )
+
+        # Delete chunk points linked to this parent file
+        await _delete_chunk_points(collection_name, file_id)
         
     except HTTPException:
         raise
