@@ -250,6 +250,93 @@ class VectorService:
             output.append(point)
         return output
 
+    @staticmethod
+    def _with_chunk_type_filter(filter_obj: Filter, chunk_type: str) -> Filter:
+        return Filter(
+            must=[
+                *(filter_obj.must or []),
+                FieldCondition(
+                    key="chunk_type",
+                    match=MatchValue(value=chunk_type),
+                ),
+            ],
+            should=filter_obj.should or [],
+            must_not=filter_obj.must_not or [],
+        )
+
+    @staticmethod
+    def _detect_research_intent(query_text: str) -> str:
+        query = (query_text or "").lower()
+        quote_terms = ["quote", "exact", "verbatim", "citation", "evidence", "source text"]
+        synthesis_terms = ["summarize", "summary", "theme", "compare", "strategy", "synthesis", "cross-document"]
+        tone_terms = ["sentiment", "tone", "framing", "narrative", "messaging tone"]
+        if any(term in query for term in quote_terms):
+            return "quote"
+        if any(term in query for term in synthesis_terms):
+            return "synthesis"
+        if any(term in query for term in tone_terms):
+            return "tone"
+        return "balanced"
+
+    @staticmethod
+    def _intent_profile(intent: str) -> Dict[str, int]:
+        # Values are percentages for total limit and per-document cap.
+        if intent == "quote":
+            return {"micro_pct": 75, "macro_pct": 25, "per_doc_cap": 3}
+        if intent == "synthesis":
+            return {"micro_pct": 30, "macro_pct": 70, "per_doc_cap": 2}
+        if intent == "tone":
+            return {"micro_pct": 40, "macro_pct": 60, "per_doc_cap": 2}
+        return {"micro_pct": 50, "macro_pct": 50, "per_doc_cap": 2}
+
+    @staticmethod
+    def _merge_with_diversity(
+        *,
+        micro_results: List[Dict[str, Any]],
+        macro_results: List[Dict[str, Any]],
+        micro_quota: int,
+        macro_quota: int,
+        per_doc_cap: int,
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        merged: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        per_doc_counts: Dict[str, int] = {}
+
+        def _try_add(point: Dict[str, Any]) -> bool:
+            key = VectorService._candidate_key(point)
+            if not key or key in seen:
+                return False
+            payload = point.get("payload", {}) or {}
+            doc_key = str(payload.get("parent_file_id") or payload.get("filename") or "__unknown__")
+            if per_doc_counts.get(doc_key, 0) >= per_doc_cap:
+                return False
+            seen.add(key)
+            per_doc_counts[doc_key] = per_doc_counts.get(doc_key, 0) + 1
+            merged.append(point)
+            return True
+
+        micro_added = 0
+        for point in micro_results:
+            if len(merged) >= limit or micro_added >= micro_quota:
+                break
+            if _try_add(point):
+                micro_added += 1
+
+        macro_added = 0
+        for point in macro_results:
+            if len(merged) >= limit or macro_added >= macro_quota:
+                break
+            if _try_add(point):
+                macro_added += 1
+
+        # Fill remaining slots using both pools while still honoring diversity cap.
+        for point in [*micro_results, *macro_results]:
+            if len(merged) >= limit:
+                break
+            _try_add(point)
+        return merged
+
     async def hybrid_search(
         self,
         *,
@@ -342,6 +429,82 @@ class VectorService:
         if bm25_results:
             return bm25_results[:limit]
         return []
+
+    async def hybrid_search_research(
+        self,
+        *,
+        collection_name: str,
+        query_text: str,
+        query_embedding: Sequence[float],
+        tenant_filter: Filter,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Chunk-type-aware hybrid retrieval orchestration for Riley research workflows."""
+        intent = self._detect_research_intent(query_text)
+        profile = self._intent_profile(intent)
+        micro_quota = max(1, int(round(limit * (profile["micro_pct"] / 100.0))))
+        macro_quota = max(1, limit - micro_quota)
+        per_doc_cap = max(1, profile["per_doc_cap"])
+        branch_fetch_limit = max(4, limit * 3)
+
+        micro_results: List[Dict[str, Any]] = []
+        macro_results: List[Dict[str, Any]] = []
+
+        # Retrieve branches independently; any branch failure degrades gracefully.
+        try:
+            micro_filter = self._with_chunk_type_filter(tenant_filter, "micro")
+            micro_results = await self.hybrid_search(
+                collection_name=collection_name,
+                query_text=query_text,
+                query_embedding=query_embedding,
+                tenant_filter=micro_filter,
+                limit=branch_fetch_limit,
+            )
+        except Exception as exc:
+            logger.warning(
+                "hybrid_research_micro_branch_failed collection=%s error=%s",
+                collection_name,
+                exc,
+            )
+            micro_results = []
+
+        try:
+            macro_filter = self._with_chunk_type_filter(tenant_filter, "macro")
+            macro_results = await self.hybrid_search(
+                collection_name=collection_name,
+                query_text=query_text,
+                query_embedding=query_embedding,
+                tenant_filter=macro_filter,
+                limit=branch_fetch_limit,
+            )
+        except Exception as exc:
+            logger.warning(
+                "hybrid_research_macro_branch_failed collection=%s error=%s",
+                collection_name,
+                exc,
+            )
+            macro_results = []
+
+        if micro_results or macro_results:
+            merged = self._merge_with_diversity(
+                micro_results=micro_results,
+                macro_results=macro_results,
+                micro_quota=micro_quota,
+                macro_quota=macro_quota,
+                per_doc_cap=per_doc_cap,
+                limit=limit,
+            )
+            if merged:
+                return merged
+
+        # Full fallback: single-pool hybrid search preserves legacy behavior.
+        return await self.hybrid_search(
+            collection_name=collection_name,
+            query_text=query_text,
+            query_embedding=query_embedding,
+            tenant_filter=tenant_filter,
+            limit=limit,
+        )
 
     async def search_silo(
         self,

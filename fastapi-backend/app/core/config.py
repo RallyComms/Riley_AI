@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     RERANK_MAX_SNIPPET_TOKENS: int = 180
     RERANK_MAX_TOTAL_INPUT_TOKENS: int = 6000
     OPENAI_API_KEY: Optional[str] = None
+    RILEY_PROVIDER: str = "openai"
+    RILEY_MODEL: str = "gpt-5.4"
+    RILEY_DEEP_MODEL: str = "gpt-5.4-pro"
+    RILEY_TIMEOUT_SECONDS: int = 45
 
     # Google Cloud Storage configuration
     GCS_BUCKET_NAME: str = "riley-assets-riley-ai-479422"

@@ -1,14 +1,12 @@
 import asyncio
+import logging
 import re
 from typing import Any, Dict, List, Literal, Optional
 
-import google.generativeai as genai  # Still needed for GenerativeModel (chat responses)
-from typing import Dict
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.config import get_settings
 from app.core.personas import get_persona_context  # CRITICAL: Preserve for Board Demo
@@ -19,6 +17,7 @@ from app.services.graph import GraphService
 from app.services.qdrant import vector_service
 from app.services.rerank import rerank_candidates
 
+logger = logging.getLogger(__name__)
 
 def _extract_user_id_from_session(session_id: str) -> str:
     """Extract user_id from session_id format: session_{tenantId}_{userId}_{timestamp}
@@ -45,7 +44,7 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     query: str = Field(..., max_length=2000, description="User query text (max 2000 characters)")
     tenant_id: str = Field(..., max_length=50, description="Tenant/client identifier (max 50 characters)")
-    mode: Literal["fast", "deep"] = "fast"  # 'fast' = Gemini 2.5 Flash, 'deep' = Gemini 2.5 Pro
+    mode: Literal["fast", "deep"] = "fast"  # UI retrieval depth mode
     session_id: Optional[str] = Field(None, description="Optional session ID for chat memory")
     user_display_name: Optional[str] = Field(None, description="User's display name for personalization (username, firstName, or email)")
 
@@ -142,19 +141,6 @@ class UpdateRileyProjectRequest(BaseModel):
 class AssignRileyConversationProjectRequest(BaseModel):
     tenant_id: str = Field(..., max_length=50, description="Tenant/client identifier (or 'global')")
     project_id: Optional[str] = Field(None, description="Project ID or null to unassign")
-
-
-def _get_embedding_model() -> None:
-    """Configure the Google Generative AI client with the current API key.
-    
-    NOTE: This is still needed for GenerativeModel (chat responses).
-    Embeddings now use the shared genai_client.
-    """
-    settings = get_settings()
-    if not settings.GOOGLE_API_KEY:
-        raise RuntimeError("GOOGLE_API_KEY is not configured.")
-
-    genai.configure(api_key=settings.GOOGLE_API_KEY)
 
 
 def embed_query_text(text: str) -> List[float]:
@@ -422,11 +408,62 @@ def _validate_and_sanitize_quotes(
     return sanitized
 
 
-def _get_model_name(mode: Literal["fast", "deep"]) -> str:
-    """Return the Gemini 2.5 model name based on the mode."""
-    if mode == "fast":
-        return "gemini-2.5-flash"
-    return "gemini-2.5-pro"
+def _get_riley_model_name(*, deep: bool) -> str:
+    settings = get_settings()
+    return settings.RILEY_DEEP_MODEL if deep else settings.RILEY_MODEL
+
+
+def _extract_openai_response_text(response_json: Dict[str, Any]) -> str:
+    output_text = response_json.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text
+    output = response_json.get("output")
+    if not isinstance(output, list):
+        return ""
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for segment in content:
+            if not isinstance(segment, dict):
+                continue
+            text = segment.get("text")
+            if isinstance(text, str) and text.strip():
+                return text
+    return ""
+
+
+async def _generate_riley_answer_openai(*, prompt: str, model_name: str, timeout_seconds: int) -> str:
+    try:
+        import httpx  # type: ignore
+    except ImportError as exc:
+        raise RuntimeError("httpx dependency is not installed") from exc
+
+    settings = get_settings()
+    if not settings.OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    payload = {
+        "model": model_name,
+        "input": prompt,
+    }
+    timeout = httpx.Timeout(timeout_seconds)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/responses",
+            headers={
+                "Authorization": f"Bearer {settings.OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+        response.raise_for_status()
+        text = _extract_openai_response_text(response.json())
+        if not text:
+            raise RuntimeError("OpenAI response did not contain text output")
+        return text
 
 
 def _candidate_id(result: Dict[str, Any]) -> str:
@@ -482,15 +519,6 @@ def _apply_rerank_order(
             ordered_global.append(item)
 
     return ordered_private, ordered_global
-
-
-@retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=10)
-)
-def _generate_content_with_retry(model: genai.GenerativeModel, prompt: str) -> Any:
-    """Synchronous wrapper for model.generate_content with retry logic."""
-    return model.generate_content(prompt)
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -572,7 +600,7 @@ async def chat(
 
             vector_limit = max(40 if request.mode == "deep" else 20, rerank_candidates_limit) if settings.RERANK_ENABLED else (40 if request.mode == "deep" else 20)
             if settings.HYBRID_SEARCH_ENABLED:
-                vector_task = vector_service.hybrid_search(
+                vector_task = vector_service.hybrid_search_research(
                     collection_name=settings.QDRANT_COLLECTION_TIER_1,
                     query_text=request.query,
                     query_embedding=query_vector,
@@ -659,7 +687,7 @@ async def chat(
         )
         if settings.HYBRID_SEARCH_ENABLED:
             tasks.append(
-                vector_service.hybrid_search(
+                vector_service.hybrid_search_research(
                     collection_name=settings.QDRANT_COLLECTION_TIER_2,
                     query_text=request.query,
                     query_embedding=query_vector,
@@ -693,7 +721,7 @@ async def chat(
         )
         if settings.HYBRID_SEARCH_ENABLED:
             tasks.append(
-                vector_service.hybrid_search(
+                vector_service.hybrid_search_research(
                     collection_name=settings.QDRANT_COLLECTION_TIER_1,
                     query_text=request.query,
                     query_embedding=query_vector,
@@ -761,7 +789,7 @@ async def chat(
                     ],
                 )
                 if settings.HYBRID_SEARCH_ENABLED:
-                    private_results = await vector_service.hybrid_search(
+                    private_results = await vector_service.hybrid_search_research(
                         collection_name=settings.QDRANT_COLLECTION_TIER_2,
                         query_text=request.query,
                         query_embedding=query_vector,
@@ -794,7 +822,7 @@ async def chat(
                     ],
                 )
                 if settings.HYBRID_SEARCH_ENABLED:
-                    global_results = await vector_service.hybrid_search(
+                    global_results = await vector_service.hybrid_search_research(
                         collection_name=settings.QDRANT_COLLECTION_TIER_1,
                         query_text=request.query,
                         query_embedding=query_vector,
@@ -865,11 +893,18 @@ async def chat(
     source_items = _build_sources_payload(private_results, global_results)
 
     # Step E: Build system prompt with persona injection and formatting rules
-    mode_instruction = (
-        "Provide comprehensive strategic analysis with deep insights and connections."
-    ) if request.mode == "deep" else (
-        "Provide a concise, actionable summary."
-    )
+    normal_mode_instruction = """NORMAL MODE INSTRUCTION:
+- Answer directly and get to the point.
+- Use retrieved evidence efficiently; prioritize the highest-signal facts.
+- Stay strategic, but do not be excessively long unless the user asks for deeper detail.
+- Give a clear recommendation with rationale and concrete next steps."""
+    deep_mode_instruction = """DEEP RESEARCH MODE INSTRUCTION:
+- Think broadly across campaign and global sources before concluding.
+- Compare sources explicitly and call out contradictions, gaps, and recurring patterns.
+- Surface strategic implications, second-order effects, and risk/opportunity tradeoffs.
+- Ask clarifying questions when key constraints or decision criteria are missing.
+- Produce a thorough, memo-style response when appropriate."""
+    mode_instruction = deep_mode_instruction if deep else normal_mode_instruction
 
     # Get persona context (CRITICAL for Board Demo)
     persona_context = get_persona_context()
@@ -877,102 +912,64 @@ async def chat(
     empty_context_instruction = ""
     if not has_context:
         empty_context_instruction = """
-IMPORTANT: The context below is empty. Do NOT say "I don't know" or "I don't have information."
-Instead, say: "I'm looking through the files, but I don't see that specific detail yet. However, based on standard RALLY strategy, we usually..." 
-Provide helpful guidance based on campaign strategy best practices, even if the specific data isn't in the files.
+SOURCE LIMITATION: Retrieved campaign/global evidence is limited for this turn.
+Be transparent about that limitation, avoid unsupported certainty, and provide provisional strategy guidance.
+Ask focused clarifying questions to help retrieve or validate what is missing.
 """
 
     # Get user display name for personalization (fallback to "there" if not provided)
     user_display_name = request.user_display_name or "there"
     
-    system_prompt = f"""You are Riley, a Senior Strategist at RALLY.
-You speak in a **High-Bandwidth, Low-Density** style.
+    system_prompt = f"""You are Riley, a senior campaign strategist and decision partner at RALLY.
 
-YOUR ROLE:
-You work alongside {user_display_name} in a Campaign Workspace setting. You're warm, professional, confident, and proactive. You think strategically and connect dots that others might miss.
+PERSONALITY AND LEADERSHIP STANDARD:
+- Be brilliant, kind, firm, and practical.
+- Be supportive and empathetic, but never sycophantic.
+- Do not optimize for pleasing the user.
+- Be direct when ideas are weak, unsupported, risky, or strategically misaligned.
+- Challenge weak assumptions and contradictions clearly and respectfully.
 
-YOUR TONE:
-Confident, collaborative, and punchy. Use bolding to highlight **key metrics** or **names**.
-- Use "We" instead of "You" (e.g., "We should consider..." not "You should consider...")
-- Speak like a trusted colleague who's been in the trenches
-- Get straight to the point—no fluff
+STRATEGIC OPERATING MODE:
+- Do not just summarize documents. Synthesize them into strategic direction.
+- Proactively surface implications for narrative, messaging, audience/persona fit, positioning, opposition framing, risks, and opportunities.
+- Detect patterns, gaps, conflicts, and missing evidence quickly.
+- Ask clarifying questions whenever strategy is ambiguous or key constraints are missing.
+- Do not pretend certainty when evidence is incomplete.
 
-STRATEGIC PERSONA RECOGNITION (CRITICAL):
-Refer to this list of Strategic Archetypes: {persona_context}
-Treat them as VIP audiences. If the user mentions a Persona (like "Passive Patty" or "Skeptical Sam"), analyze their specific psychographics, motivations, and messaging needs. These personas represent distinct audience segments with unique characteristics.
+SOURCE HIERARCHY AND GROUNDING:
+- Use campaign materials first.
+- Use global knowledge base as secondary context when relevant.
+- Distinguish clearly between:
+  1) what the documents explicitly say,
+  2) your inference/analysis,
+  3) your strategic recommendation.
+- Ground factual claims in retrieved sources when applicable using `[[Source: Filename.ext]]`.
+- If evidence is limited or absent, state that plainly and continue with provisional guidance.
+- If asked for direct quotes, only provide exact source-grounded quotes. Never invent or paraphrase as a quote.
 
-CITATION PROTOCOL:
-- **ALWAYS cite your sources explicitly** using the format: `[[Source: Filename.pdf]]`
-- When you reference information from the context, include the source citation inline
-- Example: "According to the Q3 report [[Source: Q3_Report_2024.pdf]], we saw a 15% increase..."
-- **If the answer is NOT in the context provided, explicitly admit it**: "I don't see that specific information in the available documents. However, based on standard RALLY strategy..."
+STRATEGIC PERSONA RECOGNITION:
+Refer to these Strategic Archetypes: {persona_context}
+If the user references a persona (for example, Passive Patty or Skeptical Sam), tailor analysis and recommendations to their motivations, barriers, and message requirements.
 
-FORMATTING RULES (NON-NEGOTIABLE - SCANNABLE OUTPUT):
-1. **SHORT HEADINGS WITH EMOJIS:** Always use `###` (h3) for section headers with required emojis. Keep header text concise (3-5 words max).
-   - Examples: `### 🧠 Strategic Context`, `### 🔎 Key Insights`, `### 🚀 Next Moves`
-2. **BULLET LISTS REQUIRED:** Key Insights and Next Moves MUST be formatted as bullet lists, not paragraphs:
-   - Correct: `### 🔎 Key Insights\n- **Insight 1:** Description.\n- **Insight 2:** Description.`
-   - Incorrect: `### Key Insights\nParagraph format with multiple sentences...`
-3. **AGGRESSIVE SPACING:** You MUST put a blank line between every single paragraph, list item, and section.
-4. **REAL LISTS:** When listing items (like attributes, steps, or insights), you MUST use Markdown bullet points:
-   - Correct: `- **Attribute Name:** The description.`
-   - Incorrect: `Attribute Name: The description.`
-5. **INDENTATION:** Never write a list item without the `- ` prefix.
-6. **AVOID DENSE PARAGRAPHS:** Keep paragraphs to 1-2 sentences max. Use bullet lists instead of long paragraphs unless the user specifically asks for detailed prose.
-7. **STRUCTURE RULE:** Use Markdown Headers (###) for sections. ALWAYS put TWO blank lines between sections.
+RESPONSE STYLE:
+- Executive-caliber, intelligent, and actionable.
+- Concise by default; expand into a detailed strategic memo when depth is requested.
+- Confident but not arrogant. Never gushy. Never flattering without substance.
+- Write naturally, not robotically.
 
-RESPONSE TEMPLATE (MANDATORY FORMAT):
-EVERY response MUST follow this exact structure. No exceptions.
+RESPONSE STRUCTURE:
+- Start with a direct answer.
+- Then include clear sections:
+  - `### Evidence from Sources`
+  - `### Strategic Analysis`
+  - `### Recommendation`
+- When uncertainty is material, add:
+  - `### Clarifying Questions`
+- Use bullet points for lists, tradeoffs, and action steps.
 
-Start with a direct answer (1-2 sentences max).
-
-Then ALWAYS include these three sections in this exact order:
-
-### 🧠 Strategic Context
-1-2 sentences explaining why this matters and connections to campaign goals.
-
-### 🔎 Key Insights
-MUST be formatted as a bullet list:
-- **Insight 1:** Description with citation `[[Source: ...]]` if applicable.
-- **Insight 2:** Description with citation `[[Source: ...]]` if applicable.
-- **Insight 3:** Description with citation `[[Source: ...]]` if applicable.
-
-If no documents were retrieved, include ONE bullet: `- No documents retrieved from the archive for this query.`
-
-### 🚀 Next Moves
-MUST be formatted as a bullet list:
-- **Action 1:** Specific actionable recommendation.
-- **Action 2:** Specific actionable recommendation.
-- **Action 3:** Specific actionable recommendation.
-
-CRITICAL FORMATTING RULES:
-- Use EXACTLY these emojis: 🧠 for Strategic Context, 🔎 for Key Insights, 🚀 for Next Moves
-- Put a blank line (`\n\n`) between EVERY section
-- Strategic Context: 1-2 sentences only (no dense paragraphs)
-- Key Insights and Next Moves: ALWAYS bullet lists, never paragraphs
-- If you have no insights, still include the section with: `- No specific insights available.`
-
-PLACEHOLDER TOKEN PROHIBITION:
-- **NEVER output placeholder tokens** like `[User Name]`, `[Filename]`, or `[[Source: ...]]` unless you are actually citing a real source from the context.
-- Only use `[[Source: Filename.pdf]]` when you are referencing information that was actually retrieved from the Document Archive.
-- If no sources were used, do not include citation placeholders.
-
-DATA SOURCES (TWO MEMORY BANKS):
-You have access to two memory banks:
-
-1. **🕸️ KNOWLEDGE GRAPH (The Golden Set):** Structured campaign data from Neo4j. This contains campaign names, descriptions, and relationships. Use this to identify project names and campaign structures.
-
-2. **📄 DOCUMENT ARCHIVE (The Archive):** Raw documents from vector search. This contains detailed content, messaging, research, and tactical information. Use this for specific details, quotes, and evidence.
-
-**CRITICAL INSTRUCTION:** 
-- If the Graph is empty, rely entirely on the Archive.
-- If the Graph has results, use it to identify campaign names, then use the Archive for details.
-- Always cite sources from the Archive using `[[Source: Filename.pdf]]`.
-
-**FILE MANIFEST AWARENESS:**
-- If the user asks about a file listed in the **FILE MANIFEST**, acknowledge that you see it.
-- If the specific content wasn't retrieved in the **DOCUMENT ARCHIVE** section, tell the user: "I see [Filename] in the vault. Ask me a specific question about its contents so I can retrieve the details."
-- Never claim a file doesn't exist if it's in the FILE MANIFEST.
+FILE MANIFEST AWARENESS:
+- If a file appears in FILE MANIFEST but details were not retrieved, say you can see the file and ask for a narrower retrieval target.
+- Never claim a listed file does not exist.
 
 {empty_context_instruction}
 {mode_instruction}
@@ -992,38 +989,30 @@ Context Data:
     system_prompt += history_context
     system_prompt += f"\nUser Question: {request.query}"
 
-    # Step F: Generate response (Non-blocking with threadpool)
-    model_name = _get_model_name(request.mode)
-    _get_embedding_model()  # Ensure API key is configured
+    # Step F: Generate response using Riley primary provider (OpenAI).
+    model_name = _get_riley_model_name(deep=deep)
+    provider = (settings.RILEY_PROVIDER or "openai").strip().lower()
 
     try:
-        model = genai.GenerativeModel(model_name)
-        # Run blocking GenAI call in threadpool with retry logic to avoid blocking event loop
-        response = await run_in_threadpool(
-            _generate_content_with_retry,
-            model,
-            system_prompt,
+        if provider != "openai":
+            raise RuntimeError(f"Unsupported Riley provider: {provider}")
+        response_text = await _generate_riley_answer_openai(
+            prompt=system_prompt,
+            model_name=model_name,
+            timeout_seconds=max(5, int(settings.RILEY_TIMEOUT_SECONDS)),
         )
-        
-        # Extract text from response
-        response_text = ""
-        if hasattr(response, "text"):
-            response_text = response.text
-        elif hasattr(response, "candidates") and response.candidates:
-            candidate = response.candidates[0]
-            if hasattr(candidate, "content") and hasattr(candidate.content, "parts"):
-                response_text = " ".join(
-                    part.text for part in candidate.content.parts if hasattr(part, "text")
-                )
-        
-        if not response_text:
-            raise RuntimeError("Failed to extract text from model response.")
         response_text = _validate_and_sanitize_quotes(response_text, private_results, global_results)
-
     except Exception as exc:
+        logger.warning(
+            "riley_answer_generation_failed provider=%s model=%s tenant=%s error_type=%s",
+            provider,
+            model_name,
+            request.tenant_id,
+            type(exc).__name__,
+        )
         raise HTTPException(
-            status_code=500,
-            detail=f"Model generation failed ({model_name}): {exc}",
+            status_code=503,
+            detail="Riley is temporarily unavailable. Please try again in a moment.",
         ) from exc
 
     # Step G: Save messages to Neo4j using background tasks (non-blocking)
