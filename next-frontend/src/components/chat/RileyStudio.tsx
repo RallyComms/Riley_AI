@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
-import { Send, Loader2, Sparkles, Zap, Brain, FileText, Check, X, Search, MessageSquare, BarChart3, ChevronLeft, Users, FolderPlus, Folder, MoreHorizontal, ChevronDown, ChevronRight, Copy, CheckCheck } from "lucide-react";
+import { Send, Loader2, Sparkles, Zap, Brain, FileText, Check, X, Search, MessageSquare, BarChart3, ChevronLeft, Users, FolderPlus, Folder, MoreHorizontal, ChevronDown, ChevronRight, Copy, CheckCheck, Download, ClipboardList, AlertTriangle } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import { cn } from "@app/lib/utils";
@@ -19,6 +19,10 @@ type Message = {
   sourcesCount?: number;
   sources?: MessageSource[];
   status?: "thinking"; // For placeholder messages
+  reportDownloadUrl?: string;
+  reportTitle?: string;
+  reportSuggestionPrompt?: string;
+  reportSuggestionType?: "strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief";
 };
 
 type SourceCitation = {
@@ -85,6 +89,45 @@ type RileyIndexSummary = {
   }>;
 };
 
+type PersistedReportJob = {
+  report_job_id: string;
+  tenant_id: string;
+  user_id: string;
+  conversation_id?: string | null;
+  report_type: string;
+  title: string;
+  status: "queued" | "processing" | "complete" | "failed";
+  created_at?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  error_message?: string | null;
+  output_file_id?: string | null;
+  output_url?: string | null;
+  summary_text?: string | null;
+  query: string;
+  mode: "normal" | "deep";
+  report_body?: string | null;
+};
+
+type ReportJob = {
+  reportJobId: string;
+  tenantId: string;
+  userId: string;
+  conversationId: string | null;
+  reportType: string;
+  title: string;
+  status: "queued" | "processing" | "complete" | "failed";
+  createdAt: Date;
+  startedAt?: Date;
+  completedAt?: Date;
+  errorMessage?: string | null;
+  outputFileId?: string | null;
+  outputUrl?: string | null;
+  summaryText?: string | null;
+  query: string;
+  mode: "normal" | "deep";
+};
+
 export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" }: RileyStudioProps) {
   const { getToken, isLoaded: authLoaded } = useAuth();
   const { user, isLoaded: userLoaded } = useUser();
@@ -116,6 +159,15 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [openSourcesByMessageId, setOpenSourcesByMessageId] = useState<Record<string, boolean>>({});
   const [indexSummary, setIndexSummary] = useState<RileyIndexSummary | null>(null);
+  const [reportJobs, setReportJobs] = useState<ReportJob[]>([]);
+  const [isReportsLoading, setIsReportsLoading] = useState(false);
+  const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+  const [isSubmittingReport, setIsSubmittingReport] = useState(false);
+  const [reportType, setReportType] = useState<"strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief">("strategy_memo");
+  const [reportTitle, setReportTitle] = useState("");
+  const [reportPrompt, setReportPrompt] = useState("");
+  const [reportDeepMode, setReportDeepMode] = useState(true);
+  const knownReportStatusRef = useRef<Record<string, "queued" | "processing" | "complete" | "failed">>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -324,6 +376,108 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
     loadAssets();
   }, [tenantId, authLoaded, userLoaded, user, getToken]);
+
+  const toReportJob = (job: PersistedReportJob): ReportJob => ({
+    reportJobId: job.report_job_id,
+    tenantId: job.tenant_id,
+    userId: job.user_id,
+    conversationId: job.conversation_id ?? null,
+    reportType: job.report_type,
+    title: job.title || "Untitled report",
+    status: job.status,
+    createdAt: job.created_at ? new Date(job.created_at) : new Date(),
+    startedAt: job.started_at ? new Date(job.started_at) : undefined,
+    completedAt: job.completed_at ? new Date(job.completed_at) : undefined,
+    errorMessage: job.error_message ?? null,
+    outputFileId: job.output_file_id ?? null,
+    outputUrl: job.output_url ?? null,
+    summaryText: job.summary_text ?? null,
+    query: job.query || "",
+    mode: job.mode || "deep",
+  });
+
+  const loadReportJobs = async (opts?: { silent?: boolean }) => {
+    if (!tenantId || isGlobal || !authLoaded || !userLoaded || !user) return;
+    if (!opts?.silent) setIsReportsLoading(true);
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const data = await apiFetch<{ jobs: PersistedReportJob[] }>(
+        `/api/v1/riley/reports?tenant_id=${encodeURIComponent(tenantId)}&limit=50`,
+        {
+          token,
+          method: "GET",
+        }
+      );
+      const mapped = (data.jobs || []).map(toReportJob);
+      const previousStatuses = { ...knownReportStatusRef.current };
+      const nextStatuses: Record<string, "queued" | "processing" | "complete" | "failed"> = {};
+      mapped.forEach((job) => {
+        nextStatuses[job.reportJobId] = job.status;
+      });
+      knownReportStatusRef.current = nextStatuses;
+      setReportJobs(mapped);
+
+      // Add concise chat notifications for relevant status transitions.
+      for (const job of mapped) {
+        const previous = previousStatuses[job.reportJobId];
+        if (previous === undefined) continue;
+        if (previous === job.status) continue;
+        if (job.conversationId && activeConversationId && job.conversationId !== activeConversationId) continue;
+        if (job.status === "complete") {
+          setMessages((prev) => {
+            const messageId = `report-complete-${job.reportJobId}`;
+            if (prev.some((msg) => msg.id === messageId)) return prev;
+            return [
+              ...prev,
+              {
+                id: messageId,
+                role: "assistant",
+                content: `Report complete: **${job.title}**${job.summaryText ? `\n\n${job.summaryText}` : ""}`,
+                reportDownloadUrl: job.outputUrl || undefined,
+                reportTitle: job.title,
+              },
+            ];
+          });
+        } else if (job.status === "failed") {
+          setMessages((prev) => {
+            const messageId = `report-failed-${job.reportJobId}`;
+            if (prev.some((msg) => msg.id === messageId)) return prev;
+            return [
+              ...prev,
+              {
+                id: messageId,
+                role: "system",
+                content: `Report failed: ${job.title}${job.errorMessage ? ` — ${job.errorMessage}` : ""}`,
+              },
+            ];
+          });
+        }
+      }
+    } catch (error) {
+      console.error("Failed to load Riley report jobs:", error);
+    } finally {
+      if (!opts?.silent) setIsReportsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (isGlobal || !tenantId || !authLoaded || !userLoaded || !user) return;
+    let cancelled = false;
+    let intervalId: number | null = null;
+    const poll = async () => {
+      if (cancelled) return;
+      await loadReportJobs({ silent: true });
+    };
+    void poll();
+    intervalId = window.setInterval(() => {
+      void poll();
+    }, 8000);
+    return () => {
+      cancelled = true;
+      if (intervalId) window.clearInterval(intervalId);
+    };
+  }, [isGlobal, tenantId, authLoaded, userLoaded, user, getToken, activeConversationId]);
 
   const extractCitations = (content: string): SourceCitation[] => {
     if (!content) return [];
@@ -646,8 +800,39 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     }));
   };
 
-  const handleSend = async () => {
-    if (!canSend) return;
+  const detectReportIntent = (
+    text: string
+  ): {
+    isReportIntent: boolean;
+    suggestedType: "strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief";
+  } => {
+    const normalized = (text || "").toLowerCase();
+    const suggestedType: "strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief" =
+      normalized.includes("audience")
+        ? "audience_analysis"
+        : normalized.includes("opposition")
+        ? "opposition_framing_brief"
+        : normalized.includes("narrative")
+        ? "narrative_brief"
+        : "strategy_memo";
+
+    const hasReportKeyword = /\b(report|memo|brief)\b/.test(normalized);
+    const hasLongFormKeyword = /\b(full|comprehensive|in-depth|long-form)\b/.test(normalized);
+    const hasSynthesisKeyword = /\b(synthesi[sz]e|synthesis|analy[sz]e)\b/.test(normalized);
+    const hasCorpusScope = /\b(all|across|these|entire|whole)\b/.test(normalized) && /\b(documents|files|sources|corpus)\b/.test(normalized);
+    const docCountMatch = normalized.match(/\b(\d{1,3})\s+(documents|files|sources)\b/);
+    const hasManyDocs = docCountMatch ? Number(docCountMatch[1]) >= 8 : false;
+    const isReportIntent =
+      hasReportKeyword ||
+      (hasLongFormKeyword && (hasSynthesisKeyword || hasReportKeyword)) ||
+      (hasSynthesisKeyword && hasCorpusScope) ||
+      hasManyDocs;
+
+    return { isReportIntent, suggestedType };
+  };
+
+  const executeSend = async (userInput: string, options?: { bypassReportIntent?: boolean }) => {
+    if (!userInput.trim() || isLoading || missingAuth || missingTenantId) return;
 
     // Step 1: Ensure we have a session ID BEFORE any async operations
     // This prevents history loading from interfering with optimistic updates
@@ -675,11 +860,30 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     }
 
     // Step 2: Capture user input immediately
-    const userInput = input.trim();
+    const trimmedInput = userInput.trim();
+    if (!options?.bypassReportIntent) {
+      const intent = detectReportIntent(trimmedInput);
+      if (intent.isReportIntent) {
+        setInput("");
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `report-suggest-${Date.now()}`,
+            role: "assistant",
+            content:
+              "This is best handled as a full report. I can generate a downloadable report for you, or continue in chat if you prefer.",
+            reportSuggestionPrompt: trimmedInput,
+            reportSuggestionType: intent.suggestedType,
+          },
+        ]);
+        return;
+      }
+    }
+
     const userMessage: Message = {
       id: `user-${Date.now()}`,
       role: "user",
-      content: userInput,
+      content: trimmedInput,
     };
 
     // Step 3: Create thinking placeholder for assistant response (store ID for later replacement)
@@ -724,7 +928,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         token,
         method: "POST",
         body: {
-          query: userInput,
+          query: trimmedInput,
           tenant_id: tenantId,
           mode: mode,
           session_id: sessionId,
@@ -793,10 +997,67 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     }
   };
 
+  const handleSend = async () => {
+    if (!canSend) return;
+    await executeSend(input.trim());
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
+    }
+  };
+
+  const handleSubmitReportJob = async () => {
+    const trimmedPrompt = reportPrompt.trim();
+    if (!trimmedPrompt || isSubmittingReport || missingAuth || missingTenantId) return;
+    setIsSubmittingReport(true);
+    try {
+      const token = await getToken();
+      if (!token) throw new Error("Authentication token not available");
+      const created = await apiFetch<PersistedReportJob>("/api/v1/riley/reports", {
+        token,
+        method: "POST",
+        body: {
+          tenant_id: tenantId,
+          query: trimmedPrompt,
+          conversation_id: activeConversationId,
+          report_type: reportType,
+          title: reportTitle.trim() || undefined,
+          mode: reportDeepMode ? "deep" : "normal",
+        },
+      });
+
+      const mapped = toReportJob(created);
+      setReportJobs((prev) => [mapped, ...prev.filter((job) => job.reportJobId !== mapped.reportJobId)]);
+      knownReportStatusRef.current[mapped.reportJobId] = mapped.status;
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `report-queued-${mapped.reportJobId}`,
+          role: "system",
+          content: `Riley is generating report "${mapped.title}". Track progress and download it from the Reports panel.`,
+        },
+      ]);
+      setIsReportModalOpen(false);
+      setReportTitle("");
+      setReportPrompt("");
+      setReportType("strategy_memo");
+      setReportDeepMode(true);
+      await loadReportJobs({ silent: true });
+    } catch (error) {
+      console.error("Failed to create Riley report job:", error);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `report-create-error-${Date.now()}`,
+          role: "system",
+          content: "Could not start report generation. Please try again.",
+        },
+      ]);
+    } finally {
+      setIsSubmittingReport(false);
     }
   };
 
@@ -809,6 +1070,21 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     if (days > 0) return `${days}d ago`;
     if (hours > 0) return `${hours}h ago`;
     return "Just now";
+  };
+
+  const formatReportDate = (date: Date) =>
+    date.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+
+  const reportStatusBadgeClass = (status: ReportJob["status"]) => {
+    if (status === "queued") return "border-amber-500/30 bg-amber-500/10 text-amber-300";
+    if (status === "processing") return "border-blue-500/30 bg-blue-500/10 text-blue-300";
+    if (status === "complete") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
+    return "border-rose-500/30 bg-rose-500/10 text-rose-300";
   };
 
   const promptStarters = [
@@ -1167,6 +1443,17 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             )}
           </div>
           <div className="flex items-center gap-2">
+            {!isGlobal && (
+              <button
+                type="button"
+                onClick={() => setIsReportModalOpen(true)}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-zinc-800/60 border border-zinc-700/70 text-zinc-200 hover:bg-zinc-800"
+                title="Generate long-form report"
+              >
+                <ClipboardList className="h-4 w-4" />
+                <span>Generate Report</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setMode("fast")}
@@ -1238,6 +1525,69 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 Some documents are not fully indexable yet, so Riley results may be incomplete.
               </div>
             )}
+          </div>
+        )}
+
+        {!isGlobal && (
+          <div className="border-b border-zinc-800 bg-zinc-900/30 px-6 py-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm text-zinc-200">
+                <ClipboardList className="h-4 w-4 text-amber-400" />
+                <span>Report Jobs</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => void loadReportJobs()}
+                className="rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+              >
+                Refresh
+              </button>
+            </div>
+            <div className="mt-2 space-y-2">
+              {isReportsLoading && reportJobs.length === 0 ? (
+                <div className="text-xs text-zinc-500">Loading report jobs...</div>
+              ) : reportJobs.length === 0 ? (
+                <div className="text-xs text-zinc-500">No report jobs yet. Use Generate Report to start one.</div>
+              ) : (
+                reportJobs.slice(0, 6).map((job) => (
+                  <div key={job.reportJobId} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm text-zinc-100">{job.title}</div>
+                        <div className="mt-1 text-[11px] text-zinc-500">
+                          {formatReportDate(job.createdAt)}
+                        </div>
+                      </div>
+                      <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", reportStatusBadgeClass(job.status))}>
+                        {job.status}
+                      </span>
+                    </div>
+                    {job.summaryText && (
+                      <div className="mt-1 text-xs text-zinc-400 line-clamp-2">{job.summaryText}</div>
+                    )}
+                    {job.status === "failed" && job.errorMessage && (
+                      <div className="mt-1 inline-flex items-center gap-1 text-xs text-rose-300">
+                        <AlertTriangle className="h-3 w-3" />
+                        <span className="line-clamp-1">{job.errorMessage}</span>
+                      </div>
+                    )}
+                    {job.status === "complete" && job.outputUrl && (
+                      <div className="mt-2">
+                        <a
+                          href={job.outputUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          <span>Open DOCX</span>
+                        </a>
+                      </div>
+                    )}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         )}
 
@@ -1355,6 +1705,45 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                       ) : (
                         // User and system messages (plain text)
                         <div className="text-sm whitespace-pre-wrap">{message.content}</div>
+                      )}
+                      {message.reportDownloadUrl && (
+                        <div className="mt-2 flex justify-end">
+                          <a
+                            href={message.reportDownloadUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-300 hover:bg-emerald-500/20"
+                            title={message.reportTitle ? `Open ${message.reportTitle}` : "Open report"}
+                          >
+                            <Download className="h-3.5 w-3.5" />
+                            <span>Open Report</span>
+                          </a>
+                        </div>
+                      )}
+                      {message.reportSuggestionPrompt && (
+                        <div className="mt-2 flex flex-wrap justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setReportPrompt(message.reportSuggestionPrompt || "");
+                              setReportType(message.reportSuggestionType || "strategy_memo");
+                              setReportDeepMode(true);
+                              setIsReportModalOpen(true);
+                            }}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-300 hover:bg-amber-500/20"
+                          >
+                            <ClipboardList className="h-3.5 w-3.5" />
+                            <span>Generate Report</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void executeSend(message.reportSuggestionPrompt || "", { bypassReportIntent: true })}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+                          >
+                            <MessageSquare className="h-3.5 w-3.5" />
+                            <span>Continue in chat</span>
+                          </button>
+                        </div>
                       )}
                       {message.role === "assistant" && message.content && (
                         <div className="mt-2 flex justify-end">
@@ -1509,6 +1898,99 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           </div>
         </div>
       </main>
+      {isReportModalOpen && !isGlobal && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-2xl rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl">
+            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+              <h3 className="text-sm font-semibold text-zinc-100">Generate Riley Report</h3>
+              <button
+                type="button"
+                onClick={() => setIsReportModalOpen(false)}
+                className="rounded-md border border-zinc-700 bg-zinc-800/50 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+              >
+                Close
+              </button>
+            </div>
+            <div className="space-y-4 px-4 py-4">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                  <span>Report Type</span>
+                  <select
+                    value={reportType}
+                    onChange={(e) =>
+                      setReportType(
+                        e.target.value as
+                          | "strategy_memo"
+                          | "audience_analysis"
+                          | "narrative_brief"
+                          | "opposition_framing_brief"
+                      )
+                    }
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                  >
+                    <option value="strategy_memo">Strategy memo</option>
+                    <option value="audience_analysis">Audience analysis</option>
+                    <option value="narrative_brief">Narrative brief</option>
+                    <option value="opposition_framing_brief">Opposition framing brief</option>
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                  <span>Optional Title</span>
+                  <input
+                    type="text"
+                    value={reportTitle}
+                    onChange={(e) => setReportTitle(e.target.value)}
+                    placeholder="Q3 persuasion strategy memo"
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                  />
+                </label>
+              </div>
+              <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                <span>Instructions / Prompt</span>
+                <textarea
+                  value={reportPrompt}
+                  onChange={(e) => setReportPrompt(e.target.value)}
+                  rows={7}
+                  placeholder="Analyze these campaign documents and write a strategy memo focused on message discipline, persuasion risks, and opportunities by audience."
+                  className="resize-y rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                />
+              </label>
+              <label className="inline-flex items-center gap-2 text-sm text-zinc-300">
+                <input
+                  type="checkbox"
+                  checked={reportDeepMode}
+                  onChange={(e) => setReportDeepMode(e.target.checked)}
+                  className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-amber-500 focus:ring-amber-500/50"
+                />
+                <span>Deep mode (recommended)</span>
+              </label>
+            </div>
+            <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-4 py-3">
+              <button
+                type="button"
+                onClick={() => setIsReportModalOpen(false)}
+                className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleSubmitReportJob()}
+                disabled={isSubmittingReport || reportPrompt.trim().length === 0}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs transition-colors",
+                  isSubmittingReport || reportPrompt.trim().length === 0
+                    ? "cursor-not-allowed border-zinc-700 bg-zinc-800 text-zinc-500"
+                    : "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                )}
+              >
+                {isSubmittingReport ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ClipboardList className="h-3.5 w-3.5" />}
+                <span>{isSubmittingReport ? "Starting..." : "Generate Report"}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {selectedSourceAsset && (
         <DocumentViewer
           file={selectedSourceAsset}

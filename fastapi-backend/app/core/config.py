@@ -55,6 +55,13 @@ class Settings(BaseSettings):
     RILEY_MODEL: str = "gpt-5.4"
     RILEY_DEEP_MODEL: str = "gpt-5.4-pro"
     RILEY_TIMEOUT_SECONDS: int = 45
+    RILEY_REPORTS_USE_CLOUD_TASKS: bool = True
+    RILEY_REPORTS_TASKS_QUEUE: str = "riley-report-jobs"
+    RILEY_REPORTS_TASKS_LOCATION: str = "us-west1"
+    RILEY_REPORT_WORKER_URL: Optional[str] = None
+    RILEY_REPORT_WORKER_TOKEN: Optional[str] = None
+    RILEY_REPORTS_TASKS_SERVICE_ACCOUNT_EMAIL: Optional[str] = None
+    RILEY_REPORT_TIMEOUT_SECONDS: int = 120
 
     # Google Cloud Storage configuration
     GCS_BUCKET_NAME: str = "riley-assets-riley-ai-479422"

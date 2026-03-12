@@ -499,6 +499,248 @@ class GraphService:
                 content=content,
             )
 
+    async def create_riley_report_job(
+        self,
+        *,
+        report_job_id: str,
+        tenant_id: str,
+        user_id: str,
+        conversation_id: Optional[str],
+        report_type: str,
+        title: str,
+        query_text: str,
+        mode: str,
+    ) -> Dict[str, Any]:
+        """Create a durable Riley report job node."""
+        async with self._driver.session() as session:
+            query = """
+            CREATE (r:RileyReportJob {
+                id: $report_job_id,
+                tenant_id: $tenant_id,
+                user_id: $user_id,
+                conversation_id: $conversation_id,
+                report_type: $report_type,
+                title: $title,
+                status: "queued",
+                created_at: datetime(),
+                started_at: null,
+                completed_at: null,
+                error_message: null,
+                output_file_id: null,
+                output_url: null,
+                summary_text: null,
+                query_text: $query_text,
+                mode: $mode,
+                report_body: null
+            })
+            RETURN
+                r.id as report_job_id,
+                r.tenant_id as tenant_id,
+                r.user_id as user_id,
+                r.conversation_id as conversation_id,
+                r.report_type as report_type,
+                r.title as title,
+                r.status as status,
+                toString(r.created_at) as created_at,
+                toString(r.started_at) as started_at,
+                toString(r.completed_at) as completed_at,
+                r.error_message as error_message,
+                r.output_file_id as output_file_id,
+                r.output_url as output_url,
+                r.summary_text as summary_text,
+                r.query_text as query,
+                r.mode as mode
+            """
+            result = await session.run(
+                query,
+                report_job_id=report_job_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                report_type=report_type,
+                title=title,
+                query_text=query_text,
+                mode=mode,
+            )
+            record = await result.single()
+            if not record:
+                raise Exception("Failed to create Riley report job")
+            return dict(record)
+
+    async def list_riley_report_jobs(
+        self,
+        *,
+        tenant_id: str,
+        user_id: str,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List report jobs for tenant/user scope."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (r:RileyReportJob {tenant_id: $tenant_id, user_id: $user_id})
+            RETURN
+                r.id as report_job_id,
+                r.tenant_id as tenant_id,
+                r.user_id as user_id,
+                r.conversation_id as conversation_id,
+                r.report_type as report_type,
+                r.title as title,
+                r.status as status,
+                toString(r.created_at) as created_at,
+                toString(r.started_at) as started_at,
+                toString(r.completed_at) as completed_at,
+                r.error_message as error_message,
+                r.output_file_id as output_file_id,
+                r.output_url as output_url,
+                r.summary_text as summary_text,
+                r.query_text as query,
+                r.mode as mode
+            ORDER BY coalesce(r.started_at, r.created_at) DESC
+            LIMIT $limit
+            """
+            result = await session.run(
+                query,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                limit=limit,
+            )
+            jobs: List[Dict[str, Any]] = []
+            async for record in result:
+                jobs.append(dict(record))
+            return jobs
+
+    async def get_riley_report_job(
+        self,
+        *,
+        report_job_id: str,
+        tenant_id: str,
+        user_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get one report job in tenant/user scope, including report body."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (r:RileyReportJob {
+                id: $report_job_id,
+                tenant_id: $tenant_id,
+                user_id: $user_id
+            })
+            RETURN
+                r.id as report_job_id,
+                r.tenant_id as tenant_id,
+                r.user_id as user_id,
+                r.conversation_id as conversation_id,
+                r.report_type as report_type,
+                r.title as title,
+                r.status as status,
+                toString(r.created_at) as created_at,
+                toString(r.started_at) as started_at,
+                toString(r.completed_at) as completed_at,
+                r.error_message as error_message,
+                r.output_file_id as output_file_id,
+                r.output_url as output_url,
+                r.summary_text as summary_text,
+                r.query_text as query,
+                r.mode as mode,
+                r.report_body as report_body
+            """
+            result = await session.run(
+                query,
+                report_job_id=report_job_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+            )
+            record = await result.single()
+            return dict(record) if record else None
+
+    async def get_riley_report_job_for_worker(
+        self,
+        *,
+        report_job_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get one report job by ID for trusted internal worker execution."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (r:RileyReportJob {id: $report_job_id})
+            RETURN
+                r.id as report_job_id,
+                r.tenant_id as tenant_id,
+                r.user_id as user_id,
+                r.conversation_id as conversation_id,
+                r.report_type as report_type,
+                r.title as title,
+                r.status as status,
+                toString(r.created_at) as created_at,
+                toString(r.started_at) as started_at,
+                toString(r.completed_at) as completed_at,
+                r.error_message as error_message,
+                r.output_file_id as output_file_id,
+                r.output_url as output_url,
+                r.summary_text as summary_text,
+                r.query_text as query,
+                r.mode as mode,
+                r.report_body as report_body
+            """
+            result = await session.run(query, report_job_id=report_job_id)
+            record = await result.single()
+            return dict(record) if record else None
+
+    async def update_riley_report_job(
+        self,
+        *,
+        report_job_id: str,
+        tenant_id: str,
+        user_id: str,
+        status: str,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        error_message: Optional[str] = None,
+        output_file_id: Optional[str] = None,
+        output_url: Optional[str] = None,
+        summary_text: Optional[str] = None,
+        report_body: Optional[str] = None,
+    ) -> None:
+        """Update report job status and optional output fields."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (r:RileyReportJob {
+                id: $report_job_id,
+                tenant_id: $tenant_id,
+                user_id: $user_id
+            })
+            SET
+                r.status = $status,
+                r.started_at = CASE
+                    WHEN $started_at IS NULL THEN r.started_at
+                    ELSE datetime($started_at)
+                END,
+                r.completed_at = CASE
+                    WHEN $completed_at IS NULL THEN r.completed_at
+                    ELSE datetime($completed_at)
+                END,
+                r.error_message = $error_message,
+                r.output_file_id = $output_file_id,
+                r.output_url = $output_url,
+                r.summary_text = $summary_text,
+                r.report_body = CASE
+                    WHEN $report_body IS NULL THEN r.report_body
+                    ELSE $report_body
+                END
+            """
+            await session.run(
+                query,
+                report_job_id=report_job_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                status=status,
+                started_at=started_at,
+                completed_at=completed_at,
+                error_message=error_message,
+                output_file_id=output_file_id,
+                output_url=output_url,
+                summary_text=summary_text,
+                report_body=report_body,
+            )
+
     async def search_campaigns_fuzzy(self, query: str) -> str:
         """Search campaigns in the graph using fuzzy matching on name and description.
         
