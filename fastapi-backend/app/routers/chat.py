@@ -70,6 +70,9 @@ class RileyIndexSummaryResponse(BaseModel):
     failed_count: int
     low_text_count: int
     ocr_needed_count: int
+    ocr_processed_count: int
+    vision_processed_count: int
+    partial_count: int
     counts_by_file_type: Dict[str, int]
     recent_uploads: List[RileyIndexRecentUpload] = Field(default_factory=list)
 

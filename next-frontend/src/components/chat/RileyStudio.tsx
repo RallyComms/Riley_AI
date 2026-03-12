@@ -80,6 +80,9 @@ type RileyIndexSummary = {
   failed_count: number;
   low_text_count: number;
   ocr_needed_count: number;
+  ocr_processed_count: number;
+  vision_processed_count: number;
+  partial_count: number;
   counts_by_file_type: Record<string, number>;
   recent_uploads: Array<{
     filename: string;
@@ -1498,6 +1501,15 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               <span className="rounded-md border border-purple-500/30 bg-purple-500/10 px-2 py-1 text-purple-300">
                 OCR needed: {indexSummary.ocr_needed_count}
               </span>
+              <span className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-cyan-300">
+                OCR processed: {indexSummary.ocr_processed_count ?? 0}
+              </span>
+              <span className="rounded-md border border-fuchsia-500/30 bg-fuchsia-500/10 px-2 py-1 text-fuchsia-300">
+                Visual analyzed: {indexSummary.vision_processed_count ?? 0}
+              </span>
+              <span className="rounded-md border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-orange-300">
+                Partial: {indexSummary.partial_count ?? 0}
+              </span>
               <a
                 href={`/campaign/${tenantId}/assets`}
                 className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-300 hover:bg-amber-500/20"
@@ -1520,7 +1532,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             </div>
             {(indexSummary.failed_count > 0 ||
               indexSummary.low_text_count > 0 ||
-              indexSummary.ocr_needed_count > 0) && (
+              indexSummary.ocr_needed_count > 0 ||
+              (indexSummary.partial_count ?? 0) > 0) && (
               <div className="mt-2 text-[11px] text-amber-300">
                 Some documents are not fully indexable yet, so Riley results may be incomplete.
               </div>

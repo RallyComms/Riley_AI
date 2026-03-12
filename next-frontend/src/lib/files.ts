@@ -19,8 +19,18 @@ export interface BackendFileRecord {
   previewStatus?: "complete" | "failed" | "processing" | "queued" | null;
   preview_error?: string | null;
   previewError?: string | null;
-  ingestion_status?: "uploaded" | "queued" | "processing" | "indexed" | "failed" | "low_text" | "ocr_needed" | null;
-  ingestionStatus?: "uploaded" | "queued" | "processing" | "indexed" | "failed" | "low_text" | "ocr_needed" | null;
+  ingestion_status?: "uploaded" | "queued" | "processing" | "indexed" | "failed" | "low_text" | "ocr_needed" | "partial" | null;
+  ingestionStatus?: "uploaded" | "queued" | "processing" | "indexed" | "failed" | "low_text" | "ocr_needed" | "partial" | null;
+  ocr_status?: "queued" | "processing" | "complete" | "failed" | "not_requested" | null;
+  ocrStatus?: "queued" | "processing" | "complete" | "failed" | "not_requested" | null;
+  vision_status?: "queued" | "processing" | "complete" | "failed" | "not_requested" | null;
+  visionStatus?: "queued" | "processing" | "complete" | "failed" | "not_requested" | null;
+  multimodal_status?: "pending" | "native_only" | "ocr_attempted" | "ocr_enriched" | "ocr_unavailable" | "ocr_failed" | "vision_enriched" | "partial" | null;
+  multimodalStatus?: "pending" | "native_only" | "ocr_attempted" | "ocr_enriched" | "ocr_unavailable" | "ocr_failed" | "vision_enriched" | "partial" | null;
+  ocr_processed?: boolean;
+  ocrProcessed?: boolean;
+  vision_processed?: boolean;
+  visionProcessed?: boolean;
 }
 
 export function getFileTypeFromExtension(filename: string): Asset["type"] {
@@ -65,6 +75,11 @@ export function toAsset(
     previewStatus: file.preview_status ?? file.previewStatus ?? null,
     previewError: file.preview_error ?? file.previewError ?? null,
     ingestionStatus: file.ingestion_status ?? file.ingestionStatus ?? null,
+    ocrStatus: file.ocr_status ?? file.ocrStatus ?? null,
+    visionStatus: file.vision_status ?? file.visionStatus ?? null,
+    multimodalStatus: file.multimodal_status ?? file.multimodalStatus ?? null,
+    ocrProcessed: file.ocr_processed ?? file.ocrProcessed ?? false,
+    visionProcessed: file.vision_processed ?? file.visionProcessed ?? false,
     tags: normalizeTags(file.tags),
     uploadDate: new Date(file.date ?? Date.now()).toISOString().split("T")[0],
     uploader: options?.uploader ?? "System",

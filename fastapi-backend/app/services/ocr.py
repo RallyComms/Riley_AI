@@ -1,11 +1,10 @@
-"""OCR service for extracting text from image files.
+"""Google Cloud Vision OCR helpers used by ingestion and OCR endpoint."""
 
-This module provides OCR functionality with caching and gating to ensure
-OCR only runs when explicitly requested and results are cached in Qdrant.
-"""
-import io
+import json
 import logging
-from typing import Dict, Optional
+import uuid
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 from fastapi.concurrency import run_in_threadpool
 
@@ -13,119 +12,181 @@ logger = logging.getLogger(__name__)
 
 
 def is_image_ext(filename: str) -> bool:
-    """Check if a filename has an image extension.
-    
-    Args:
-        filename: The filename to check
-        
-    Returns:
-        True if the file is an image type (png, jpg, jpeg, webp, tiff)
-    """
     if not filename:
         return False
-    
     ext = filename.split(".")[-1].lower() if "." in filename else ""
     return ext in ("png", "jpg", "jpeg", "webp", "tiff")
 
 
-def _compute_confidence_from_data(data: Dict) -> Optional[float]:
-    """Compute average confidence from pytesseract image_to_data output.
-    
-    Args:
-        data: Dictionary from pytesseract.image_to_data with output_type=dict
-        
-    Returns:
-        Average confidence (0-100 scale, converted to 0-1), or None if unavailable
-    """
-    try:
-        confidences = []
-        if "conf" in data:
-            for conf in data["conf"]:
-                # pytesseract uses -1 for invalid confidence
-                if isinstance(conf, (int, float)) and conf >= 0:
-                    confidences.append(conf)
-        
-        if confidences:
-            # pytesseract returns confidence as 0-100, convert to 0-1
-            avg_conf = sum(confidences) / len(confidences) / 100.0
-            return avg_conf
-    except Exception as e:
-        logger.warning(f"Failed to compute OCR confidence: {e}")
-    
+def gcs_uri_from_url(url: str, default_bucket: Optional[str] = None) -> Optional[str]:
+    """Normalize gs/public/signed storage URLs to gs://bucket/object URI."""
+    if not url:
+        return None
+    parsed = urlparse(url)
+    if parsed.scheme == "gs":
+        bucket = parsed.netloc
+        name = parsed.path.lstrip("/")
+        return f"gs://{bucket}/{name}" if bucket and name else None
+    if "storage.googleapis.com" in parsed.netloc:
+        path = parsed.path.lstrip("/")
+        if not path:
+            return None
+        parts = path.split("/", 1)
+        if len(parts) == 1 and default_bucket:
+            return f"gs://{default_bucket}/{parts[0]}"
+        if len(parts) >= 2:
+            return f"gs://{parts[0]}/{parts[1]}"
+    if default_bucket and parsed.path:
+        return f"gs://{default_bucket}/{parsed.path.lstrip('/')}"
     return None
 
 
-async def run_ocr(image_bytes: bytes, max_chars: int = 8000) -> Dict[str, Optional[str | float]]:
-    """Run OCR on an image file and return extracted text with metadata.
-    
-    Args:
-        image_bytes: The image file content as bytes
-        max_chars: Maximum number of characters to extract (default: 8000)
-        
-    Returns:
-        Dictionary with keys:
-            - text: Extracted text (truncated to max_chars)
-            - confidence: Average confidence score (0-1) or None
-            - language: Detected language code or None
-            
-    Raises:
-        ImportError: If required libraries are not installed
-        Exception: If OCR processing fails
-    """
+def _extract_annotation_confidence(annotation: Any) -> Optional[float]:
     try:
-        import pytesseract
-        from PIL import Image
-    except ImportError as e:
-        missing = "pytesseract" if "pytesseract" in str(e) else "Pillow"
-        logger.error(f"{missing} is not installed. Install with: pip install {missing.lower()}")
-        raise ImportError(f"{missing} is required for OCR") from e
-    
-    def _perform_ocr():
-        """Perform OCR synchronously."""
-        # Open image from bytes
-        image_file = io.BytesIO(image_bytes)
-        image = Image.open(image_file)
-        
-        # Try to get confidence data (best-effort)
-        confidence = None
-        language = None
-        
-        try:
-            # Attempt to get detailed data for confidence calculation
-            # Use pytesseract.Output.DICT to get confidence scores
-            try:
-                data = pytesseract.image_to_data(image, output_type=pytesseract.Output.DICT)
-                confidence = _compute_confidence_from_data(data)
-            except Exception as e:
-                logger.warning(f"Could not compute OCR confidence: {e}")
-                confidence = None
-            
-            # Try to detect language (best-effort)
-            # Default to "en" for now - could be enhanced with language detection
-            language = "en"
-        except Exception as e:
-            logger.warning(f"Could not compute OCR metadata: {e}")
-            confidence = None
-            language = None
-        
-        # Extract text
-        text = pytesseract.image_to_string(image)
-        
-        # Clean up text: strip and collapse whitespace
-        lines = [line.strip() for line in text.splitlines()]
-        lines = [line for line in lines if line]  # Remove empty lines
-        text = "\n".join(lines)
-        
-        # Truncate to max_chars
+        pages = list(getattr(annotation, "pages", []) or [])
+        scores: List[float] = []
+        for page in pages:
+            for block in getattr(page, "blocks", []) or []:
+                for para in getattr(block, "paragraphs", []) or []:
+                    for word in getattr(para, "words", []) or []:
+                        conf = getattr(word, "confidence", None)
+                        if isinstance(conf, (float, int)) and conf >= 0:
+                            scores.append(float(conf))
+        if not scores:
+            return None
+        return max(0.0, min(1.0, sum(scores) / len(scores)))
+    except Exception:
+        return None
+
+
+def _extract_annotation_language(annotation: Any) -> Optional[str]:
+    try:
+        pages = list(getattr(annotation, "pages", []) or [])
+        if not pages:
+            return None
+        prop = getattr(pages[0], "property", None)
+        langs = list(getattr(prop, "detected_languages", []) or [])
+        if not langs:
+            return None
+        code = getattr(langs[0], "language_code", None)
+        return str(code) if code else None
+    except Exception:
+        return None
+
+
+async def run_ocr(image_bytes: bytes, max_chars: int = 8000) -> Dict[str, Optional[str | float]]:
+    """OCR image bytes via Google Cloud Vision document_text_detection."""
+    try:
+        from google.cloud import vision
+    except ImportError as exc:
+        raise ImportError("google-cloud-vision is required for OCR") from exc
+
+    def _perform() -> Dict[str, Optional[str | float]]:
+        client = vision.ImageAnnotatorClient()
+        image = vision.Image(content=image_bytes)
+        result = client.document_text_detection(image=image)
+        if result.error.message:
+            raise RuntimeError(f"Vision OCR failed: {result.error.message}")
+        annotation = result.full_text_annotation
+        text = (getattr(annotation, "text", "") or "").strip()
         if len(text) > max_chars:
             text = text[:max_chars]
-            logger.info(f"OCR text truncated to {max_chars} characters")
-        
         return {
             "text": text,
-            "confidence": confidence,
-            "language": language,
+            "confidence": _extract_annotation_confidence(annotation),
+            "language": _extract_annotation_language(annotation),
         }
-    
-    # Run blocking OCR in threadpool
-    return await run_in_threadpool(_perform_ocr)
+
+    return await run_in_threadpool(_perform)
+
+
+async def run_ocr_document_from_gcs(
+    *,
+    gcs_source_uri: str,
+    output_bucket: str,
+    output_prefix: str,
+    mime_type: str = "application/pdf",
+    timeout_seconds: int = 120,
+    max_chars: int = 20000,
+    max_pages: int = 200,
+) -> Dict[str, Any]:
+    """OCR PDF/TIFF from GCS using Vision async batch API."""
+    try:
+        from google.cloud import storage, vision
+    except ImportError as exc:
+        raise ImportError("google-cloud-vision and google-cloud-storage are required") from exc
+
+    def _run() -> Dict[str, Any]:
+        client = vision.ImageAnnotatorClient()
+        storage_client = storage.Client()
+        clean_prefix = output_prefix.strip("/").rstrip("/")
+        temp_prefix = f"{clean_prefix}/{uuid.uuid4()}"
+        destination_uri = f"gs://{output_bucket}/{temp_prefix}/"
+
+        feature = vision.Feature(type_=vision.Feature.Type.DOCUMENT_TEXT_DETECTION)
+        gcs_source = vision.GcsSource(uri=gcs_source_uri)
+        input_config = vision.InputConfig(gcs_source=gcs_source, mime_type=mime_type)
+        output_config = vision.OutputConfig(
+            gcs_destination=vision.GcsDestination(uri=destination_uri),
+            batch_size=2,
+        )
+        request = vision.AsyncAnnotateFileRequest(
+            features=[feature],
+            input_config=input_config,
+            output_config=output_config,
+        )
+
+        operation = client.async_batch_annotate_files(requests=[request])
+        operation.result(timeout=timeout_seconds)
+
+        bucket = storage_client.bucket(output_bucket)
+        blobs = list(storage_client.list_blobs(output_bucket, prefix=f"{temp_prefix}/"))
+        pages: List[Dict[str, Any]] = []
+        try:
+            for blob in blobs:
+                if not blob.name.endswith(".json"):
+                    continue
+                payload = json.loads(blob.download_as_text())
+                responses = payload.get("responses", [])
+                for idx, response in enumerate(responses):
+                    if len(pages) >= max_pages:
+                        break
+                    full = response.get("fullTextAnnotation") or {}
+                    text = str(full.get("text") or "").strip()
+                    if not text:
+                        continue
+                    page_num = (
+                        response.get("context", {}).get("pageNumber")
+                        or len(pages) + 1
+                        or idx + 1
+                    )
+                    pages.append(
+                        {
+                            "page": int(page_num),
+                            "text": text,
+                            "confidence": None,
+                            "language": None,
+                        }
+                    )
+                if len(pages) >= max_pages:
+                    break
+        finally:
+            # Best-effort cleanup of OCR temp output.
+            for blob in blobs:
+                try:
+                    bucket.blob(blob.name).delete()
+                except Exception:
+                    pass
+
+        merged = "\n\n".join(p["text"] for p in pages).strip()
+        if len(merged) > max_chars:
+            merged = merged[:max_chars]
+        return {
+            "text": merged,
+            "confidence": None,
+            "language": None,
+            "pages": pages,
+            "status": "complete" if pages else "failed",
+        }
+
+    return await run_in_threadpool(_run)

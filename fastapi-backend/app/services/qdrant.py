@@ -962,6 +962,9 @@ class VectorService:
         failed_count = 0
         low_text_count = 0
         ocr_needed_count = 0
+        ocr_processed_count = 0
+        vision_processed_count = 0
+        partial_count = 0
 
         for point in points:
             payload = point.payload or {}
@@ -979,6 +982,22 @@ class VectorService:
                 low_text_count += 1
             elif ingestion_status == "ocr_needed":
                 ocr_needed_count += 1
+
+            ocr_status = str(payload.get("ocr_status") or "").lower()
+            vision_status = str(payload.get("vision_status") or "").lower()
+            multimodal_status = str(payload.get("multimodal_status") or "").lower()
+            if ocr_status == "complete":
+                ocr_processed_count += 1
+            if vision_status == "complete":
+                vision_processed_count += 1
+            is_partial = (
+                ingestion_status == "partial"
+                or ocr_status == "failed"
+                or vision_status == "failed"
+                or multimodal_status in {"ocr_failed", "ocr_unavailable", "partial"}
+            )
+            if is_partial:
+                partial_count += 1
 
             recent_uploads.append(
                 {
@@ -998,6 +1017,9 @@ class VectorService:
             "failed_count": failed_count,
             "low_text_count": low_text_count,
             "ocr_needed_count": ocr_needed_count,
+            "ocr_processed_count": ocr_processed_count,
+            "vision_processed_count": vision_processed_count,
+            "partial_count": partial_count,
             "counts_by_file_type": counts_by_file_type,
             "recent_uploads": recent_uploads[:5],
         }

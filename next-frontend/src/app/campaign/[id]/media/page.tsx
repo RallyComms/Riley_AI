@@ -49,9 +49,28 @@ function ingestionBadgeClass(status?: Asset["ingestionStatus"]): string {
       return "border-rose-500/30 bg-rose-500/10 text-rose-300";
     case "ocr_needed":
       return "border-purple-500/30 bg-purple-500/10 text-purple-300";
+    case "partial":
+      return "border-orange-500/30 bg-orange-500/10 text-orange-300";
     default:
       return "border-zinc-700 bg-zinc-800/40 text-zinc-400";
   }
+}
+
+function multimodalBadgeClass(kind: "ocr_processed" | "vision_processed" | "partial"): string {
+  switch (kind) {
+    case "ocr_processed":
+      return "border-cyan-500/30 bg-cyan-500/10 text-cyan-300";
+    case "vision_processed":
+      return "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-300";
+    case "partial":
+      return "border-orange-500/30 bg-orange-500/10 text-orange-300";
+    default:
+      return "border-zinc-700 bg-zinc-800/40 text-zinc-400";
+  }
+}
+
+function formatStatusLabel(value: string): string {
+  return value.replaceAll("_", " ");
 }
 
 export default function MediaPage() {
@@ -384,9 +403,45 @@ export default function MediaPage() {
                                 ingestionBadgeClass(asset.ingestionStatus)
                               )}
                             >
-                              {asset.ingestionStatus}
+                              {formatStatusLabel(asset.ingestionStatus)}
                             </span>
                           )}
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {asset.ocrStatus === "complete" && (
+                              <span
+                                className={cn(
+                                  "inline-flex rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide",
+                                  multimodalBadgeClass("ocr_processed")
+                                )}
+                              >
+                                ocr processed
+                              </span>
+                            )}
+                            {asset.visionStatus === "complete" && (
+                              <span
+                                className={cn(
+                                  "inline-flex rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide",
+                                  multimodalBadgeClass("vision_processed")
+                                )}
+                              >
+                                vision processed
+                              </span>
+                            )}
+                            {(asset.ingestionStatus === "partial" ||
+                              asset.multimodalStatus === "ocr_failed" ||
+                              asset.multimodalStatus === "ocr_unavailable" ||
+                              asset.ocrStatus === "failed" ||
+                              asset.visionStatus === "failed") && (
+                              <span
+                                className={cn(
+                                  "inline-flex rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide",
+                                  multimodalBadgeClass("partial")
+                                )}
+                              >
+                                partial
+                              </span>
+                            )}
+                          </div>
                         </div>
                         <button
                           type="button"

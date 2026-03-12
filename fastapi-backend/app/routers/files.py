@@ -50,6 +50,11 @@ class FileListItem(BaseModel):
     ai_enabled: Optional[bool] = None
     ocr_enabled: Optional[bool] = None
     ocr_status: Optional[str] = None
+    vision_enabled: Optional[bool] = None
+    vision_status: Optional[str] = None
+    multimodal_status: Optional[str] = None
+    ocr_processed: Optional[bool] = None
+    vision_processed: Optional[bool] = None
     ocr_confidence: Optional[float] = None
     ocr_extracted_at: Optional[str] = None
     preview_url: Optional[str] = None
@@ -205,6 +210,11 @@ async def list_files(
                     ai_enabled=file_data.get("ai_enabled"),
                     ocr_enabled=file_data.get("ocr_enabled"),
                     ocr_status=file_data.get("ocr_status"),
+                    vision_enabled=file_data.get("vision_enabled"),
+                    vision_status=file_data.get("vision_status"),
+                    multimodal_status=file_data.get("multimodal_status"),
+                    ocr_processed=file_data.get("ocr_processed"),
+                    vision_processed=file_data.get("vision_processed"),
                     ocr_confidence=file_data.get("ocr_confidence"),
                     ocr_extracted_at=file_data.get("ocr_extracted_at"),
                     ingestion_status=file_data.get("ingestion_status"),
@@ -234,6 +244,11 @@ async def list_files(
                     ai_enabled=file_data.get("ai_enabled"),
                     ocr_enabled=file_data.get("ocr_enabled"),
                     ocr_status=file_data.get("ocr_status"),
+                    vision_enabled=file_data.get("vision_enabled"),
+                    vision_status=file_data.get("vision_status"),
+                    multimodal_status=file_data.get("multimodal_status"),
+                    ocr_processed=file_data.get("ocr_processed"),
+                    vision_processed=file_data.get("vision_processed"),
                     ocr_confidence=file_data.get("ocr_confidence"),
                     ocr_extracted_at=file_data.get("ocr_extracted_at"),
                     preview_url=file_data.get("preview_url"),

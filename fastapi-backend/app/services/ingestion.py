@@ -17,11 +17,17 @@ from google.api_core.exceptions import AlreadyExists
 
 from app.core.config import get_settings
 from app.services.genai_client import get_genai_client
-from app.services.ocr import is_image_ext
+from app.services.ocr import (
+    gcs_uri_from_url,
+    is_image_ext,
+    run_ocr,
+    run_ocr_document_from_gcs,
+)
 from app.services.preview import is_office_or_html, generate_pdf_preview
 from app.services.qdrant import vector_service
 from app.services.storage import StorageService
 from app.services.token_utils import estimate_tokens
+from app.services.visual_understanding import summarize_visual_content
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -44,6 +50,9 @@ MACRO_CHUNK_OVERLAP_TOKENS = 180
 MIN_EXTRACTED_CHARS = 120
 EMBEDDING_COST_PER_1K_TOKENS_USD = 0.0001
 BM25_MODEL = "qdrant/bm25"
+OCR_APPEND_MAX_CHARS = 2500
+VISION_APPEND_MAX_CHARS = 600
+MERGED_CHUNK_MAX_CHARS = 6000
 
 TEXT_NATIVE_EXTENSIONS = {
     "pdf", "docx", "doc", "pptx", "ppt", "txt", "md", "rtf",
@@ -919,6 +928,205 @@ def _best_segment_for_span(span_start: int, span_end: int, segments: List[Dict[s
     return best
 
 
+def _ocr_required_for_file(
+    *,
+    file_type: str,
+    quality_status: str,
+    cleaned_text: str,
+    file_size: int,
+) -> bool:
+    """Decide whether OCR should run for multimodal ingestion."""
+    ext = (file_type or "").lower()
+    if ext in IMAGE_EXTENSIONS:
+        return True
+    if quality_status == "ocr_needed":
+        return True
+    # Optional OCR for weak text on visual-heavy document types.
+    if ext in {"pdf", "pptx", "ppt"} and (
+        len(cleaned_text) < max(600, MIN_EXTRACTED_CHARS * 3) or file_size > 250_000
+    ):
+        return True
+    return False
+
+
+def _build_ocr_segments(
+    *,
+    filename: str,
+    file_type: str,
+    ocr_result: Dict[str, Any],
+) -> List[Dict[str, Any]]:
+    ext = (file_type or "").lower()
+    pages = ocr_result.get("pages") or []
+    segments: List[Dict[str, Any]] = []
+    if pages:
+        for entry in pages:
+            text = str(entry.get("text") or "").strip()
+            if not text:
+                continue
+            page_num = entry.get("page") or len(segments) + 1
+            location_type = "page" if ext == "pdf" else "slide" if ext in {"pptx", "ppt"} else "image_page"
+            segments.append(
+                {
+                    "text": text,
+                    "raw_text": text,
+                    "location_type": location_type,
+                    "location_value": str(page_num),
+                    "section_path": f"ocr:{location_type}:{page_num}",
+                    "ocr_text_present": True,
+                    "ocr_confidence": entry.get("confidence"),
+                    "ocr_status": "complete",
+                    "multimodal_status": "ocr_enriched",
+                }
+            )
+        return segments
+
+    merged = str(ocr_result.get("text") or "").strip()
+    if not merged:
+        return segments
+    segments.append(
+        {
+            "text": merged,
+            "raw_text": merged,
+            "location_type": "image" if ext in IMAGE_EXTENSIONS else "ocr_text",
+            "location_value": "1",
+            "section_path": f"ocr:{filename}",
+            "ocr_text_present": True,
+            "ocr_confidence": ocr_result.get("confidence"),
+            "ocr_status": "complete",
+            "multimodal_status": "ocr_enriched",
+        }
+    )
+    return segments
+
+
+async def _render_pdf_pages_for_vision(
+    *,
+    pdf_bytes: bytes,
+    page_numbers: List[int],
+    max_pages: int,
+) -> Dict[int, bytes]:
+    """Render selected PDF pages into PNG bytes for multimodal captioning."""
+    try:
+        import fitz  # type: ignore
+    except ImportError:
+        logger.warning("vision_render_skipped reason=PyMuPDFNotInstalled")
+        return {}
+    if not page_numbers:
+        return {}
+    unique_pages = []
+    seen = set()
+    for page in page_numbers:
+        if page in seen or page <= 0:
+            continue
+        seen.add(page)
+        unique_pages.append(page)
+        if len(unique_pages) >= max_pages:
+            break
+    rendered: Dict[int, bytes] = {}
+
+    def _render_sync() -> Dict[int, bytes]:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        out: Dict[int, bytes] = {}
+        try:
+            for page_num in unique_pages:
+                if page_num - 1 < 0 or page_num - 1 >= len(doc):
+                    continue
+                page = doc[page_num - 1]
+                pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
+                out[page_num] = pix.tobytes("png")
+        finally:
+            doc.close()
+        return out
+
+    try:
+        rendered = await run_in_threadpool(_render_sync)
+    except Exception as exc:
+        logger.warning("vision_render_failed error=%s", type(exc).__name__)
+    return rendered
+
+
+def _vision_candidate_pages(
+    *,
+    file_type: str,
+    quality_status: str,
+    segments: List[Dict[str, Any]],
+    ocr_enabled: bool,
+    max_pages: int,
+) -> List[int]:
+    ext = (file_type or "").lower()
+    if ext in IMAGE_EXTENSIONS:
+        return [1]
+    if ext not in {"pdf", "pptx", "ppt"}:
+        return []
+    if quality_status == "indexed" and not ocr_enabled and ext == "pdf":
+        # For clean text PDFs, skip default visual pass.
+        return []
+    candidates: List[int] = []
+    for segment in segments:
+        loc_type = str(segment.get("location_type") or "").lower()
+        if loc_type not in {"page", "slide", "image_page"}:
+            continue
+        loc_val = str(segment.get("location_value") or "").strip()
+        if not loc_val.isdigit():
+            continue
+        num = int(loc_val)
+        if num <= 0:
+            continue
+        candidates.append(num)
+        if len(candidates) >= max_pages * 2:
+            break
+    deduped: List[int] = []
+    seen = set()
+    for page in candidates:
+        if page in seen:
+            continue
+        seen.add(page)
+        deduped.append(page)
+        if len(deduped) >= max_pages:
+            break
+    return deduped
+
+
+def _merge_chunk_text(
+    *,
+    native_text: str,
+    ocr_text: Optional[str],
+    vision_caption: Optional[str],
+) -> str:
+    def _norm(value: str) -> str:
+        lowered = value.lower().strip()
+        return re.sub(r"\s+", " ", lowered)
+
+    base = (native_text or "").strip()
+    parts: List[str] = [base] if base else []
+    seen_norm: List[str] = [_norm(base)] if base else []
+    ocr = (ocr_text or "").strip()
+    if ocr:
+        ocr = ocr[:OCR_APPEND_MAX_CHARS].strip()
+        ocr_norm = _norm(ocr)
+        is_duplicate = any(
+            existing and (ocr_norm == existing or ocr_norm in existing or existing in ocr_norm)
+            for existing in seen_norm
+        )
+        if not is_duplicate:
+            parts.append(f"[OCR]\n{ocr}")
+            seen_norm.append(ocr_norm)
+    caption = (vision_caption or "").strip()
+    if caption:
+        caption = caption[:VISION_APPEND_MAX_CHARS].strip()
+        cap_norm = _norm(caption)
+        is_duplicate = any(
+            existing and (cap_norm == existing or cap_norm in existing or existing in cap_norm)
+            for existing in seen_norm
+        )
+        if not is_duplicate:
+            parts.append(f"[VISION]\n{caption}")
+    merged = "\n\n".join(parts).strip()
+    if len(merged) > MERGED_CHUNK_MAX_CHARS:
+        merged = merged[:MERGED_CHUNK_MAX_CHARS].rstrip()
+    return merged or base
+
+
 async def _delete_chunk_points(collection_name: str, parent_file_id: str) -> None:
     """Delete all chunk points for a parent file before reindexing."""
     chunk_filter = Filter(
@@ -1137,6 +1345,163 @@ async def _run_ingestion_pipeline(
         raw_text_capped = (raw_text or "")[:MAX_CHARS_TOTAL]
         quality_status, quality_reason = _assess_extraction_quality(cleaned_text, filename, file_size)
 
+        ocr_enabled = False
+        ocr_status = "not_requested"
+        ocr_text_present = False
+        ocr_confidence: Optional[float] = None
+        multimodal_status = "native_only"
+
+        if settings.OCR_ENABLED_SYSTEMWIDE and _ocr_required_for_file(
+            file_type=file_type,
+            quality_status=quality_status,
+            cleaned_text=cleaned_text,
+            file_size=file_size,
+        ):
+            ocr_enabled = True
+            ocr_status = "processing"
+            multimodal_status = "ocr_attempted"
+            try:
+                ocr_result: Dict[str, Any] = {"text": "", "confidence": None, "pages": []}
+                file_ext = (file_type or "").lower()
+                if file_ext in IMAGE_EXTENSIONS:
+                    ocr_result = await run_ocr(file_bytes, max_chars=settings.OCR_MAX_CHARS)
+                elif file_ext == "pdf":
+                    source_uri = gcs_uri_from_url(file_url, settings.GCS_BUCKET_NAME)
+                    if source_uri:
+                        ocr_result = await run_ocr_document_from_gcs(
+                            gcs_source_uri=source_uri,
+                            output_bucket=settings.GCS_BUCKET_NAME,
+                            output_prefix="ocr-results",
+                            mime_type="application/pdf",
+                            max_chars=max(MAX_CHARS_TOTAL, settings.OCR_MAX_CHARS * 2),
+                        )
+                elif file_ext in {"pptx", "ppt"}:
+                    # PPT/PPTX previews are stored as PDF at deterministic path.
+                    preview_source_uri = f"gs://{settings.GCS_BUCKET_NAME}/{settings.PREVIEW_BUCKET_PATH_PREFIX}/{point_id}.pdf"
+                    if preview_status == "complete":
+                        ocr_result = await run_ocr_document_from_gcs(
+                            gcs_source_uri=preview_source_uri,
+                            output_bucket=settings.GCS_BUCKET_NAME,
+                            output_prefix="ocr-results",
+                            mime_type="application/pdf",
+                            max_chars=max(MAX_CHARS_TOTAL, settings.OCR_MAX_CHARS * 2),
+                        )
+
+                ocr_segments = _build_ocr_segments(
+                    filename=filename,
+                    file_type=file_type,
+                    ocr_result=ocr_result,
+                )
+                if ocr_segments:
+                    ocr_text_present = True
+                    conf_raw = ocr_result.get("confidence")
+                    if isinstance(conf_raw, (float, int)):
+                        ocr_confidence = max(0.0, min(1.0, float(conf_raw)))
+                    ocr_status = "complete"
+                    multimodal_status = "ocr_enriched"
+                    # If native text is weak, prioritize OCR segments; otherwise append.
+                    if quality_status != "indexed":
+                        structured_segments = ocr_segments
+                    else:
+                        structured_segments = [*structured_segments, *ocr_segments]
+                    merged_cleaned_text, prepared_segments = _prepare_segments_for_chunking(structured_segments)
+                    cleaned_text = _clean_extracted_text(merged_cleaned_text or raw_text)[:MAX_CHARS_TOTAL]
+                    quality_status, quality_reason = _assess_extraction_quality(cleaned_text, filename, file_size)
+                    if file_ext in IMAGE_EXTENSIONS:
+                        quality_status = "indexed"
+                        quality_reason = "OCR extracted text from image asset"
+                    if quality_status == "ocr_needed":
+                        quality_status = "indexed"
+                        quality_reason = "OCR recovered text from visual content"
+                else:
+                    ocr_status = "failed"
+                    multimodal_status = "ocr_unavailable"
+            except Exception as ocr_exc:
+                ocr_status = "failed"
+                multimodal_status = "ocr_failed"
+                logger.warning(
+                    "ocr_multimodal_failed file_id=%s file_type=%s error=%s",
+                    point_id,
+                    file_type,
+                    ocr_exc,
+                )
+
+        vision_enabled = False
+        vision_status = "not_requested"
+        vision_segments_annotated = 0
+        if settings.RILEY_VISION_ENABLED and settings.OPENAI_API_KEY:
+            max_vision_segments = max(1, int(settings.RILEY_VISION_MAX_SEGMENTS))
+            candidate_pages = _vision_candidate_pages(
+                file_type=file_type,
+                quality_status=quality_status,
+                segments=structured_segments,
+                ocr_enabled=ocr_enabled,
+                max_pages=max_vision_segments,
+            )
+            if candidate_pages:
+                vision_enabled = True
+                vision_status = "processing"
+                rendered_pages: Dict[int, bytes] = {}
+                file_ext = (file_type or "").lower()
+                if file_ext in IMAGE_EXTENSIONS:
+                    rendered_pages = {1: file_bytes}
+                elif file_ext == "pdf":
+                    rendered_pages = await _render_pdf_pages_for_vision(
+                        pdf_bytes=file_bytes,
+                        page_numbers=candidate_pages,
+                        max_pages=max_vision_segments,
+                    )
+                elif file_ext in {"pptx", "ppt"} and preview_url:
+                    try:
+                        preview_bytes = await StorageService.download_file(preview_url)
+                        rendered_pages = await _render_pdf_pages_for_vision(
+                            pdf_bytes=preview_bytes,
+                            page_numbers=candidate_pages,
+                            max_pages=max_vision_segments,
+                        )
+                    except Exception as preview_exc:
+                        logger.warning(
+                            "vision_preview_render_failed file_id=%s error=%s",
+                            point_id,
+                            type(preview_exc).__name__,
+                        )
+                for segment in structured_segments:
+                    if vision_segments_annotated >= max_vision_segments:
+                        break
+                    loc_val = str(segment.get("location_value") or "").strip()
+                    page_num = int(loc_val) if loc_val.isdigit() else None
+                    if page_num is None:
+                        continue
+                    page_bytes = rendered_pages.get(page_num)
+                    if not page_bytes:
+                        continue
+                    try:
+                        vision_result = await asyncio.wait_for(
+                            summarize_visual_content(
+                                image_bytes=page_bytes,
+                                model=settings.RILEY_VISION_MODEL,
+                                timeout_seconds=settings.RILEY_VISION_TIMEOUT_SECONDS,
+                            ),
+                            timeout=max(5, int(settings.RILEY_VISION_TIMEOUT_SECONDS) + 2),
+                        )
+                        segment["vision_caption"] = str(vision_result.get("vision_caption") or "")
+                        segment["has_visual_content"] = bool(vision_result.get("has_visual_content"))
+                        segment["visual_type"] = vision_result.get("visual_type")
+                        segment["multimodal_status"] = "vision_enriched"
+                        vision_segments_annotated += 1
+                    except Exception as vision_exc:
+                        logger.warning(
+                            "vision_caption_failed file_id=%s page=%s error=%s",
+                            point_id,
+                            page_num,
+                            type(vision_exc).__name__,
+                        )
+                if vision_segments_annotated > 0:
+                    vision_status = "complete"
+                    multimodal_status = "vision_enriched"
+                else:
+                    vision_status = "failed"
+
         if quality_status != "indexed":
             await _delete_chunk_points(collection_name, point_id)
             duration_ms = int((time.perf_counter() - started) * 1000)
@@ -1175,11 +1540,22 @@ async def _run_ingestion_pipeline(
                     "bm25_enabled": False,
                     "chunk_profiles": {"micro": 0, "macro": 0},
                     "processing_duration_ms": duration_ms,
+                    "ocr_enabled": ocr_enabled,
+                    "ocr_status": ocr_status if ocr_enabled else ("not_requested" if file_type in IMAGE_EXTENSIONS else None),
+                    "ocr_text_present": ocr_text_present,
+                    "ocr_confidence": ocr_confidence,
+                    "multimodal_status": multimodal_status,
+                    "multimodal_enabled": bool(ocr_enabled or vision_enabled),
+                    "ocr_processed": bool(ocr_enabled),
+                    "vision_processed": bool(vision_enabled),
+                    "visual_chunk_count": 0,
+                    "vision_enabled": vision_enabled,
+                    "vision_status": vision_status if vision_enabled else "not_requested",
+                    "vision_segments_annotated": vision_segments_annotated,
                     "ingestion_job_status": quality_status if job_id else None,
                     "ingestion_job_completed_at": completed_at if job_id else None,
                     "ingestion_job_error_message": quality_reason if job_id else None,
                     "ingestion_job_processing_duration_ms": duration_ms if job_id else None,
-                    "ocr_status": "not_requested" if file_type in IMAGE_EXTENSIONS else None,
                 },
                 points=[point_id],
             )
@@ -1214,12 +1590,24 @@ async def _run_ingestion_pipeline(
                 chunk_text = str(chunk.get("text") or "").strip()
                 if not chunk_text:
                     continue
-                vector = await _generate_embedding(chunk_text)
-                token_estimate = _estimate_tokens(chunk_text)
-                total_tokens += token_estimate
                 char_start = int(chunk.get("char_start") or 0)
                 char_end = int(chunk.get("char_end") or len(chunk_text))
                 best_segment = _best_segment_for_span(char_start, char_end, prepared_segments)
+                native_chunk_text = chunk_text
+                ocr_chunk_text = (
+                    str(best_segment.get("raw_text") or "").strip()
+                    if bool(best_segment.get("ocr_text_present"))
+                    else None
+                )
+                vision_caption = str(best_segment.get("vision_caption") or "").strip() or None
+                merged_chunk_text = _merge_chunk_text(
+                    native_text=native_chunk_text,
+                    ocr_text=ocr_chunk_text,
+                    vision_caption=vision_caption,
+                )
+                vector = await _generate_embedding(merged_chunk_text)
+                token_estimate = _estimate_tokens(merged_chunk_text)
+                total_tokens += token_estimate
                 point_uuid = _chunk_point_uuid(point_id, chunk_type, chunk_idx)
                 chunk_id = f"{point_id}::chunk::{chunk_type}::{chunk_idx}"
                 chunk_payload: Dict[str, Any] = {
@@ -1238,10 +1626,10 @@ async def _run_ingestion_pipeline(
                     "tags": tags,
                     "ai_enabled": True,
                     "ingestion_status": "indexed",
-                    "text": chunk_text,
-                    "content": chunk_text,
+                    "text": merged_chunk_text,
+                    "content": merged_chunk_text,
                     "raw_text": str(best_segment.get("raw_text") or chunk_text),
-                    "content_preview": chunk_text[:CONTENT_PREVIEW_LENGTH],
+                    "content_preview": merged_chunk_text[:CONTENT_PREVIEW_LENGTH],
                     "upload_date": upload_date,
                     "uploaded_at": upload_date,
                     "chunk_token_estimate": token_estimate,
@@ -1250,12 +1638,32 @@ async def _run_ingestion_pipeline(
                     "section_path": str(best_segment.get("section_path") or ""),
                     "char_start": char_start,
                     "char_end": char_end,
+                    "ocr_enabled": ocr_enabled,
+                    "ocr_status": str(best_segment.get("ocr_status") or ocr_status),
+                    "ocr_text_present": bool(best_segment.get("ocr_text_present") or ocr_text_present),
+                    "ocr_confidence": (
+                        float(best_segment.get("ocr_confidence"))
+                        if isinstance(best_segment.get("ocr_confidence"), (float, int))
+                        else ocr_confidence
+                    ),
+                    "ocr_text": (
+                        str(best_segment.get("raw_text") or "")[:MAX_CHARS_TOTAL]
+                        if bool(best_segment.get("ocr_text_present"))
+                        else None
+                    ),
+                    "multimodal_status": str(best_segment.get("multimodal_status") or multimodal_status),
+                    "native_text": native_chunk_text,
+                    "vision_caption": vision_caption,
+                    "has_visual_content": bool(best_segment.get("has_visual_content")),
+                    "visual_type": best_segment.get("visual_type"),
+                    "vision_enabled": vision_enabled,
+                    "vision_status": vision_status if vision_enabled else "not_requested",
                 }
                 chunk_rows.append(
                     {
                         "id": point_uuid,
                         "dense_vector": vector,
-                        "chunk_text": chunk_text,
+                        "chunk_text": merged_chunk_text,
                         "payload": chunk_payload,
                     }
                 )
@@ -1298,6 +1706,9 @@ async def _run_ingestion_pipeline(
                 points=_build_chunk_points(include_bm25=False),
             )
 
+        visual_chunk_count = sum(
+            1 for row in chunk_rows if bool((row.get("payload") or {}).get("has_visual_content"))
+        )
         duration_ms = int((time.perf_counter() - started) * 1000)
         embedding_cost_estimate = round((total_tokens / 1000.0) * EMBEDDING_COST_PER_1K_TOKENS_USD, 6)
         parent_payload: Dict[str, Any] = {
@@ -1334,6 +1745,18 @@ async def _run_ingestion_pipeline(
                 "macro": len(macro_chunks),
             },
             "processing_duration_ms": duration_ms,
+            "ocr_enabled": ocr_enabled,
+            "ocr_status": ocr_status if ocr_enabled else ("not_requested" if file_type in IMAGE_EXTENSIONS else None),
+            "ocr_text_present": ocr_text_present,
+            "ocr_confidence": ocr_confidence,
+            "multimodal_status": multimodal_status,
+            "multimodal_enabled": bool(ocr_enabled or vision_enabled),
+            "ocr_processed": bool(ocr_enabled),
+            "vision_processed": bool(vision_enabled),
+            "visual_chunk_count": visual_chunk_count,
+            "vision_enabled": vision_enabled,
+            "vision_status": vision_status if vision_enabled else "not_requested",
+            "vision_segments_annotated": vision_segments_annotated,
         }
         if not is_global:
             parent_payload["client_id"] = tenant_id
@@ -1374,6 +1797,12 @@ async def _run_ingestion_pipeline(
                 "ingestion_job_completed_at": completed_at if job_id else None,
                 "ingestion_job_error_message": str(exc) if job_id else None,
                 "ingestion_job_processing_duration_ms": duration_ms if job_id else None,
+                "ocr_status": "failed",
+                "multimodal_status": "ocr_failed",
+                "multimodal_enabled": True,
+                "ocr_processed": True,
+                "vision_processed": False,
+                "visual_chunk_count": 0,
             },
             points=[point_id],
         )
@@ -1474,8 +1903,6 @@ async def process_upload(
             else settings.QDRANT_COLLECTION_TIER_2
         )
         ingestion_status = "uploaded"
-        if is_image:
-            ingestion_status = "ocr_needed"
 
         payload: Dict[str, Any] = {
             "record_type": "file",
@@ -1507,13 +1934,23 @@ async def process_upload(
             "preview_type": preview_type,
             "preview_status": preview_status,
             "preview_error": preview_error,
-            "ocr_enabled": False,
-            "ocr_status": "not_requested" if is_image else None,
+            "ocr_enabled": bool(is_image),
+            "ocr_status": "queued" if is_image else None,
+            "ocr_text_present": False,
+            "ocr_confidence": None,
+            "multimodal_status": "pending",
+            "multimodal_enabled": True,
+            "ocr_processed": False,
+            "vision_processed": False,
+            "visual_chunk_count": 0,
+            "vision_enabled": bool(settings.RILEY_VISION_ENABLED),
+            "vision_status": "queued" if is_image else "not_requested",
+            "vision_segments_annotated": 0,
         }
         if not is_global_upload:
             payload["client_id"] = tenant_id
         if is_image:
-            payload["content"] = "[Image file — OCR not requested]"
+            payload["content"] = "[Image file — OCR queued for multimodal ingestion]"
             payload["content_preview"] = payload["content"]
 
         placeholder_vector = [0.0] * int(settings.EMBEDDING_DIM)
@@ -1522,7 +1959,7 @@ async def process_upload(
             points=[PointStruct(id=point_id, vector=placeholder_vector, payload=payload)],
         )
 
-        if is_supported_text:
+        if is_supported_text or is_image:
             try:
                 job_id = await enqueue_ingestion_job(
                     collection_name=target_collection,
@@ -1603,12 +2040,12 @@ async def reindex_existing_file(
         return None
 
     file_type = (payload.get("file_type") or payload.get("type") or "").lower()
-    if file_type not in TEXT_NATIVE_EXTENSIONS:
+    if file_type not in TEXT_NATIVE_EXTENSIONS and file_type not in IMAGE_EXTENSIONS:
         await vector_service.client.set_payload(
             collection_name=collection_name,
             payload={
                 "ingestion_status": "failed",
-                "ingestion_error": f"Unsupported file type for Phase 1A: {file_type or 'unknown'}",
+                "ingestion_error": f"Unsupported file type for multimodal ingestion: {file_type or 'unknown'}",
             },
             points=[file_id],
         )
@@ -1654,12 +2091,12 @@ async def run_ingestion_job(
         if not file_url:
             raise HTTPException(status_code=400, detail=f"File {file_id} has no URL")
 
-        if file_type not in TEXT_NATIVE_EXTENSIONS:
+        if file_type not in TEXT_NATIVE_EXTENSIONS and file_type not in IMAGE_EXTENSIONS:
             await vector_service.client.set_payload(
                 collection_name=collection_name,
                 payload={
                     "ingestion_status": "failed",
-                    "ingestion_error": f"Unsupported file type for Phase 1A: {file_type or 'unknown'}",
+                    "ingestion_error": f"Unsupported file type for multimodal ingestion: {file_type or 'unknown'}",
                     "ingestion_job_status": "failed",
                     "ingestion_job_error_message": f"Unsupported file type: {file_type or 'unknown'}",
                     "ingestion_job_completed_at": datetime.now().isoformat(),

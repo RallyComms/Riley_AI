@@ -62,6 +62,10 @@ class Settings(BaseSettings):
     RILEY_REPORT_WORKER_TOKEN: Optional[str] = None
     RILEY_REPORTS_TASKS_SERVICE_ACCOUNT_EMAIL: Optional[str] = None
     RILEY_REPORT_TIMEOUT_SECONDS: int = 120
+    RILEY_VISION_ENABLED: bool = True
+    RILEY_VISION_MODEL: str = "gpt-4.1-mini"
+    RILEY_VISION_TIMEOUT_SECONDS: int = 20
+    RILEY_VISION_MAX_SEGMENTS: int = 8
 
     # Google Cloud Storage configuration
     GCS_BUCKET_NAME: str = "riley-assets-riley-ai-479422"

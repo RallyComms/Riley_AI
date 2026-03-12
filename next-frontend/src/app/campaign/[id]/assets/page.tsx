@@ -188,6 +188,11 @@ export default function CampaignAssetsPage() {
           previewStatus: file.preview_status ?? undefined,
           previewError: file.preview_error ?? undefined,
           ingestionStatus: file.ingestion_status ?? undefined,
+          ocrStatus: file.ocr_status ?? undefined,
+          visionStatus: file.vision_status ?? undefined,
+          multimodalStatus: file.multimodal_status ?? undefined,
+          ocrProcessed: file.ocr_processed ?? false,
+          visionProcessed: file.vision_processed ?? false,
           tags: file.tags || [], // Use tags from backend
           uploadDate: new Date(file.date).toISOString().split("T")[0],
           uploader: "System",
