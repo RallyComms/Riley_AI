@@ -11,6 +11,14 @@ import { cn } from "@app/lib/utils";
 import { apiFetch, ApiRequestError } from "@app/lib/api";
 import { toAsset } from "@app/lib/files";
 
+const MAX_UPLOAD_BATCH_SIZE = 10;
+
+type UploadStatusItem = {
+  fileName: string;
+  status: "pending" | "uploading" | "queued" | "failed";
+  message?: string;
+};
+
 function getFileIcon(type: Asset["type"]) {
   switch (type) {
     case "pdf":
@@ -28,6 +36,24 @@ function getFileIcon(type: Asset["type"]) {
   }
 }
 
+function ingestionBadgeClass(status?: Asset["ingestionStatus"]): string {
+  switch (status) {
+    case "queued":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-300";
+    case "processing":
+      return "border-blue-500/30 bg-blue-500/10 text-blue-300";
+    case "indexed":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
+    case "failed":
+    case "low_text":
+      return "border-rose-500/30 bg-rose-500/10 text-rose-300";
+    case "ocr_needed":
+      return "border-purple-500/30 bg-purple-500/10 text-purple-300";
+    default:
+      return "border-zinc-700 bg-zinc-800/40 text-zinc-400";
+  }
+}
+
 export default function MediaPage() {
   const params = useParams();
   const campaignId = params.id as string;
@@ -41,6 +67,7 @@ export default function MediaPage() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<Asset | null>(null);
   const [toast, setToast] = useState<{ kind: "success" | "error"; message: string } | null>(null);
+  const [uploadStatuses, setUploadStatuses] = useState<UploadStatusItem[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const showToast = useCallback((kind: "success" | "error", message: string) => {
@@ -98,17 +125,23 @@ export default function MediaPage() {
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
     if (process.env.NODE_ENV !== "production") {
       console.log("[MediaPage] file select triggered");
-      console.log("[MediaPage] selected file:", event.target.files?.[0]);
+      console.log("[MediaPage] selected files:", event.target.files);
     }
-    const file = event.target.files?.[0];
-    if (!file || !campaignId) {
+    const files = Array.from(event.target.files || []);
+    if (!files.length || !campaignId) {
       if (process.env.NODE_ENV !== "production") {
-        console.warn("[MediaPage] aborting upload: missing file or campaignId", { file: !!file, campaignId });
+        console.warn("[MediaPage] aborting upload: missing files or campaignId", { files: files.length, campaignId });
       }
+      return;
+    }
+    if (files.length > MAX_UPLOAD_BATCH_SIZE) {
+      showToast("error", `You can upload up to ${MAX_UPLOAD_BATCH_SIZE} files at once.`);
+      if (fileInputRef.current) fileInputRef.current.value = "";
       return;
     }
 
     setIsUploading(true);
+    setUploadStatuses(files.map((file) => ({ fileName: file.name, status: "pending" })));
 
     try {
       const token = await getToken();
@@ -116,28 +149,54 @@ export default function MediaPage() {
         throw new Error("Authentication required");
       }
 
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("tenant_id", campaignId);
-      formData.append("tags", "Media");
+      for (const file of files) {
+        setUploadStatuses((prev) =>
+          prev.map((item) =>
+            item.fileName === file.name
+              ? { ...item, status: "uploading", message: "Uploading..." }
+              : item
+          )
+        );
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("tenant_id", campaignId);
+        formData.append("tags", "Media");
 
-      if (process.env.NODE_ENV !== "production") {
-        console.log("[upload] FormData keys:", Array.from(formData.keys()));
-        console.log("[upload] selected file:", { name: file.name, size: file.size, type: file.type });
-      }
+        if (process.env.NODE_ENV !== "production") {
+          console.log("[upload] FormData keys:", Array.from(formData.keys()));
+          console.log("[upload] selected file:", { name: file.name, size: file.size, type: file.type });
+        }
 
-      const result = await apiFetch<{ id: string; url: string; filename: string; type?: string }>("/api/v1/upload", {
-        token,
-        method: "POST",
-        body: formData,
-      });
+        try {
+          await apiFetch<{ id: string; url: string; filename: string; type?: string }>("/api/v1/upload", {
+            token,
+            method: "POST",
+            body: formData,
+            headers: { "X-Upload-Batch-Size": String(files.length) },
+          });
 
-      if (process.env.NODE_ENV !== "production") {
-        console.log("[upload] success response:", result);
+          setUploadStatuses((prev) =>
+            prev.map((item) =>
+              item.fileName === file.name
+                ? { ...item, status: "queued", message: "Indexing queued" }
+                : item
+            )
+          );
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Upload failed";
+          setUploadStatuses((prev) =>
+            prev.map((item) =>
+              item.fileName === file.name
+                ? { ...item, status: "failed", message }
+                : item
+            )
+          );
+          throw error;
+        }
       }
 
       await fetchFiles();
-      showToast("success", `Uploaded "${file.name}" successfully.`);
+      showToast("success", `Queued indexing for ${files.length} file(s).`);
     } catch (error) {
       if (error instanceof ApiRequestError) {
         console.error("[upload] failed request", {
@@ -193,6 +252,7 @@ export default function MediaPage() {
               type="file"
               className="hidden"
               accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.png,.jpg,.jpeg,.webp,.gif,.svg,.mp4,.webm,.mov,.mp3,.wav,.ogg"
+              multiple
               onChange={handleFileSelect}
             />
             {/* Upload Button */}
@@ -203,7 +263,7 @@ export default function MediaPage() {
               className="flex items-center gap-2 bg-zinc-800 text-zinc-300 hover:bg-zinc-700 px-4 py-2 rounded-md transition-colors"
             >
               {isUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
-              <span>{isUploading ? "Uploading..." : "Upload media"}</span>
+              <span>{isUploading ? "Uploading..." : "Upload media files"}</span>
             </button>
             {/* THE "OPEN" BUTTON - Only visible if chat is closed */}
             {!isChatOpen && (
@@ -227,6 +287,19 @@ export default function MediaPage() {
             )}
           </div>
         </header>
+        {uploadStatuses.length > 0 && (
+          <div className="px-6 py-2 border-b border-zinc-800 bg-zinc-900/40">
+            <div className="text-xs text-zinc-400 mb-1">Upload Progress</div>
+            <div className="space-y-1">
+              {uploadStatuses.map((item) => (
+                <div key={item.fileName} className="text-xs text-zinc-300 flex items-center justify-between">
+                  <span className="truncate max-w-[70%]">{item.fileName}</span>
+                  <span className="text-zinc-400">{item.message || item.status}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Media Grid */}
         <div className="flex-1 overflow-y-auto p-6">
@@ -304,6 +377,16 @@ export default function MediaPage() {
                             {isImage && <ImageIcon className="h-3.5 w-3.5 text-zinc-500" />}
                             <span className="text-xs text-zinc-500">{asset.size}</span>
                           </div>
+                          {asset.ingestionStatus && (
+                            <span
+                              className={cn(
+                                "mt-1 inline-flex rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide",
+                                ingestionBadgeClass(asset.ingestionStatus)
+                              )}
+                            >
+                              {asset.ingestionStatus}
+                            </span>
+                          )}
                         </div>
                         <button
                           type="button"

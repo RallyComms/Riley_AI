@@ -3,7 +3,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, UploadFile, Form, Query, Depends, Request
+from fastapi import APIRouter, HTTPException, UploadFile, Form, Query, Depends, Request, Header
 from pydantic import BaseModel
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
@@ -266,6 +266,8 @@ async def upload_file(
     tenant_id: str = Form(...),
     tags: str = Form(""),  # Comma-separated tags
     overwrite: bool = Query(False, description="Overwrite existing file if it exists"),
+    batch_size: Optional[int] = Query(None, description="Optional client-declared upload batch size"),
+    upload_batch_size: Optional[int] = Header(None, alias="X-Upload-Batch-Size"),
     current_user: Dict = Depends(verify_tenant_access)
 ) -> UploadResponse:
     """
@@ -285,6 +287,22 @@ async def upload_file(
     await check_tenant_membership(user_id, tenant_id, request)
     
     settings = get_settings()
+
+    # Server-side backpressure guard for current/future multi-file clients.
+    declared_batch_size = 1
+    if isinstance(batch_size, int):
+        declared_batch_size = max(declared_batch_size, batch_size)
+    if isinstance(upload_batch_size, int):
+        declared_batch_size = max(declared_batch_size, upload_batch_size)
+
+    if declared_batch_size > settings.MAX_UPLOAD_BATCH_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Upload batch too large ({declared_batch_size}). "
+                f"Maximum allowed is {settings.MAX_UPLOAD_BATCH_SIZE} files per batch."
+            ),
+        )
 
     # Hard server-side file size limit (prevents memory/OCR/ingestion failures)
     max_bytes = int(settings.MAX_UPLOAD_MB) * 1024 * 1024

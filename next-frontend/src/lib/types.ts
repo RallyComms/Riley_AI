@@ -24,6 +24,7 @@ export interface Asset {
   previewType?: string | null;
   previewStatus?: "complete" | "failed" | "processing" | "queued" | null;
   previewError?: string | null;
+  ingestionStatus?: "uploaded" | "queued" | "processing" | "indexed" | "failed" | "low_text" | "ocr_needed" | null;
   tags: AssetTag[]; // Array for multi-tagging
   uploadDate: string;
   uploader: string;

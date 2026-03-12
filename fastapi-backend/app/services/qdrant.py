@@ -1,11 +1,14 @@
 from datetime import datetime
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Optional
+import logging
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue, PointStruct
 
 from app.core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 
 class VectorService:
@@ -91,19 +94,254 @@ class VectorService:
 
         try:
             await self._client.get_collection(collection_name=collection_name)
+            await self._ensure_sparse_vectors_config(collection_name)
             return  # exists
         except Exception:
             # If get_collection fails (not found / connection), attempt create. Any real errors
             # will still bubble up from create_collection.
             pass
 
-        await self._client.create_collection(
-            collection_name=collection_name,
-            vectors_config=models.VectorParams(
-                size=settings.EMBEDDING_DIM,
-                distance=distance,
-            ),
+        try:
+            await self._client.create_collection(
+                collection_name=collection_name,
+                vectors_config=models.VectorParams(
+                    size=settings.EMBEDDING_DIM,
+                    distance=distance,
+                ),
+                sparse_vectors_config={
+                    "bm25": models.SparseVectorParams(
+                        modifier=models.Modifier.IDF,
+                    )
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "bm25_sparse_vector_create_unavailable collection=%s error=%s; creating dense-only collection",
+                collection_name,
+                exc,
+            )
+            await self._client.create_collection(
+                collection_name=collection_name,
+                vectors_config=models.VectorParams(
+                    size=settings.EMBEDDING_DIM,
+                    distance=distance,
+                ),
+            )
+        await self._ensure_sparse_vectors_config(collection_name)
+
+    async def _ensure_sparse_vectors_config(self, collection_name: str) -> None:
+        """Best-effort idempotent ensure for BM25 sparse vector config."""
+        try:
+            info = await self._client.get_collection(collection_name=collection_name)
+            dumped = info.model_dump() if hasattr(info, "model_dump") else {}
+            sparse_vectors = (
+                ((dumped.get("config") or {}).get("params") or {}).get("sparse_vectors") or {}
+            )
+            if "bm25" in sparse_vectors:
+                return
+        except Exception:
+            # If introspection fails, still attempt update in a best-effort way.
+            pass
+
+        try:
+            await self._client.update_collection(
+                collection_name=collection_name,
+                sparse_vectors_config={
+                    "bm25": models.SparseVectorParams(
+                        modifier=models.Modifier.IDF,
+                    )
+                },
+            )
+        except Exception as exc:
+            # Do not fail startup for clusters/plans that don't support sparse vectors yet.
+            logger.warning(
+                "bm25_sparse_vector_config_unavailable collection=%s error=%s",
+                collection_name,
+                exc,
+            )
+
+    @staticmethod
+    def _point_to_dict(point: Any) -> Dict[str, Any]:
+        if isinstance(point, dict):
+            return point
+        if hasattr(point, "dict"):
+            return point.dict()
+        return {
+            "id": str(getattr(point, "id", "")),
+            "payload": getattr(point, "payload", {}) or {},
+            "score": getattr(point, "score", None),
+        }
+
+    @staticmethod
+    def _candidate_key(point: Dict[str, Any]) -> str:
+        payload = point.get("payload", {}) or {}
+        chunk_id = payload.get("chunk_id")
+        if chunk_id:
+            return str(chunk_id)
+        parent_file_id = payload.get("parent_file_id")
+        chunk_index = payload.get("chunk_index")
+        if parent_file_id is not None and chunk_index is not None:
+            return f"{parent_file_id}::chunk::{chunk_index}"
+        return str(point.get("id", ""))
+
+    @staticmethod
+    def _drop_record_type_from_must_not(filter_obj: Filter) -> Filter:
+        must_not = []
+        for condition in (filter_obj.must_not or []):
+            key = condition.get("key") if isinstance(condition, dict) else getattr(condition, "key", None)
+            if key == "record_type":
+                continue
+            must_not.append(condition)
+        return Filter(
+            must=filter_obj.must or [],
+            should=filter_obj.should or [],
+            must_not=must_not,
         )
+
+    @staticmethod
+    def _extract_points_from_query_points(raw_result: Any) -> List[Any]:
+        if raw_result is None:
+            return []
+        if isinstance(raw_result, list):
+            return raw_result
+        if hasattr(raw_result, "points"):
+            return list(raw_result.points or [])
+        if isinstance(raw_result, dict):
+            points = raw_result.get("points")
+            if isinstance(points, list):
+                return points
+        return []
+
+    @staticmethod
+    def _filter_chunk_only(points: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        filtered: List[Dict[str, Any]] = []
+        for point in points:
+            payload = point.get("payload", {}) or {}
+            if payload.get("record_type") == "file":
+                continue
+            if payload.get("record_type") == "chunk" or payload.get("parent_file_id"):
+                filtered.append(point)
+        return filtered
+
+    @staticmethod
+    def _rrf_fuse(
+        dense_results: List[Dict[str, Any]],
+        bm25_results: List[Dict[str, Any]],
+        limit: int,
+        k: int = 60,
+    ) -> List[Dict[str, Any]]:
+        scored: Dict[str, Dict[str, Any]] = {}
+        for rank, point in enumerate(dense_results, start=1):
+            key = VectorService._candidate_key(point)
+            if key not in scored:
+                scored[key] = {"point": point, "rrf_score": 0.0}
+            scored[key]["rrf_score"] += 1.0 / (k + rank)
+        for rank, point in enumerate(bm25_results, start=1):
+            key = VectorService._candidate_key(point)
+            if key not in scored:
+                scored[key] = {"point": point, "rrf_score": 0.0}
+            scored[key]["rrf_score"] += 1.0 / (k + rank)
+
+        fused = sorted(scored.values(), key=lambda item: item["rrf_score"], reverse=True)
+        output: List[Dict[str, Any]] = []
+        for item in fused[:limit]:
+            point = item["point"]
+            point["rrf_score"] = item["rrf_score"]
+            output.append(point)
+        return output
+
+    async def hybrid_search(
+        self,
+        *,
+        collection_name: str,
+        query_text: str,
+        query_embedding: Sequence[float],
+        tenant_filter: Filter,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """Hybrid dense + BM25 search with RRF fusion and graceful degradation."""
+        dense_results: Optional[List[Dict[str, Any]]] = None
+        bm25_results: Optional[List[Dict[str, Any]]] = None
+
+        # Dense branch (existing retrieval behavior baseline)
+        try:
+            dense_raw = await self._client.search(
+                collection_name=collection_name,
+                query_vector=query_embedding,
+                query_filter=tenant_filter,
+                limit=limit,
+                with_payload=True,
+            )
+            dense_results = self._filter_chunk_only([self._point_to_dict(point) for point in dense_raw])
+        except Exception as exc:
+            if self._is_missing_payload_index_error(exc, "record_type"):
+                fallback_filter = self._drop_record_type_from_must_not(tenant_filter)
+                dense_raw = await self._client.search(
+                    collection_name=collection_name,
+                    query_vector=query_embedding,
+                    query_filter=fallback_filter,
+                    limit=limit,
+                    with_payload=True,
+                )
+                dense_results = self._filter_chunk_only([self._point_to_dict(point) for point in dense_raw])
+            else:
+                logger.warning(
+                    "hybrid_dense_search_failed collection=%s error=%s",
+                    collection_name,
+                    exc,
+                )
+                dense_results = []
+
+        # BM25 branch (best-effort)
+        try:
+            bm25_raw = await self._client.query_points(
+                collection_name=collection_name,
+                query=models.Document(text=query_text, model="qdrant/bm25"),
+                using="bm25",
+                query_filter=tenant_filter,
+                limit=limit,
+                with_payload=True,
+            )
+            bm25_points = self._extract_points_from_query_points(bm25_raw)
+            bm25_results = self._filter_chunk_only([self._point_to_dict(point) for point in bm25_points])
+        except Exception as exc:
+            if self._is_missing_payload_index_error(exc, "record_type"):
+                try:
+                    fallback_filter = self._drop_record_type_from_must_not(tenant_filter)
+                    bm25_raw = await self._client.query_points(
+                        collection_name=collection_name,
+                        query=models.Document(text=query_text, model="qdrant/bm25"),
+                        using="bm25",
+                        query_filter=fallback_filter,
+                        limit=limit,
+                        with_payload=True,
+                    )
+                    bm25_points = self._extract_points_from_query_points(bm25_raw)
+                    bm25_results = self._filter_chunk_only([self._point_to_dict(point) for point in bm25_points])
+                except Exception as bm25_fallback_exc:
+                    logger.warning(
+                        "hybrid_bm25_search_unavailable collection=%s error=%s",
+                        collection_name,
+                        bm25_fallback_exc,
+                    )
+                    bm25_results = []
+            else:
+                logger.warning(
+                    "hybrid_bm25_search_unavailable collection=%s error=%s",
+                    collection_name,
+                    exc,
+                )
+                bm25_results = []
+
+        dense_results = dense_results or []
+        bm25_results = bm25_results or []
+        if dense_results and bm25_results:
+            return self._rrf_fuse(dense_results, bm25_results, limit=limit)
+        if dense_results:
+            return dense_results[:limit]
+        if bm25_results:
+            return bm25_results[:limit]
+        return []
 
     async def search_silo(
         self,
@@ -475,6 +713,131 @@ class VectorService:
             })
 
         return files
+
+    async def get_index_summary(
+        self,
+        collection_name: str,
+        tenant_id: str,
+    ) -> Dict[str, Any]:
+        """Return campaign/global document ingestion summary for researcher visibility."""
+        if tenant_id == "global":
+            summary_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="is_global",
+                        match=MatchValue(value=True),
+                    )
+                ],
+                must_not=[
+                    FieldCondition(
+                        key="record_type",
+                        match=MatchValue(value="chunk"),
+                    )
+                ],
+            )
+        else:
+            summary_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="client_id",
+                        match=MatchValue(value=tenant_id),
+                    )
+                ],
+                must_not=[
+                    FieldCondition(
+                        key="record_type",
+                        match=MatchValue(value="chunk"),
+                    )
+                ],
+            )
+
+        points: List[Any] = []
+        offset = None
+        while True:
+            try:
+                scroll_result = await self._client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=summary_filter,
+                    limit=500,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                batch = scroll_result[0]
+            except Exception as exc:
+                if not self._is_missing_payload_index_error(exc, "record_type"):
+                    raise
+                legacy_filter = Filter(
+                    must=summary_filter.must or [],
+                    should=summary_filter.should or [],
+                )
+                scroll_result = await self._client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=legacy_filter,
+                    limit=500,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                batch = [
+                    point for point in scroll_result[0]
+                    if (point.payload or {}).get("record_type") != "chunk"
+                ]
+
+            if not batch:
+                break
+
+            points.extend(batch)
+            offset = scroll_result[1]
+            if offset is None:
+                break
+
+        counts_by_file_type: Dict[str, int] = {}
+        recent_uploads: List[Dict[str, str]] = []
+        indexed_count = 0
+        processing_count = 0
+        failed_count = 0
+        low_text_count = 0
+        ocr_needed_count = 0
+
+        for point in points:
+            payload = point.payload or {}
+            file_type = str(payload.get("type") or payload.get("file_type") or "unknown").lower()
+            counts_by_file_type[file_type] = counts_by_file_type.get(file_type, 0) + 1
+
+            ingestion_status = str(payload.get("ingestion_status") or "uploaded").lower()
+            if ingestion_status == "indexed":
+                indexed_count += 1
+            elif ingestion_status in {"queued", "processing", "uploaded"}:
+                processing_count += 1
+            elif ingestion_status == "failed":
+                failed_count += 1
+            elif ingestion_status == "low_text":
+                low_text_count += 1
+            elif ingestion_status == "ocr_needed":
+                ocr_needed_count += 1
+
+            recent_uploads.append(
+                {
+                    "filename": str(payload.get("filename") or "Unknown"),
+                    "file_type": file_type,
+                    "ingestion_status": ingestion_status,
+                    "upload_date": str(payload.get("upload_date") or payload.get("uploaded_at") or ""),
+                }
+            )
+
+        recent_uploads.sort(key=lambda item: item.get("upload_date", ""), reverse=True)
+
+        return {
+            "total_documents": len(points),
+            "indexed_count": indexed_count,
+            "processing_count": processing_count,
+            "failed_count": failed_count,
+            "low_text_count": low_text_count,
+            "ocr_needed_count": ocr_needed_count,
+            "counts_by_file_type": counts_by_file_type,
+            "recent_uploads": recent_uploads[:5],
+        }
 
     async def promote_to_global(self, file_id: str, is_golden: bool) -> None:
         """Promote a file from Tier 2 (Private Client Silo) to Tier 1 (Global Firm Archive).

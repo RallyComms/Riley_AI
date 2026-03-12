@@ -123,6 +123,24 @@ function formatFilename(name: string): string {
   return name;
 }
 
+function ingestionBadgeClass(status?: Asset["ingestionStatus"]): string {
+  switch (status) {
+    case "queued":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-300";
+    case "processing":
+      return "border-blue-500/30 bg-blue-500/10 text-blue-300";
+    case "indexed":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
+    case "failed":
+    case "low_text":
+      return "border-rose-500/30 bg-rose-500/10 text-rose-300";
+    case "ocr_needed":
+      return "border-purple-500/30 bg-purple-500/10 text-purple-300";
+    default:
+      return "border-zinc-700 bg-zinc-800/40 text-zinc-400";
+  }
+}
+
 export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabledChange, onClick, onRename, onPromote, campaignId }: AssetRowProps) {
   const { getToken } = useAuth();
   const { icon: FileIcon, color: iconColor } = getFileIcon(asset.type);
@@ -281,6 +299,16 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
         <div className="space-y-0.5">
           <div className="text-sm text-zinc-500" suppressHydrationWarning>{formatDate(asset.uploadDate)}</div>
           <div className="text-xs text-zinc-500">{asset.size} • {asset.uploader}</div>
+          {asset.ingestionStatus && (
+            <span
+              className={cn(
+                "inline-flex rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-wide",
+                ingestionBadgeClass(asset.ingestionStatus)
+              )}
+            >
+              {asset.ingestionStatus}
+            </span>
+          )}
         </div>
       </td>
 

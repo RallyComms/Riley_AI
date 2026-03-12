@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
-import { Send, Loader2, Sparkles, Zap, Brain, FileText, Check, X, Search, MessageSquare, BarChart3, ChevronLeft, Users, FolderPlus, Folder, MoreHorizontal, ChevronDown, ChevronRight } from "lucide-react";
+import { Send, Loader2, Sparkles, Zap, Brain, FileText, Check, X, Search, MessageSquare, BarChart3, ChevronLeft, Users, FolderPlus, Folder, MoreHorizontal, ChevronDown, ChevronRight, Copy, CheckCheck } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import { cn } from "@app/lib/utils";
@@ -17,12 +17,19 @@ type Message = {
   role: "user" | "assistant" | "system";
   content: string;
   sourcesCount?: number;
+  sources?: MessageSource[];
   status?: "thinking"; // For placeholder messages
 };
 
 type SourceCitation = {
   key: string;
   label: string;
+};
+
+type MessageSource = {
+  id: string;
+  filename: string;
+  location?: string;
 };
 
 type Conversation = {
@@ -62,6 +69,22 @@ type PersistedProject = {
   updated_at?: string | null;
 };
 
+type RileyIndexSummary = {
+  total_documents: number;
+  indexed_count: number;
+  processing_count: number;
+  failed_count: number;
+  low_text_count: number;
+  ocr_needed_count: number;
+  counts_by_file_type: Record<string, number>;
+  recent_uploads: Array<{
+    filename: string;
+    file_type: string;
+    ingestion_status: string;
+    upload_date: string;
+  }>;
+};
+
 export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" }: RileyStudioProps) {
   const { getToken, isLoaded: authLoaded } = useAuth();
   const { user, isLoaded: userLoaded } = useUser();
@@ -90,6 +113,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Record<string, boolean>>({});
   const [assetByFilename, setAssetByFilename] = useState<Record<string, Asset>>({});
   const [selectedSourceAsset, setSelectedSourceAsset] = useState<Asset | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
+  const [openSourcesByMessageId, setOpenSourcesByMessageId] = useState<Record<string, boolean>>({});
+  const [indexSummary, setIndexSummary] = useState<RileyIndexSummary | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -230,6 +256,43 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     };
   }, [openConversationMenuId]);
 
+  useEffect(() => {
+    if (!tenantId || isGlobal || !authLoaded || !userLoaded || !user) return;
+    let cancelled = false;
+    let intervalId: number | null = null;
+
+    const loadIndexSummary = async () => {
+      try {
+        const token = await getToken();
+        if (!token) return;
+        const summary = await apiFetch<RileyIndexSummary>(
+          `/api/v1/riley/index-summary?tenant_id=${encodeURIComponent(tenantId)}`,
+          {
+            token,
+            method: "GET",
+          }
+        );
+        if (!cancelled) {
+          setIndexSummary(summary);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error("Failed to load Riley index summary:", error);
+        }
+      }
+    };
+
+    void loadIndexSummary();
+    intervalId = window.setInterval(() => {
+      void loadIndexSummary();
+    }, 15000);
+
+    return () => {
+      cancelled = true;
+      if (intervalId) window.clearInterval(intervalId);
+    };
+  }, [tenantId, isGlobal, authLoaded, userLoaded, user, getToken]);
+
   // Build local filename -> asset map for source opening.
   useEffect(() => {
     if (!tenantId || !authLoaded || !userLoaded || !user) return;
@@ -285,6 +348,24 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     const asset = assetByFilename[citation.key];
     if (!asset) return;
     setSelectedSourceAsset(asset);
+  };
+
+  const handleSourceFilenameClick = (filename: string) => {
+    const asset = assetByFilename[filename.toLowerCase()];
+    if (!asset) return;
+    setSelectedSourceAsset(asset);
+  };
+
+  const handleCopyAssistantMessage = async (messageId: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMessageId(messageId);
+      window.setTimeout(() => {
+        setCopiedMessageId((current) => (current === messageId ? null : current));
+      }, 1600);
+    } catch (error) {
+      console.error("Failed to copy Riley response:", error);
+    }
   };
 
   // Auto-resize textarea
@@ -638,6 +719,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       const data = await apiFetch<{
         response: string;
         sources_count?: number;
+        sources?: MessageSource[];
       }>("/api/v1/chat", {
         token,
         method: "POST",
@@ -656,6 +738,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         role: "assistant",
         content: data.response,
         sourcesCount: data.sources_count,
+        sources: Array.isArray(data.sources) ? data.sources : [],
       };
 
       // Replace thinking message with actual response
@@ -1113,6 +1196,51 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           </div>
         </header>
 
+        {!isGlobal && indexSummary && (
+          <div className="border-b border-zinc-800 bg-zinc-900/40 px-6 py-3">
+            <div className="flex flex-wrap items-center gap-3 text-xs">
+              <span className="rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-zinc-200">
+                Documents indexed: {indexSummary.indexed_count} / {indexSummary.total_documents}
+              </span>
+              <span className="rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-1 text-blue-300">
+                Processing: {indexSummary.processing_count}
+              </span>
+              <span className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-rose-300">
+                Failed: {indexSummary.failed_count + indexSummary.low_text_count}
+              </span>
+              <span className="rounded-md border border-purple-500/30 bg-purple-500/10 px-2 py-1 text-purple-300">
+                OCR needed: {indexSummary.ocr_needed_count}
+              </span>
+              <a
+                href={`/campaign/${tenantId}/assets`}
+                className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-300 hover:bg-amber-500/20"
+              >
+                View documents
+              </a>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-zinc-400">
+              {Object.entries(indexSummary.counts_by_file_type || {})
+                .sort((a, b) => b[1] - a[1])
+                .slice(0, 8)
+                .map(([fileType, count]) => (
+                  <span
+                    key={fileType}
+                    className="rounded-full border border-zinc-700 bg-zinc-800/40 px-2 py-0.5"
+                  >
+                    {fileType}: {count}
+                  </span>
+                ))}
+            </div>
+            {(indexSummary.failed_count > 0 ||
+              indexSummary.low_text_count > 0 ||
+              indexSummary.ocr_needed_count > 0) && (
+              <div className="mt-2 text-[11px] text-amber-300">
+                Some documents are not fully indexable yet, so Riley results may be incomplete.
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Message Area */}
         <div className="flex-1 overflow-y-auto">
           {showWelcome ? (
@@ -1174,6 +1302,14 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 const isLastMessage = index === messages.length - 1;
                 const isLastAssistant = message.role === "assistant" && isLastMessage;
                 const citations = message.role === "assistant" ? extractCitations(message.content) : [];
+                const structuredSources = message.sources || [];
+                const fallbackSources: MessageSource[] = citations.map((citation) => ({
+                  id: citation.key,
+                  filename: citation.label,
+                  location: "unknown",
+                }));
+                const displaySources = structuredSources.length > 0 ? structuredSources : fallbackSources;
+                const isSourcesOpen = openSourcesByMessageId[message.id] ?? true;
 
                 return (
                   <div
@@ -1220,38 +1356,82 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         // User and system messages (plain text)
                         <div className="text-sm whitespace-pre-wrap">{message.content}</div>
                       )}
+                      {message.role === "assistant" && message.content && (
+                        <div className="mt-2 flex justify-end">
+                          <button
+                            type="button"
+                            onClick={() => handleCopyAssistantMessage(message.id, message.content)}
+                            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+                            title="Copy response markdown"
+                          >
+                            {copiedMessageId === message.id ? (
+                              <>
+                                <CheckCheck className="h-3.5 w-3.5 text-emerald-400" />
+                                <span>Copied</span>
+                              </>
+                            ) : (
+                              <>
+                                <Copy className="h-3.5 w-3.5" />
+                                <span>Copy</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      )}
                       {message.role === "assistant" && message.sourcesCount !== undefined && (
                         <div className="mt-2 flex items-center gap-1.5 border-t border-zinc-800 pt-2 text-xs text-zinc-500">
                           <span>📚</span>
                           <span>Analyzed {message.sourcesCount} document{message.sourcesCount !== 1 ? "s" : ""}</span>
                         </div>
                       )}
-                      {message.role === "assistant" && citations.length > 0 && (
+                      {message.role === "assistant" && displaySources.length > 0 && (
                         <div className="mt-2 border-t border-zinc-800 pt-2">
-                          <div className="mb-1 text-xs text-zinc-500">Sources</div>
-                          <div className="flex flex-wrap gap-1.5">
-                            {citations.map((citation) => {
-                              const hasAsset = Boolean(assetByFilename[citation.key]);
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setOpenSourcesByMessageId((prev) => ({
+                                ...prev,
+                                [message.id]: !isSourcesOpen,
+                              }))
+                            }
+                            className="mb-1 inline-flex items-center gap-1.5 text-xs text-zinc-400 hover:text-zinc-200"
+                          >
+                            {isSourcesOpen ? (
+                              <ChevronDown className="h-3.5 w-3.5" />
+                            ) : (
+                              <ChevronRight className="h-3.5 w-3.5" />
+                            )}
+                            <span>Sources ({displaySources.length})</span>
+                          </button>
+                          {isSourcesOpen && (
+                            <div className="flex flex-col gap-1.5">
+                            {displaySources.map((source) => {
+                              const lookupKey = source.filename.toLowerCase();
+                              const hasAsset = Boolean(assetByFilename[lookupKey]);
                               return (
                                 <button
-                                  key={citation.key}
+                                  key={`${message.id}-${source.id}`}
                                   type="button"
-                                  onClick={() => handleSourceClick(citation)}
+                                  onClick={() => handleSourceFilenameClick(source.filename)}
                                   disabled={!hasAsset}
                                   className={cn(
-                                    "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] transition-colors",
+                                    "inline-flex items-center justify-between gap-2 rounded-md border px-2 py-1 text-[11px] transition-colors",
                                     hasAsset
                                       ? "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
                                       : "border-zinc-700 bg-zinc-800/40 text-zinc-500 cursor-not-allowed"
                                   )}
-                                  title={hasAsset ? `Open ${citation.label}` : "Source unavailable"}
+                                  title={hasAsset ? `Open ${source.filename}` : "Source unavailable"}
                                 >
-                                  <FileText className="h-3 w-3" />
-                                  <span className="max-w-[220px] truncate">{citation.label}</span>
+                                  <span className="inline-flex items-center gap-1.5 min-w-0">
+                                    <FileText className="h-3 w-3" />
+                                    <span className="max-w-[220px] truncate">{source.filename}</span>
+                                  </span>
+                                  <span className="text-[10px] text-zinc-400">{source.location || "unknown"}</span>
                                 </button>
                               );
                             })}
-                          </div>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>

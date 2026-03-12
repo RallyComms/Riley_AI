@@ -1,4 +1,5 @@
 import asyncio
+import re
 from typing import Any, Dict, List, Literal, Optional
 
 import google.generativeai as genai  # Still needed for GenerativeModel (chat responses)
@@ -16,6 +17,7 @@ from app.dependencies.graph_dep import get_graph, get_graph_optional
 from app.services.genai_client import get_genai_client
 from app.services.graph import GraphService
 from app.services.qdrant import vector_service
+from app.services.rerank import rerank_candidates
 
 
 def _extract_user_id_from_session(session_id: str) -> str:
@@ -52,6 +54,25 @@ class ChatResponse(BaseModel):
     response: str
     model_used: str
     sources_count: int
+    sources: List[Dict[str, str]] = Field(default_factory=list)
+
+
+class RileyIndexRecentUpload(BaseModel):
+    filename: str
+    file_type: str
+    ingestion_status: str
+    upload_date: str
+
+
+class RileyIndexSummaryResponse(BaseModel):
+    total_documents: int
+    indexed_count: int
+    processing_count: int
+    failed_count: int
+    low_text_count: int
+    ocr_needed_count: int
+    counts_by_file_type: Dict[str, int]
+    recent_uploads: List[RileyIndexRecentUpload] = Field(default_factory=list)
 
 
 class MessageSchema(BaseModel):
@@ -308,11 +329,159 @@ def _format_rag_context(
     return "\n".join(context_parts)
 
 
+def _result_location(payload: Dict[str, Any]) -> str:
+    location_type = payload.get("location_type")
+    location_value = payload.get("location_value")
+    if location_type and location_value:
+        return f"{location_type}:{location_value}"
+    for key in ("page", "page_number", "slide", "slide_number", "section"):
+        value = payload.get(key)
+        if value is not None and str(value).strip():
+            return f"{key}:{value}"
+    section_path = payload.get("section_path")
+    if section_path:
+        return str(section_path)
+    chunk_index = payload.get("chunk_index")
+    if chunk_index is not None:
+        return f"chunk:{chunk_index}"
+    return "unknown"
+
+
+def _result_chunk_id(result: Dict[str, Any]) -> str:
+    payload = result.get("payload", {}) or {}
+    chunk_id = payload.get("chunk_id")
+    if chunk_id:
+        return str(chunk_id)
+    parent = payload.get("parent_file_id")
+    idx = payload.get("chunk_index")
+    if parent is not None and idx is not None:
+        return f"{parent}::chunk::{idx}"
+    return str(result.get("id", ""))
+
+
+def _build_sources_payload(
+    private_results: List[Dict[str, Any]],
+    global_results: List[Dict[str, Any]],
+) -> List[Dict[str, str]]:
+    seen: set[str] = set()
+    sources: List[Dict[str, str]] = []
+    for result in [*private_results, *global_results]:
+        payload = result.get("payload", {}) or {}
+        cid = _result_chunk_id(result)
+        if cid in seen:
+            continue
+        seen.add(cid)
+        filename = str(payload.get("filename") or "Unknown Document")
+        sources.append(
+            {
+                "id": cid,
+                "filename": filename,
+                "location": _result_location(payload),
+            }
+        )
+    return sources
+
+
+def _validate_and_sanitize_quotes(
+    response_text: str,
+    private_results: List[Dict[str, Any]],
+    global_results: List[Dict[str, Any]],
+) -> str:
+    """Ensure quoted spans are exact substrings from retrieved context."""
+    settings = get_settings()
+    corpus_parts: List[str] = []
+    for result in [*private_results, *global_results]:
+        payload = result.get("payload", {}) or {}
+        raw_chunk = payload.get("raw_text")
+        if raw_chunk:
+            corpus_parts.append(str(raw_chunk))
+        corpus_parts.append(_get_text_for_rag(payload, settings))
+    corpus = "\n".join(corpus_parts)
+    if not corpus.strip():
+        return response_text
+
+    invalid_found = False
+
+    def _replace_invalid(match: Any) -> str:
+        nonlocal invalid_found
+        opening = match.group(1)
+        quoted = match.group(2)
+        closing = match.group(3)
+        if quoted in corpus:
+            return f"{opening}{quoted}{closing}"
+        invalid_found = True
+        # Keep semantic content but remove hallucinated quote marks.
+        return quoted
+
+    sanitized = re.sub(r'(["“])([^"\n”]{3,})(["”])', _replace_invalid, response_text)
+    if invalid_found:
+        sanitized = (
+            f"{sanitized}\n\n"
+            "Note: Quote not found in sources; re-run with more context."
+        )
+    return sanitized
+
+
 def _get_model_name(mode: Literal["fast", "deep"]) -> str:
     """Return the Gemini 2.5 model name based on the mode."""
     if mode == "fast":
         return "gemini-2.5-flash"
     return "gemini-2.5-pro"
+
+
+def _candidate_id(result: Dict[str, Any]) -> str:
+    payload = result.get("payload", {}) or {}
+    chunk_id = payload.get("chunk_id")
+    if chunk_id:
+        return str(chunk_id)
+    parent = payload.get("parent_file_id")
+    idx = payload.get("chunk_index")
+    if parent is not None and idx is not None:
+        return f"{parent}::chunk::{idx}"
+    return str(result.get("id", ""))
+
+
+def _apply_rerank_order(
+    private_results: List[Dict[str, Any]],
+    global_results: List[Dict[str, Any]],
+    ranked_ids: List[str],
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    if not ranked_ids:
+        return private_results, global_results
+
+    by_id: Dict[str, tuple[str, Dict[str, Any]]] = {}
+    for item in private_results:
+        by_id[_candidate_id(item)] = ("private", item)
+    for item in global_results:
+        by_id[_candidate_id(item)] = ("global", item)
+
+    ordered_private: List[Dict[str, Any]] = []
+    ordered_global: List[Dict[str, Any]] = []
+    used: set[str] = set()
+    for candidate_id in ranked_ids:
+        if candidate_id in used:
+            continue
+        entry = by_id.get(candidate_id)
+        if not entry:
+            continue
+        used.add(candidate_id)
+        scope, item = entry
+        if scope == "private":
+            ordered_private.append(item)
+        else:
+            ordered_global.append(item)
+
+    # Preserve stability for any remaining items not returned by reranker.
+    for item in private_results:
+        cid = _candidate_id(item)
+        if cid not in used:
+            ordered_private.append(item)
+    for item in global_results:
+        cid = _candidate_id(item)
+        if cid not in used:
+            ordered_global.append(item)
+
+    return ordered_private, ordered_global
 
 
 @retry(
@@ -329,6 +498,7 @@ async def chat(
     request: ChatRequest,
     background_tasks: BackgroundTasks,
     http_request: Request,
+    deep: bool = Query(False, description="Enable deep research mode"),
     current_user: Dict = Depends(verify_clerk_token),
     graph: Optional[GraphService] = Depends(get_graph_optional)
 ) -> ChatResponse:
@@ -348,6 +518,20 @@ async def chat(
     print(f"Chat request: user_id={user_id}, tenant_id={request.tenant_id}")
     
     settings = get_settings()
+    rerank_candidates_limit = max(1, int(settings.RERANK_CANDIDATES))
+    rerank_top_k = max(1, int(settings.RERANK_TOP_K))
+    target_private_limit = 40 if request.mode == "deep" else 10
+    target_global_limit = 20 if request.mode == "deep" else 5
+    if deep:
+        target_private_limit = max(target_private_limit, 80)
+        target_global_limit = max(target_global_limit, 40)
+        rerank_candidates_limit = max(rerank_candidates_limit, 100)
+        rerank_top_k = max(rerank_top_k, 20)
+    if request.tenant_id == "global":
+        target_private_limit = 0
+        target_global_limit = 40 if request.mode == "deep" else 20
+        if deep:
+            target_global_limit = max(target_global_limit, 80)
 
     # Step A: Embed the query
     try:
@@ -377,15 +561,31 @@ async def chat(
                         key="is_global",
                         match=MatchValue(value=True),
                     )
-                ]
+                ],
+                must_not=[
+                    FieldCondition(
+                        key="record_type",
+                        match=MatchValue(value="file"),
+                    )
+                ],
             )
-            
-            vector_task = vector_service.search_global(
-                collection_name=settings.QDRANT_COLLECTION_TIER_1,
-                query_vector=query_vector,
-                limit=40 if request.mode == "deep" else 20,
-                filter=global_filter,  # SECURITY: Always filter by is_global=True
-            )
+
+            vector_limit = max(40 if request.mode == "deep" else 20, rerank_candidates_limit) if settings.RERANK_ENABLED else (40 if request.mode == "deep" else 20)
+            if settings.HYBRID_SEARCH_ENABLED:
+                vector_task = vector_service.hybrid_search(
+                    collection_name=settings.QDRANT_COLLECTION_TIER_1,
+                    query_text=request.query,
+                    query_embedding=query_vector,
+                    tenant_filter=global_filter,
+                    limit=vector_limit,
+                )
+            else:
+                vector_task = vector_service.search_global(
+                    collection_name=settings.QDRANT_COLLECTION_TIER_1,
+                    query_vector=query_vector,
+                    limit=vector_limit,
+                    filter=global_filter,  # SECURITY: Always filter by is_global=True
+                )
             tasks.append(vector_task)
             
             # Execute in parallel
@@ -412,8 +612,11 @@ async def chat(
             ) from exc
     else:
         # Campaign Mode: Search Tier 2 (Client Silo) + Tier 1 (Global) + Graph + File Manifest
-        private_limit = 40 if request.mode == "deep" else 10
-        global_limit = 20 if request.mode == "deep" else 5
+        private_limit = target_private_limit
+        global_limit = target_global_limit
+        if settings.RERANK_ENABLED:
+            private_limit = max(private_limit, rerank_candidates_limit)
+            global_limit = max(global_limit, rerank_candidates_limit)
 
         # Fetch File Manifest (list of available files in the campaign)
         file_manifest: List[str] = []
@@ -435,14 +638,43 @@ async def chat(
         if graph:
             tasks.append(graph.search_campaigns_fuzzy(request.query))
         
-        # Campaign Mode: Search Tier 2 with client_id filter AND ai_enabled=true
-        tasks.append(vector_service.search_silo(
-            collection_name=settings.QDRANT_COLLECTION_TIER_2,
-            query_vector=query_vector,
-            tenant_id=request.tenant_id,
-            limit=private_limit,
-            require_ai_enabled=True,  # CRITICAL: Only retrieve files with AI Memory enabled
-        ))
+        # Campaign Mode: Search Tier 2 with client_id + ai_enabled filters.
+        private_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="client_id",
+                    match=MatchValue(value=request.tenant_id),
+                ),
+                FieldCondition(
+                    key="ai_enabled",
+                    match=MatchValue(value=True),
+                ),
+            ],
+            must_not=[
+                FieldCondition(
+                    key="record_type",
+                    match=MatchValue(value="file"),
+                )
+            ],
+        )
+        if settings.HYBRID_SEARCH_ENABLED:
+            tasks.append(
+                vector_service.hybrid_search(
+                    collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                    query_text=request.query,
+                    query_embedding=query_vector,
+                    tenant_filter=private_filter,
+                    limit=private_limit,
+                )
+            )
+        else:
+            tasks.append(vector_service.search_silo(
+                collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                query_vector=query_vector,
+                tenant_id=request.tenant_id,
+                limit=private_limit,
+                require_ai_enabled=True,  # CRITICAL: Only retrieve files with AI Memory enabled
+            ))
         
         # Search Tier 1 with is_global=True filter (never unfiltered)
         global_filter = Filter(
@@ -451,15 +683,31 @@ async def chat(
                     key="is_global",
                     match=MatchValue(value=True),
                 )
-            ]
+            ],
+            must_not=[
+                FieldCondition(
+                    key="record_type",
+                    match=MatchValue(value="file"),
+                )
+            ],
         )
-        
-        tasks.append(vector_service.search_global(
-            collection_name=settings.QDRANT_COLLECTION_TIER_1,
-            query_vector=query_vector,
-            limit=global_limit,
-            filter=global_filter,  # SECURITY: Always filter by is_global=True
-        ))
+        if settings.HYBRID_SEARCH_ENABLED:
+            tasks.append(
+                vector_service.hybrid_search(
+                    collection_name=settings.QDRANT_COLLECTION_TIER_1,
+                    query_text=request.query,
+                    query_embedding=query_vector,
+                    tenant_filter=global_filter,
+                    limit=global_limit,
+                )
+            )
+        else:
+            tasks.append(vector_service.search_global(
+                collection_name=settings.QDRANT_COLLECTION_TIER_1,
+                query_vector=query_vector,
+                limit=global_limit,
+                filter=global_filter,  # SECURITY: Always filter by is_global=True
+            ))
         
         # Execute all searches in parallel
         try:
@@ -494,13 +742,40 @@ async def chat(
                 except:
                     graph_results = ""
             try:
-                private_results = await vector_service.search_silo(
-                    collection_name=settings.QDRANT_COLLECTION_TIER_2,
-                    query_vector=query_vector,
-                    tenant_id=request.tenant_id,
-                    limit=private_limit,
-                    require_ai_enabled=True,  # CRITICAL: Only retrieve files with AI Memory enabled
+                private_filter = Filter(
+                    must=[
+                        FieldCondition(
+                            key="client_id",
+                            match=MatchValue(value=request.tenant_id),
+                        ),
+                        FieldCondition(
+                            key="ai_enabled",
+                            match=MatchValue(value=True),
+                        ),
+                    ],
+                    must_not=[
+                        FieldCondition(
+                            key="record_type",
+                            match=MatchValue(value="file"),
+                        )
+                    ],
                 )
+                if settings.HYBRID_SEARCH_ENABLED:
+                    private_results = await vector_service.hybrid_search(
+                        collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                        query_text=request.query,
+                        query_embedding=query_vector,
+                        tenant_filter=private_filter,
+                        limit=private_limit,
+                    )
+                else:
+                    private_results = await vector_service.search_silo(
+                        collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                        query_vector=query_vector,
+                        tenant_id=request.tenant_id,
+                        limit=private_limit,
+                        require_ai_enabled=True,  # CRITICAL: Only retrieve files with AI Memory enabled
+                    )
             except:
                 private_results = []
             try:
@@ -510,16 +785,57 @@ async def chat(
                             key="is_global",
                             match=MatchValue(value=True),
                         )
-                    ]
+                    ],
+                    must_not=[
+                        FieldCondition(
+                            key="record_type",
+                            match=MatchValue(value="file"),
+                        )
+                    ],
                 )
-                global_results = await vector_service.search_global(
-                    collection_name=settings.QDRANT_COLLECTION_TIER_1,
-                    query_vector=query_vector,
-                    limit=global_limit,
-                    filter=global_filter,  # SECURITY: Always filter by is_global=True
-                )
+                if settings.HYBRID_SEARCH_ENABLED:
+                    global_results = await vector_service.hybrid_search(
+                        collection_name=settings.QDRANT_COLLECTION_TIER_1,
+                        query_text=request.query,
+                        query_embedding=query_vector,
+                        tenant_filter=global_filter,
+                        limit=global_limit,
+                    )
+                else:
+                    global_results = await vector_service.search_global(
+                        collection_name=settings.QDRANT_COLLECTION_TIER_1,
+                        query_vector=query_vector,
+                        limit=global_limit,
+                        filter=global_filter,  # SECURITY: Always filter by is_global=True
+                    )
             except:
                 global_results = []
+
+    # Step B2: Optional LLM reranking over hybrid candidates.
+    if settings.RERANK_ENABLED:
+        combined_candidates = private_results + global_results
+        ranked_ids = await rerank_candidates(
+            query=request.query,
+            candidates=combined_candidates,
+            top_k=rerank_top_k,
+        )
+        if ranked_ids:
+            private_results, global_results = _apply_rerank_order(
+                private_results=private_results,
+                global_results=global_results,
+                ranked_ids=ranked_ids,
+            )
+            private_results = private_results[:rerank_top_k]
+            remaining = max(0, rerank_top_k - len(private_results))
+            global_results = global_results[:remaining]
+        else:
+            # Fallback to existing hybrid order if reranking fails.
+            private_results = private_results[:target_private_limit]
+            global_results = global_results[:target_global_limit]
+    else:
+        # Keep standard retrieval caps when reranking is disabled.
+        private_results = private_results[:target_private_limit]
+        global_results = global_results[:target_global_limit]
 
     # Step C: Fetch chat history if session_id provided
     chat_history: List[Dict[str, str]] = []
@@ -546,6 +862,7 @@ async def chat(
     )
     context = _format_rag_context(private_results, global_results, graph_results, file_manifest)
     total_sources = len(private_results) + len(global_results) + (1 if graph_results else 0)
+    source_items = _build_sources_payload(private_results, global_results)
 
     # Step E: Build system prompt with persona injection and formatting rules
     mode_instruction = (
@@ -701,6 +1018,7 @@ Context Data:
         
         if not response_text:
             raise RuntimeError("Failed to extract text from model response.")
+        response_text = _validate_and_sanitize_quotes(response_text, private_results, global_results)
 
     except Exception as exc:
         raise HTTPException(
@@ -734,7 +1052,31 @@ Context Data:
         response=response_text,
         model_used=model_name,
         sources_count=total_sources,
+        sources=source_items,
     )
+
+
+@router.get("/riley/index-summary", response_model=RileyIndexSummaryResponse)
+async def get_riley_index_summary(
+    http_request: Request,
+    tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
+    current_user: Dict = Depends(verify_clerk_token),
+) -> RileyIndexSummaryResponse:
+    """Campaign/global document indexing summary used for Riley trust visibility."""
+    user_id = current_user.get("id", "unknown")
+    await check_tenant_membership(user_id, tenant_id, http_request)
+
+    settings = get_settings()
+    collection_name = (
+        settings.QDRANT_COLLECTION_TIER_1
+        if tenant_id == "global"
+        else settings.QDRANT_COLLECTION_TIER_2
+    )
+    summary = await vector_service.get_index_summary(
+        collection_name=collection_name,
+        tenant_id=tenant_id,
+    )
+    return RileyIndexSummaryResponse(**summary)
 
 
 @router.get("/riley/conversations", response_model=RileyConversationsListResponse)

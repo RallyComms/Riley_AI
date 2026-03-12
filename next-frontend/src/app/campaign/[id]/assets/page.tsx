@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useParams } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
 import { Upload, Loader2 } from "lucide-react";
@@ -11,6 +11,15 @@ import { RenameAssetModal } from "@app/components/campaign/RenameAssetModal";
 import { DeleteFileModal } from "@app/components/campaign/DeleteFileModal";
 import { PromoteModal } from "@app/components/campaign/PromoteModal";
 import { apiFetch } from "@app/lib/api";
+import { cn } from "@app/lib/utils";
+
+const MAX_UPLOAD_BATCH_SIZE = 10;
+
+type UploadStatusItem = {
+  fileName: string;
+  status: "pending" | "uploading" | "queued" | "failed";
+  message?: string;
+};
 
 // Helper function to determine if file type supports AI processing
 function isAISupportedType(type: Asset["type"]): boolean {
@@ -121,12 +130,6 @@ function getFileTypeFromExtension(filename: string): Asset["type"] {
   return "pdf"; // Default
 }
 
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 export default function CampaignAssetsPage() {
   const params = useParams();
   const { getToken } = useAuth();
@@ -138,7 +141,16 @@ export default function CampaignAssetsPage() {
   const [renamingAsset, setRenamingAsset] = useState<Asset | null>(null);
   const [deletingAsset, setDeletingAsset] = useState<Asset | null>(null);
   const [promotingAsset, setPromotingAsset] = useState<Asset | null>(null);
+  const [uploadStatuses, setUploadStatuses] = useState<UploadStatusItem[]>([]);
+  const [toast, setToast] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const showToast = useCallback((kind: "success" | "error", message: string) => {
+    setToast({ kind, message });
+    window.setTimeout(() => {
+      setToast((current) => (current?.message === message ? null : current));
+    }, 3200);
+  }, []);
 
   // Fetch files from backend - reusable function
   const fetchFiles = async () => {
@@ -175,6 +187,7 @@ export default function CampaignAssetsPage() {
           previewType: previewType ?? undefined,
           previewStatus: file.preview_status ?? undefined,
           previewError: file.preview_error ?? undefined,
+          ingestionStatus: file.ingestion_status ?? undefined,
           tags: file.tags || [], // Use tags from backend
           uploadDate: new Date(file.date).toISOString().split("T")[0],
           uploader: "System",
@@ -207,20 +220,27 @@ export default function CampaignAssetsPage() {
   };
 
   const handleFileSelect = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
+    const selectedFiles = Array.from(event.target.files || []);
+    if (selectedFiles.length === 0) return;
+
+    if (selectedFiles.length > MAX_UPLOAD_BATCH_SIZE) {
+      showToast("error", `You can upload up to ${MAX_UPLOAD_BATCH_SIZE} files at once.`);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
 
     setIsUploading(true);
-    const fileType = getFileTypeFromExtension(file.name);
-    const fileSize = formatFileSize(file.size);
+    setUploadStatuses(selectedFiles.map((file) => ({ fileName: file.name, status: "pending" })));
 
-    // Create FormData for multipart/form-data upload
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("tenant_id", campaignId); // Use actual campaign ID from URL
-    formData.append("tags", ""); // Empty tags - user will add tags via UI
-
-    const uploadFile = async (overwrite: boolean = false): Promise<{ id: string; url: string; filename: string; type?: string }> => {
+    const uploadFile = async (
+      file: File,
+      batchSize: number,
+      overwrite: boolean = false
+    ): Promise<{ id: string; url: string; filename: string; type?: string }> => {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("tenant_id", campaignId); // Use actual campaign ID from URL
+      formData.append("tags", ""); // Empty tags - user will add tags via UI
       const token = await getToken();
       if (!token) {
         throw new Error("Authentication required");
@@ -231,37 +251,65 @@ export default function CampaignAssetsPage() {
         token,
         method: "POST",
         body: formData,
+        headers: {
+          "X-Upload-Batch-Size": String(batchSize),
+        },
       });
       return result;
     };
 
     try {
-      // Try upload
-      let result: { id: string; url: string; filename: string; type?: string };
-      
-      try {
-        result = await uploadFile(false);
-      } catch (error) {
-        // Handle 409 Conflict (file exists)
-        const errorMessage = error instanceof Error ? error.message : "Upload failed";
-        if (errorMessage.includes("409")) {
-          const shouldOverwrite = window.confirm(
-            `File "${file.name}" already exists. Overwrite?`
+      for (const file of selectedFiles) {
+        setUploadStatuses((prev) =>
+          prev.map((item) =>
+            item.fileName === file.name
+              ? { ...item, status: "uploading", message: "Uploading..." }
+              : item
+          )
+        );
+
+        try {
+          await uploadFile(file, selectedFiles.length, false);
+          setUploadStatuses((prev) =>
+            prev.map((item) =>
+              item.fileName === file.name
+                ? { ...item, status: "queued", message: "Indexing queued" }
+                : item
+            )
           );
-          
-          if (shouldOverwrite) {
-            // Retry with overwrite=true
-            result = await uploadFile(true);
-          } else {
-            setIsUploading(false);
-            if (fileInputRef.current) {
-              fileInputRef.current.value = "";
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : "Upload failed";
+          if (errorMessage.includes("409")) {
+            const shouldOverwrite = window.confirm(
+              `File "${file.name}" already exists. Overwrite?`
+            );
+            if (shouldOverwrite) {
+              await uploadFile(file, selectedFiles.length, true);
+              setUploadStatuses((prev) =>
+                prev.map((item) =>
+                  item.fileName === file.name
+                    ? { ...item, status: "queued", message: "Indexing queued" }
+                    : item
+                )
+              );
+            } else {
+              setUploadStatuses((prev) =>
+                prev.map((item) =>
+                  item.fileName === file.name
+                    ? { ...item, status: "failed", message: "Skipped (existing file)" }
+                    : item
+                )
+              );
             }
-            return;
+          } else {
+            setUploadStatuses((prev) =>
+              prev.map((item) =>
+                item.fileName === file.name
+                  ? { ...item, status: "failed", message: errorMessage }
+                  : item
+              )
+            );
           }
-        } else {
-          // Re-throw any other error
-          throw error;
         }
       }
       
@@ -269,14 +317,12 @@ export default function CampaignAssetsPage() {
       // including preview fields (preview_url, preview_status, preview_error) from Qdrant
       // This ensures the UI sees the latest preview state without waiting
       await fetchFiles();
-      
-      setIsUploading(false);
+      showToast("success", `Queued indexing for ${selectedFiles.length} file(s).`);
     } catch (error) {
       console.error("Upload error:", error);
-      // Show error to user (you might want to add a toast notification here)
-      alert(`Upload failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-      setIsUploading(false);
+      showToast("error", `Upload failed: ${error instanceof Error ? error.message : "Unknown error"}`);
     } finally {
+      setIsUploading(false);
       // Reset file input
       if (fileInputRef.current) {
         fileInputRef.current.value = "";
@@ -474,6 +520,7 @@ export default function CampaignAssetsPage() {
                 type="file"
                 className="hidden"
                 accept=".pdf,.docx,.doc,.xlsx,.xls,.pptx,.ppt,.png,.jpg,.jpeg,.webp"
+                multiple
                 onChange={handleFileSelect}
               />
               <button
@@ -490,12 +537,25 @@ export default function CampaignAssetsPage() {
                 ) : (
                   <>
                     <Upload className="h-4 w-4" />
-                    Upload File
+                    Upload Files
                   </>
                 )}
               </button>
             </div>
         </header>
+        {uploadStatuses.length > 0 && (
+          <div className="px-6 py-2 border-b border-white/5 bg-slate-900/40">
+            <div className="text-xs text-zinc-400 mb-1">Upload Progress</div>
+            <div className="space-y-1">
+              {uploadStatuses.map((item) => (
+                <div key={item.fileName} className="text-xs text-zinc-300 flex items-center justify-between">
+                  <span className="truncate max-w-[70%]">{item.fileName}</span>
+                  <span className="text-zinc-400">{item.message || item.status}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Scrollable Content Area */}
         <div className="flex-1 overflow-y-auto p-6">
@@ -605,6 +665,19 @@ export default function CampaignAssetsPage() {
           onPromote={handlePromote}
           fileName={promotingAsset.name}
         />
+      )}
+      {toast && (
+        <div
+          role="status"
+          className={cn(
+            "fixed right-6 top-6 z-50 rounded-md border px-4 py-3 text-sm shadow-lg backdrop-blur-md",
+            toast.kind === "success"
+              ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-100"
+              : "border-red-500/30 bg-red-500/15 text-red-100"
+          )}
+        >
+          {toast.message}
+        </div>
       )}
     </div>
   );

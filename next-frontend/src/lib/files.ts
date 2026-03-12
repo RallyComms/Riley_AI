@@ -19,6 +19,8 @@ export interface BackendFileRecord {
   previewStatus?: "complete" | "failed" | "processing" | "queued" | null;
   preview_error?: string | null;
   previewError?: string | null;
+  ingestion_status?: "uploaded" | "queued" | "processing" | "indexed" | "failed" | "low_text" | "ocr_needed" | null;
+  ingestionStatus?: "uploaded" | "queued" | "processing" | "indexed" | "failed" | "low_text" | "ocr_needed" | null;
 }
 
 export function getFileTypeFromExtension(filename: string): Asset["type"] {
@@ -62,6 +64,7 @@ export function toAsset(
     previewType,
     previewStatus: file.preview_status ?? file.previewStatus ?? null,
     previewError: file.preview_error ?? file.previewError ?? null,
+    ingestionStatus: file.ingestion_status ?? file.ingestionStatus ?? null,
     tags: normalizeTags(file.tags),
     uploadDate: new Date(file.date ?? Date.now()).toISOString().split("T")[0],
     uploader: options?.uploader ?? "System",
