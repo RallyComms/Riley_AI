@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     # Qdrant vector configuration
     # NOTE: Keep as a string for env override; code maps to qdrant_client Distance enum.
     QDRANT_DISTANCE: str = "Cosine"
+    HYBRID_SEARCH_ENABLED: bool = True
+    RERANK_ENABLED: bool = True
+    RERANK_PROVIDER: str = "gemini"
+    RERANK_MODEL: str = "gemini-2.5-pro"
+    RERANK_CANDIDATES: int = 60
+    RERANK_TOP_K: int = 15
+    RERANK_MAX_SNIPPET_TOKENS: int = 180
+    RERANK_MAX_TOTAL_INPUT_TOKENS: int = 6000
+    OPENAI_API_KEY: Optional[str] = None
 
     # Google Cloud Storage configuration
     GCS_BUCKET_NAME: str = "riley-assets-riley-ai-479422"
@@ -54,6 +63,7 @@ class Settings(BaseSettings):
 
     # Upload limits (server-side hard cap)
     MAX_UPLOAD_MB: int = 25
+    MAX_UPLOAD_BATCH_SIZE: int = 10
 
     # Preview generation configuration (Office/HTML -> PDF)
     ENABLE_PREVIEW_GENERATION: bool = True
@@ -67,7 +77,7 @@ class Settings(BaseSettings):
     INGESTION_USE_CLOUD_TASKS: bool = True
     GCP_PROJECT_ID: Optional[str] = None
     INGESTION_TASKS_QUEUE: str = "riley-ingestion-jobs"
-    INGESTION_TASKS_LOCATION: str = "us-central1"
+    INGESTION_TASKS_LOCATION: str = "us-west1"
     INGESTION_WORKER_URL: Optional[str] = None
     INGESTION_WORKER_TOKEN: Optional[str] = None
     INGESTION_TASKS_SERVICE_ACCOUNT_EMAIL: Optional[str] = None

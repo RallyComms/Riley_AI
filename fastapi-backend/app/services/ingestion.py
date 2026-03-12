@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import UploadFile, HTTPException
 from fastapi.concurrency import run_in_threadpool
+from qdrant_client import models as qdrant_models
 from qdrant_client.http.models import PointStruct, Filter, FieldCondition, MatchValue
 from google.cloud import tasks_v2
 from google.api_core.exceptions import AlreadyExists
@@ -20,6 +21,7 @@ from app.services.ocr import is_image_ext
 from app.services.preview import is_office_or_html, generate_pdf_preview
 from app.services.qdrant import vector_service
 from app.services.storage import StorageService
+from app.services.token_utils import estimate_tokens
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -35,8 +37,13 @@ CSV_MAX_ROWS = 300
 CSV_MAX_COLS = 40
 CHUNK_SIZE_TOKENS = 850
 CHUNK_OVERLAP_TOKENS = 120
+MICRO_CHUNK_SIZE_TOKENS = 240
+MICRO_CHUNK_OVERLAP_TOKENS = 48
+MACRO_CHUNK_SIZE_TOKENS = 1100
+MACRO_CHUNK_OVERLAP_TOKENS = 180
 MIN_EXTRACTED_CHARS = 120
 EMBEDDING_COST_PER_1K_TOKENS_USD = 0.0001
+BM25_MODEL = "qdrant/bm25"
 
 TEXT_NATIVE_EXTENSIONS = {
     "pdf", "docx", "doc", "pptx", "ppt", "txt", "md", "rtf",
@@ -581,14 +588,12 @@ async def _generate_embedding(text: str) -> List[float]:
 
 def _estimate_tokens(text: str) -> int:
     """Rough token estimate used for chunk/cost telemetry."""
-    if not text:
-        return 0
-    return max(1, int(len(text) / 4))
+    return estimate_tokens(text)
 
 
-def _chunk_point_uuid(parent_file_id: str, chunk_index: int) -> str:
+def _chunk_point_uuid(parent_file_id: str, chunk_type: str, chunk_index: int) -> str:
     """Deterministic UUID for chunk point IDs (Qdrant-safe)."""
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"riley-chunk:{parent_file_id}:{chunk_index}"))
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"riley-chunk:{parent_file_id}:{chunk_type}:{chunk_index}"))
 
 
 def _clean_extracted_text(text: str) -> str:
@@ -651,6 +656,267 @@ def _chunk_text_by_tokens(text: str, chunk_size_tokens: int = CHUNK_SIZE_TOKENS,
             break
         start += step
     return chunks
+
+
+def _fallback_segments_from_text(text: str, file_type: str) -> List[Dict[str, Any]]:
+    normalized = (text or "").strip()
+    if not normalized:
+        return []
+    parts = [part.strip() for part in re.split(r"\n{2,}", normalized) if part.strip()]
+    if not parts:
+        parts = [normalized]
+    segments: List[Dict[str, Any]] = []
+    for idx, part in enumerate(parts):
+        segments.append(
+            {
+                "text": part,
+                "raw_text": part,
+                "location_type": "paragraph",
+                "location_value": str(idx + 1),
+                "section_path": f"{file_type}:body",
+            }
+        )
+    return segments
+
+
+async def _extract_structured_segments(
+    file_bytes: bytes,
+    filename: str,
+    extracted_text: str,
+) -> List[Dict[str, Any]]:
+    """Best-effort structural segmentation for citation-grade chunk metadata."""
+    file_ext = filename.split(".")[-1].lower() if "." in filename else ""
+
+    try:
+        if file_ext == "pdf":
+            from pypdf import PdfReader
+
+            def _read_pdf_segments() -> List[Dict[str, Any]]:
+                reader = PdfReader(io.BytesIO(file_bytes))
+                result: List[Dict[str, Any]] = []
+                for page_idx, page in enumerate(reader.pages):
+                    text = (page.extract_text() or "").strip()
+                    if not text:
+                        continue
+                    result.append(
+                        {
+                            "text": text,
+                            "raw_text": text,
+                            "location_type": "page",
+                            "location_value": str(page_idx + 1),
+                            "section_path": f"page:{page_idx + 1}",
+                        }
+                    )
+                return result
+
+            segments = await run_in_threadpool(_read_pdf_segments)
+            if segments:
+                return segments
+
+        if file_ext == "pptx":
+            from pptx import Presentation
+
+            def _read_pptx_segments() -> List[Dict[str, Any]]:
+                prs = Presentation(io.BytesIO(file_bytes))
+                result: List[Dict[str, Any]] = []
+                for slide_idx, slide in enumerate(prs.slides):
+                    parts: List[str] = []
+                    for shape in slide.shapes:
+                        if hasattr(shape, "text") and shape.text:
+                            text = shape.text.strip()
+                            if text:
+                                parts.append(text)
+                    if not parts:
+                        continue
+                    merged = "\n".join(parts)
+                    result.append(
+                        {
+                            "text": merged,
+                            "raw_text": merged,
+                            "location_type": "slide",
+                            "location_value": str(slide_idx + 1),
+                            "section_path": f"slide:{slide_idx + 1}",
+                        }
+                    )
+                return result
+
+            segments = await run_in_threadpool(_read_pptx_segments)
+            if segments:
+                return segments
+
+        if file_ext == "docx":
+            from docx import Document
+
+            def _read_docx_segments() -> List[Dict[str, Any]]:
+                doc = Document(io.BytesIO(file_bytes))
+                result: List[Dict[str, Any]] = []
+                heading_stack: List[str] = []
+                para_index = 0
+                for paragraph in doc.paragraphs:
+                    text = (paragraph.text or "").strip()
+                    if not text:
+                        continue
+                    para_index += 1
+                    style_name = (paragraph.style.name or "").strip().lower() if paragraph.style else ""
+                    if style_name.startswith("heading"):
+                        heading_stack.append(text)
+                        heading_stack = heading_stack[-4:]
+                    section_path = " > ".join(heading_stack) if heading_stack else "body"
+                    result.append(
+                        {
+                            "text": text,
+                            "raw_text": text,
+                            "location_type": "paragraph",
+                            "location_value": str(para_index),
+                            "section_path": section_path,
+                        }
+                    )
+                return result
+
+            segments = await run_in_threadpool(_read_docx_segments)
+            if segments:
+                return segments
+
+        if file_ext in {"xlsx"}:
+            from openpyxl import load_workbook
+
+            def _read_xlsx_segments() -> List[Dict[str, Any]]:
+                wb = load_workbook(io.BytesIO(file_bytes), data_only=True)
+                result: List[Dict[str, Any]] = []
+                for sheet_name in wb.sheetnames[:XLSX_MAX_SHEETS]:
+                    sheet = wb[sheet_name]
+                    for row_idx, row in enumerate(sheet.iter_rows(values_only=True), start=1):
+                        if row_idx > XLSX_MAX_ROWS:
+                            break
+                        values = [str(v) for v in row[:XLSX_MAX_COLS] if v is not None and str(v).strip()]
+                        if not values:
+                            continue
+                        text = ", ".join(values)
+                        result.append(
+                            {
+                                "text": text,
+                                "raw_text": text,
+                                "location_type": "sheet_row",
+                                "location_value": f"{sheet_name}:{row_idx}",
+                                "section_path": sheet_name,
+                            }
+                        )
+                return result
+
+            segments = await run_in_threadpool(_read_xlsx_segments)
+            if segments:
+                return segments
+
+        if file_ext in {"csv", "tsv"}:
+            delimiter = "," if file_ext == "csv" else "\t"
+
+            def _read_csv_segments() -> List[Dict[str, Any]]:
+                decoded = file_bytes.decode("utf-8", errors="ignore")
+                stream = io.StringIO(decoded)
+                reader = csv.reader(stream, delimiter=delimiter)
+                result: List[Dict[str, Any]] = []
+                for row_idx, row in enumerate(reader, start=1):
+                    if row_idx > CSV_MAX_ROWS:
+                        break
+                    values = [str(v) for v in row[:CSV_MAX_COLS] if str(v).strip()]
+                    if not values:
+                        continue
+                    text = ", ".join(values)
+                    result.append(
+                        {
+                            "text": text,
+                            "raw_text": text,
+                            "location_type": "table_row",
+                            "location_value": str(row_idx),
+                            "section_path": "table",
+                        }
+                    )
+                return result
+
+            segments = await run_in_threadpool(_read_csv_segments)
+            if segments:
+                return segments
+
+    except Exception as exc:
+        logger.warning("structured_segment_extraction_failed filename=%s error=%s", filename, exc)
+
+    return _fallback_segments_from_text(extracted_text, file_ext or "unknown")
+
+
+def _prepare_segments_for_chunking(segments: List[Dict[str, Any]]) -> Tuple[str, List[Dict[str, Any]]]:
+    prepared: List[Dict[str, Any]] = []
+    merged_parts: List[str] = []
+    cursor = 0
+
+    for segment in segments:
+        raw_text = str(segment.get("raw_text") or segment.get("text") or "")
+        cleaned = _clean_extracted_text(raw_text)
+        if not cleaned:
+            continue
+        if merged_parts:
+            merged_parts.append("\n\n")
+            cursor += 2
+        char_start = cursor
+        merged_parts.append(cleaned)
+        cursor += len(cleaned)
+        char_end = cursor
+        prepared.append(
+            {
+                "text": cleaned,
+                "raw_text": raw_text,
+                "location_type": str(segment.get("location_type") or "paragraph"),
+                "location_value": str(segment.get("location_value") or ""),
+                "section_path": str(segment.get("section_path") or ""),
+                "char_start": char_start,
+                "char_end": char_end,
+            }
+        )
+
+    return "".join(merged_parts), prepared
+
+
+def _chunk_text_with_offsets(
+    text: str,
+    *,
+    chunk_size_tokens: int,
+    overlap_tokens: int,
+) -> List[Dict[str, Any]]:
+    matches = list(re.finditer(r"\S+", text))
+    if not matches:
+        return []
+    chunks: List[Dict[str, Any]] = []
+    step = max(1, chunk_size_tokens - overlap_tokens)
+    start_idx = 0
+    while start_idx < len(matches):
+        end_idx = min(len(matches), start_idx + chunk_size_tokens)
+        char_start = matches[start_idx].start()
+        char_end = matches[end_idx - 1].end()
+        chunk_text = text[char_start:char_end].strip()
+        if chunk_text:
+            chunks.append(
+                {
+                    "text": chunk_text,
+                    "char_start": char_start,
+                    "char_end": char_end,
+                }
+            )
+        if end_idx >= len(matches):
+            break
+        start_idx += step
+    return chunks
+
+
+def _best_segment_for_span(span_start: int, span_end: int, segments: List[Dict[str, Any]]) -> Dict[str, Any]:
+    best: Dict[str, Any] = {}
+    best_overlap = -1
+    for segment in segments:
+        seg_start = int(segment.get("char_start") or 0)
+        seg_end = int(segment.get("char_end") or 0)
+        overlap = max(0, min(span_end, seg_end) - max(span_start, seg_start))
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best = segment
+    return best
 
 
 async def _delete_chunk_points(collection_name: str, parent_file_id: str) -> None:
@@ -864,8 +1130,11 @@ async def _run_ingestion_pipeline(
             points=[point_id],
         )
 
-        extracted_text = await extract_text(file_bytes, filename)
-        cleaned_text = _clean_extracted_text(extracted_text)[:MAX_CHARS_TOTAL]
+        raw_text = await extract_text(file_bytes, filename)
+        structured_segments = await _extract_structured_segments(file_bytes, filename, raw_text)
+        merged_cleaned_text, prepared_segments = _prepare_segments_for_chunking(structured_segments)
+        cleaned_text = _clean_extracted_text(merged_cleaned_text or raw_text)[:MAX_CHARS_TOTAL]
+        raw_text_capped = (raw_text or "")[:MAX_CHARS_TOTAL]
         quality_status, quality_reason = _assess_extraction_quality(cleaned_text, filename, file_size)
 
         if quality_status != "indexed":
@@ -891,6 +1160,8 @@ async def _run_ingestion_pipeline(
                     "preview_type": preview_type,
                     "preview_status": preview_status,
                     "preview_error": preview_error,
+                    "raw_content": raw_text_capped,
+                    "cleaned_content": cleaned_text[:MAX_CHARS_TOTAL],
                     "content": cleaned_text[:MAX_CHARS_TOTAL],
                     "content_preview": cleaned_text[:CONTENT_PREVIEW_LENGTH],
                     "ai_enabled": False,
@@ -901,6 +1172,8 @@ async def _run_ingestion_pipeline(
                     "embedding_model": settings.EMBEDDING_MODEL,
                     "embedding_tokens_estimate": 0,
                     "embedding_cost_estimate_usd": 0.0,
+                    "bm25_enabled": False,
+                    "chunk_profiles": {"micro": 0, "macro": 0},
                     "processing_duration_ms": duration_ms,
                     "ingestion_job_status": quality_status if job_id else None,
                     "ingestion_job_completed_at": completed_at if job_id else None,
@@ -916,53 +1189,114 @@ async def _run_ingestion_pipeline(
             )
             return
 
-        chunks = _chunk_text_by_tokens(cleaned_text)
-        if not chunks:
-            chunks = [cleaned_text[:MAX_CHARS_TOTAL]]
+        micro_chunks = _chunk_text_with_offsets(
+            cleaned_text,
+            chunk_size_tokens=MICRO_CHUNK_SIZE_TOKENS,
+            overlap_tokens=MICRO_CHUNK_OVERLAP_TOKENS,
+        )
+        macro_chunks = _chunk_text_with_offsets(
+            cleaned_text,
+            chunk_size_tokens=MACRO_CHUNK_SIZE_TOKENS,
+            overlap_tokens=MACRO_CHUNK_OVERLAP_TOKENS,
+        )
+        if not micro_chunks:
+            micro_chunks = [{"text": cleaned_text[:MAX_CHARS_TOTAL], "char_start": 0, "char_end": len(cleaned_text[:MAX_CHARS_TOTAL])}]
+        if not macro_chunks:
+            macro_chunks = [{"text": cleaned_text[:MAX_CHARS_TOTAL], "char_start": 0, "char_end": len(cleaned_text[:MAX_CHARS_TOTAL])}]
 
         await _delete_chunk_points(collection_name, point_id)
 
-        chunk_points: List[PointStruct] = []
+        chunk_rows: List[Dict[str, Any]] = []
         total_tokens = 0
-        for chunk_idx, chunk_text in enumerate(chunks):
-            vector = await _generate_embedding(chunk_text)
-            token_estimate = _estimate_tokens(chunk_text)
-            total_tokens += token_estimate
-            point_uuid = _chunk_point_uuid(point_id, chunk_idx)
-            chunk_payload: Dict[str, Any] = {
-                "record_type": "chunk",
-                "parent_file_id": point_id,
-                "chunk_id": f"{point_id}::chunk::{chunk_idx}",
-                "chunk_index": chunk_idx,
-                "filename": filename,
-                "file_type": file_type,
-                "type": file_type,
-                "client_id": None if is_global else tenant_id,
-                "is_global": is_global,
-                "tenant_id": tenant_id,
-                "url": file_url,
-                "tags": tags,
-                "ai_enabled": True,
-                "ingestion_status": "indexed",
-                "text": chunk_text,
-                "content": chunk_text,
-                "content_preview": chunk_text[:CONTENT_PREVIEW_LENGTH],
-                "upload_date": upload_date,
-                "uploaded_at": upload_date,
-                "chunk_token_estimate": token_estimate,
-            }
-            chunk_points.append(
-                PointStruct(
-                    id=point_uuid,
-                    vector=vector,
-                    payload=chunk_payload,
+        bm25_available = True
+        for chunk_type, chunk_list in (("micro", micro_chunks), ("macro", macro_chunks)):
+            for chunk_idx, chunk in enumerate(chunk_list):
+                chunk_text = str(chunk.get("text") or "").strip()
+                if not chunk_text:
+                    continue
+                vector = await _generate_embedding(chunk_text)
+                token_estimate = _estimate_tokens(chunk_text)
+                total_tokens += token_estimate
+                char_start = int(chunk.get("char_start") or 0)
+                char_end = int(chunk.get("char_end") or len(chunk_text))
+                best_segment = _best_segment_for_span(char_start, char_end, prepared_segments)
+                point_uuid = _chunk_point_uuid(point_id, chunk_type, chunk_idx)
+                chunk_id = f"{point_id}::chunk::{chunk_type}::{chunk_idx}"
+                chunk_payload: Dict[str, Any] = {
+                    "record_type": "chunk",
+                    "parent_file_id": point_id,
+                    "chunk_id": chunk_id,
+                    "chunk_type": chunk_type,
+                    "chunk_index": chunk_idx,
+                    "filename": filename,
+                    "file_type": file_type,
+                    "type": file_type,
+                    "client_id": None if is_global else tenant_id,
+                    "is_global": is_global,
+                    "tenant_id": tenant_id,
+                    "url": file_url,
+                    "tags": tags,
+                    "ai_enabled": True,
+                    "ingestion_status": "indexed",
+                    "text": chunk_text,
+                    "content": chunk_text,
+                    "raw_text": str(best_segment.get("raw_text") or chunk_text),
+                    "content_preview": chunk_text[:CONTENT_PREVIEW_LENGTH],
+                    "upload_date": upload_date,
+                    "uploaded_at": upload_date,
+                    "chunk_token_estimate": token_estimate,
+                    "location_type": str(best_segment.get("location_type") or "unknown"),
+                    "location_value": str(best_segment.get("location_value") or ""),
+                    "section_path": str(best_segment.get("section_path") or ""),
+                    "char_start": char_start,
+                    "char_end": char_end,
+                }
+                chunk_rows.append(
+                    {
+                        "id": point_uuid,
+                        "dense_vector": vector,
+                        "chunk_text": chunk_text,
+                        "payload": chunk_payload,
+                    }
                 )
-            )
 
-        await vector_service.client.upsert(
-            collection_name=collection_name,
-            points=chunk_points,
-        )
+        def _build_chunk_points(include_bm25: bool) -> List[PointStruct]:
+            points: List[PointStruct] = []
+            for row in chunk_rows:
+                payload = dict(row["payload"])
+                payload["bm25_enabled"] = include_bm25
+                vector_payload: Any = row["dense_vector"]
+                if include_bm25:
+                    vector_payload = {
+                        "": row["dense_vector"],
+                        "bm25": qdrant_models.Document(text=row["chunk_text"], model=BM25_MODEL),
+                    }
+                points.append(
+                    PointStruct(
+                        id=row["id"],
+                        vector=vector_payload,
+                        payload=payload,
+                    )
+                )
+            return points
+
+        try:
+            await vector_service.client.upsert(
+                collection_name=collection_name,
+                points=_build_chunk_points(include_bm25=True),
+            )
+        except Exception as bm25_exc:
+            bm25_available = False
+            logger.warning(
+                "bm25_chunk_upsert_failed collection=%s file_id=%s error=%s; falling back to dense-only indexing",
+                collection_name,
+                point_id,
+                bm25_exc,
+            )
+            await vector_service.client.upsert(
+                collection_name=collection_name,
+                points=_build_chunk_points(include_bm25=False),
+            )
 
         duration_ms = int((time.perf_counter() - started) * 1000)
         embedding_cost_estimate = round((total_tokens / 1000.0) * EMBEDDING_COST_PER_1K_TOKENS_USD, 6)
@@ -974,6 +1308,8 @@ async def _run_ingestion_pipeline(
             "url": file_url,
             "is_global": is_global,
             "tags": tags,
+            "raw_content": raw_text_capped,
+            "cleaned_content": cleaned_text[:MAX_CHARS_TOTAL],
             "content": cleaned_text[:MAX_CHARS_TOTAL],
             "content_preview": cleaned_text[:CONTENT_PREVIEW_LENGTH],
             "size": size_str,
@@ -988,10 +1324,15 @@ async def _run_ingestion_pipeline(
             "ingestion_status": "indexed",
             "ingestion_error": None,
             "extracted_char_count": len(cleaned_text),
-            "chunk_count": len(chunk_points),
+            "chunk_count": len(chunk_rows),
             "embedding_model": settings.EMBEDDING_MODEL,
             "embedding_tokens_estimate": total_tokens,
             "embedding_cost_estimate_usd": embedding_cost_estimate,
+            "bm25_enabled": bm25_available,
+            "chunk_profiles": {
+                "micro": len(micro_chunks),
+                "macro": len(macro_chunks),
+            },
             "processing_duration_ms": duration_ms,
         }
         if not is_global:
@@ -1015,7 +1356,7 @@ async def _run_ingestion_pipeline(
             )
         logger.info(
             "ingestion_complete file_id=%s tenant=%s status=indexed chars=%s chunks=%s duration_ms=%s tokens=%s est_cost_usd=%s",
-            point_id, tenant_id, len(cleaned_text), len(chunk_points), duration_ms, total_tokens, embedding_cost_estimate
+            point_id, tenant_id, len(cleaned_text), len(chunk_rows), duration_ms, total_tokens, embedding_cost_estimate
         )
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started) * 1000)
@@ -1028,6 +1369,7 @@ async def _run_ingestion_pipeline(
                 "ingestion_error": str(exc),
                 "processing_duration_ms": duration_ms,
                 "ai_enabled": False,
+                "bm25_enabled": False,
                 "ingestion_job_status": "failed" if job_id else None,
                 "ingestion_job_completed_at": completed_at if job_id else None,
                 "ingestion_job_error_message": str(exc) if job_id else None,
@@ -1148,6 +1490,8 @@ async def process_upload(
             "upload_date": upload_date,
             "uploaded_at": upload_date,
             "ai_enabled": False,
+            "raw_content": "",
+            "cleaned_content": "",
             "content": "",
             "content_preview": "",
             "ingestion_status": ingestion_status,
@@ -1157,6 +1501,8 @@ async def process_upload(
             "embedding_model": settings.EMBEDDING_MODEL,
             "embedding_tokens_estimate": 0,
             "embedding_cost_estimate_usd": 0.0,
+            "chunk_profiles": {"micro": 0, "macro": 0},
+            "bm25_enabled": False,
             "preview_url": preview_url,
             "preview_type": preview_type,
             "preview_status": preview_status,
