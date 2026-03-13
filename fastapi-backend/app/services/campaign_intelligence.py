@@ -391,6 +391,55 @@ def _aggregate_campaign_intelligence(
     docs_analyzed = len(docs)
     docs_failed = max(0, indexed_total - docs_analyzed)
     partial_recompute = docs_failed > 0
+    coverage_ratio = round((docs_analyzed / indexed_total), 4) if indexed_total > 0 else 0.0
+    degraded_docs = 0
+    full_fidelity_docs = 0
+    for doc in docs:
+        fidelity = str(doc.get("analysis_fidelity_level") or "").strip().lower()
+        if not fidelity:
+            fidelity = "unknown"
+        reduced = bool(doc.get("analysis_context_reduction_applied"))
+        if fidelity in {"full"} and not reduced:
+            full_fidelity_docs += 1
+        else:
+            degraded_docs += 1
+    degraded_ratio = round((degraded_docs / docs_analyzed), 4) if docs_analyzed > 0 else 0.0
+
+    if docs_analyzed <= 0:
+        input_completeness_status = "none"
+        input_completeness_note = (
+            "Campaign intelligence is generated without completed document-intelligence inputs "
+            "(0 analyzed documents). Results should be treated as incomplete."
+        )
+    elif partial_recompute:
+        input_completeness_status = "partial"
+        input_completeness_note = (
+            f"Campaign intelligence uses partial inputs: analyzed {docs_analyzed}/{indexed_total} indexed documents. "
+            "Some document-level analyses are missing (failed or still processing)."
+        )
+    else:
+        input_completeness_status = "complete"
+        input_completeness_note = (
+            f"Campaign intelligence covers all indexed documents ({docs_analyzed}/{indexed_total})."
+        )
+    if docs_analyzed <= 0:
+        input_quality_status = "unknown"
+        input_quality_note = "No completed document-intelligence analyses are available."
+    elif degraded_docs <= 0:
+        input_quality_status = "full_fidelity"
+        input_quality_note = "All analyzed documents were processed at full fidelity without context reduction."
+    elif degraded_ratio >= 0.6:
+        input_quality_status = "degraded_fidelity"
+        input_quality_note = (
+            f"{degraded_docs}/{docs_analyzed} analyzed documents used reduced-context document intelligence. "
+            "Campaign synthesis should be treated as materially degraded until fuller document analyses complete."
+        )
+    else:
+        input_quality_status = "mixed_fidelity"
+        input_quality_note = (
+            f"{degraded_docs}/{docs_analyzed} analyzed documents used reduced-context document intelligence. "
+            "Campaign synthesis should account for potential evidence compression."
+        )
 
     return {
         "campaign_theme_clusters": theme_clusters,
@@ -408,6 +457,14 @@ def _aggregate_campaign_intelligence(
         "docs_analyzed": docs_analyzed,
         "docs_failed": docs_failed,
         "partial_recompute": partial_recompute,
+        "doc_intel_coverage_ratio": coverage_ratio,
+        "input_completeness_status": input_completeness_status,
+        "input_completeness_note": input_completeness_note,
+        "doc_intel_full_fidelity_docs": full_fidelity_docs,
+        "doc_intel_degraded_docs": degraded_docs,
+        "doc_intel_degraded_ratio": degraded_ratio,
+        "input_quality_status": input_quality_status,
+        "input_quality_note": input_quality_note,
     }
 
 
@@ -534,6 +591,14 @@ async def run_campaign_intelligence_job(
             docs_analyzed=aggregate["docs_analyzed"],
             docs_failed=aggregate["docs_failed"],
             partial_recompute=aggregate["partial_recompute"],
+            doc_intel_coverage_ratio=aggregate["doc_intel_coverage_ratio"],
+            input_completeness_status=aggregate["input_completeness_status"],
+            input_completeness_note=aggregate["input_completeness_note"],
+            doc_intel_full_fidelity_docs=aggregate["doc_intel_full_fidelity_docs"],
+            doc_intel_degraded_docs=aggregate["doc_intel_degraded_docs"],
+            doc_intel_degraded_ratio=aggregate["doc_intel_degraded_ratio"],
+            input_quality_status=aggregate["input_quality_status"],
+            input_quality_note=aggregate["input_quality_note"],
         )
         await graph.update_riley_campaign_intelligence_job(
             job_id=job_id,
@@ -542,13 +607,16 @@ async def run_campaign_intelligence_job(
             error_message=None,
         )
         logger.info(
-            "campaign_intel_complete tenant=%s job_id=%s version=%s docs_total=%s docs_analyzed=%s docs_failed=%s",
+            "campaign_intel_complete tenant=%s job_id=%s version=%s docs_total=%s docs_analyzed=%s docs_failed=%s "
+            "degraded_docs=%s quality_status=%s",
             tenant_id,
             job_id,
             version,
             aggregate["docs_total"],
             aggregate["docs_analyzed"],
             aggregate["docs_failed"],
+            aggregate["doc_intel_degraded_docs"],
+            aggregate["input_quality_status"],
         )
     except Exception as exc:
         logger.exception("campaign_intel_failed job_id=%s error=%s", job_id, exc)

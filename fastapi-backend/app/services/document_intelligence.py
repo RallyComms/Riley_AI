@@ -273,7 +273,9 @@ async def _load_document_context(
     *,
     collection_name: str,
     file_id: str,
-) -> Tuple[Dict[str, Any], str, int, int]:
+    max_chunks_override: Optional[int] = None,
+    max_chars_override: Optional[int] = None,
+) -> Tuple[Dict[str, Any], str, int, int, Dict[str, Any]]:
     settings = get_settings()
     parent_points = await vector_service.client.retrieve(
         collection_name=collection_name,
@@ -336,14 +338,14 @@ async def _load_document_context(
         )
     )
 
-    max_chunks = max(10, int(settings.RILEY_DOC_INTEL_MAX_CHUNKS))
-    max_chars = max(4000, int(settings.RILEY_DOC_INTEL_MAX_CONTEXT_CHARS))
-    lines: List[str] = []
-    chars_used = 0
-    used_chunks = 0
+    max_chunks = max(10, int(max_chunks_override or settings.RILEY_DOC_INTEL_MAX_CHUNKS))
+    max_chars = max(4000, int(max_chars_override or settings.RILEY_DOC_INTEL_MAX_CONTEXT_CHARS))
+
+    candidate_blocks: List[Dict[str, Any]] = []
+    total_chars_available = 0
+    ocr_available = False
+    vision_available = False
     for payload in chunk_payloads:
-        if used_chunks >= max_chunks:
-            break
         text = str(payload.get("content") or payload.get("text") or "").strip()
         if not text:
             continue
@@ -358,12 +360,139 @@ async def _load_document_context(
         if section_path:
             meta_bits.append(f"section:{section_path}")
         block = f"[{' | '.join(meta_bits)}]\n{text}"
-        if chars_used + len(block) > max_chars:
-            break
-        lines.append(block)
-        chars_used += len(block)
-        used_chunks += 1
+        lower_text = text.lower()
+        has_ocr = bool(payload.get("ocr_text_present")) or "[ocr]" in lower_text
+        has_vision = bool(payload.get("has_visual_content")) or bool(payload.get("vision_caption")) or "[vision]" in lower_text
+        if has_ocr:
+            ocr_available = True
+        if has_vision:
+            vision_available = True
+        candidate_blocks.append(
+            {
+                "payload": payload,
+                "block": block,
+                "length": len(block),
+                "chunk_type": chunk_type,
+                "has_ocr": has_ocr,
+                "has_vision": has_vision,
+                "text": text,
+            }
+        )
+        total_chars_available += len(block)
 
+    total_chunks_available = len(candidate_blocks)
+    if not candidate_blocks:
+        fallback_text = str(
+            parent_payload.get("cleaned_content")
+            or parent_payload.get("content")
+            or parent_payload.get("raw_content")
+            or ""
+        ).strip()
+        if not fallback_text:
+            raise RuntimeError("Indexed document had no usable content for analysis")
+        clipped = fallback_text[:max_chars]
+        stats = {
+            "total_chunks_available": 0,
+            "chunks_analyzed": 1,
+            "total_chars_available": len(fallback_text),
+            "chars_analyzed": len(clipped),
+            "chunks_coverage_ratio": 1.0,
+            "chars_coverage_ratio": round(len(clipped) / max(1, len(fallback_text)), 4),
+            "selection_strategy": "fallback_parent_content",
+            "selection_applied": True,
+            "ocr_content_available": False,
+            "vision_content_available": False,
+            "ocr_content_included": False,
+            "vision_content_included": False,
+        }
+        return parent_payload, f"[document]\n{clipped}", 1, len(clipped), stats
+
+    def _signal_score(item: Dict[str, Any], idx: int, total: int) -> float:
+        payload = item["payload"]
+        text = str(item.get("text") or "")
+        lower = text.lower()
+        score = 0.0
+        if item.get("chunk_type") == "macro":
+            score += 1.5
+        if item.get("has_ocr"):
+            score += 1.0
+        if item.get("has_vision"):
+            score += 1.0
+        if bool(payload.get("major_claims_or_evidence")):
+            score += 1.0
+        if any(token in lower for token in ["recommend", "risk", "opportunit", "strategy", "framing", "tone", "narrative"]):
+            score += 1.2
+        if re.search(r"\b\d+(?:\.\d+)?%?\b", text):
+            score += 0.8
+        if any(token in lower for token in ["table", "chart", "graph", "poll", "budget", "turnout"]):
+            score += 0.9
+        # Lightly prefer distributed anchors (beginning/middle/end) for full-document coverage.
+        if total > 1:
+            rel = idx / max(1, total - 1)
+            score += 0.25 if (rel < 0.18 or 0.42 <= rel <= 0.58 or rel > 0.82) else 0.0
+        return score
+
+    # Start from full-order inclusion; only switch to evidence-preserving selection if needed.
+    selected_indices: List[int] = []
+    chars_used = 0
+    for idx, item in enumerate(candidate_blocks):
+        if len(selected_indices) >= max_chunks:
+            break
+        length = int(item.get("length") or 0)
+        if chars_used + length > max_chars:
+            break
+        selected_indices.append(idx)
+        chars_used += length
+
+    selection_strategy = "full_order"
+    selection_applied = len(selected_indices) < total_chunks_available
+
+    if selection_applied:
+        selection_strategy = "evidence_preserving_selection"
+        # Preserve broad coverage first: beginning/middle/end + quartiles.
+        anchor_positions = [0, 0.25, 0.5, 0.75, 1.0]
+        anchor_indices = {
+            min(total_chunks_available - 1, max(0, int(round((total_chunks_available - 1) * pos))))
+            for pos in anchor_positions
+        }
+        scored_items: List[Tuple[float, int]] = []
+        for idx, item in enumerate(candidate_blocks):
+            scored_items.append((_signal_score(item, idx, total_chunks_available), idx))
+            if item.get("has_ocr") or item.get("has_vision"):
+                anchor_indices.add(idx)
+
+        chosen: set[int] = set()
+        chosen_chars = 0
+        # First, add anchors in natural order.
+        for idx in sorted(anchor_indices):
+            if len(chosen) >= max_chunks:
+                break
+            length = int(candidate_blocks[idx].get("length") or 0)
+            if chosen_chars + length > max_chars:
+                continue
+            chosen.add(idx)
+            chosen_chars += length
+
+        # Then fill by strongest signal.
+        for _, idx in sorted(scored_items, key=lambda x: x[0], reverse=True):
+            if len(chosen) >= max_chunks:
+                break
+            if idx in chosen:
+                continue
+            length = int(candidate_blocks[idx].get("length") or 0)
+            if chosen_chars + length > max_chars:
+                continue
+            chosen.add(idx)
+            chosen_chars += length
+
+        selected_indices = sorted(chosen)
+        chars_used = chosen_chars
+
+    lines = [candidate_blocks[idx]["block"] for idx in selected_indices]
+    used_chunks = len(selected_indices)
+    included_items = [candidate_blocks[idx] for idx in selected_indices]
+    ocr_included = any(bool(item.get("has_ocr")) for item in included_items)
+    vision_included = any(bool(item.get("has_vision")) for item in included_items)
     if not lines:
         fallback_text = str(
             parent_payload.get("cleaned_content")
@@ -376,8 +505,75 @@ async def _load_document_context(
         clipped = fallback_text[:max_chars]
         lines = [f"[document]\n{clipped}"]
         chars_used = len(clipped)
+        used_chunks = 1
+        selection_strategy = "fallback_parent_content"
+        selection_applied = True
 
-    return parent_payload, "\n\n".join(lines), used_chunks, chars_used
+    stats = {
+        "total_chunks_available": total_chunks_available,
+        "chunks_analyzed": used_chunks,
+        "total_chars_available": total_chars_available,
+        "chars_analyzed": chars_used,
+        "chunks_coverage_ratio": round(used_chunks / max(1, total_chunks_available), 4),
+        "chars_coverage_ratio": round(chars_used / max(1, total_chars_available), 4),
+        "selection_strategy": selection_strategy,
+        "selection_applied": bool(selection_applied),
+        "ocr_content_available": bool(ocr_available),
+        "vision_content_available": bool(vision_available),
+        "ocr_content_included": bool(ocr_included),
+        "vision_content_included": bool(vision_included),
+    }
+    return parent_payload, "\n\n".join(lines), used_chunks, chars_used, stats
+
+
+def _is_retryable_doc_intel_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    if "timeout" in name:
+        return True
+    if "ratelimit" in name or "toomanyrequests" in name:
+        return True
+    return (
+        "readtimeout" in message
+        or "read timed out" in message
+        or "timed out" in message
+        or "temporarily unavailable" in message
+        or "status code: 429" in message
+        or "status code: 500" in message
+        or "status code: 502" in message
+        or "status code: 503" in message
+        or "status code: 504" in message
+    )
+
+
+async def _enqueue_campaign_intel_refresh_if_needed(
+    *,
+    settings: Any,
+    graph: Optional[GraphService],
+    tenant_id: str,
+    is_global: bool,
+    trigger_source: str,
+    file_id: str,
+) -> None:
+    if not (settings.RILEY_CAMPAIGN_INTEL_ENABLED and graph is not None and not is_global):
+        return
+    try:
+        from app.services.campaign_intelligence import enqueue_campaign_intelligence_job
+
+        await enqueue_campaign_intelligence_job(
+            graph=graph,
+            tenant_id=tenant_id,
+            requested_by_user_id=None,
+            trigger_source=trigger_source,
+        )
+    except Exception as campaign_exc:
+        logger.warning(
+            "campaign_intel_enqueue_failed file_id=%s tenant=%s trigger=%s error=%s",
+            file_id,
+            tenant_id,
+            trigger_source,
+            campaign_exc,
+        )
 
 
 async def _best_effort_graph_upsert(
@@ -406,6 +602,14 @@ async def _best_effort_graph_upsert(
     major_claims_or_evidence: Optional[List[str]] = None,
     source_chunk_count: Optional[int] = None,
     source_char_count: Optional[int] = None,
+    analysis_fidelity_level: Optional[str] = None,
+    analysis_retry_count_used: Optional[int] = None,
+    analysis_selection_strategy: Optional[str] = None,
+    analysis_context_reduction_applied: Optional[bool] = None,
+    chunks_coverage_ratio: Optional[float] = None,
+    chars_coverage_ratio: Optional[float] = None,
+    ocr_content_included: Optional[bool] = None,
+    vision_content_included: Optional[bool] = None,
 ) -> None:
     if graph is None:
         return
@@ -434,6 +638,14 @@ async def _best_effort_graph_upsert(
             major_claims_or_evidence=major_claims_or_evidence,
             source_chunk_count=source_chunk_count,
             source_char_count=source_char_count,
+            analysis_fidelity_level=analysis_fidelity_level,
+            analysis_retry_count_used=analysis_retry_count_used,
+            analysis_selection_strategy=analysis_selection_strategy,
+            analysis_context_reduction_applied=analysis_context_reduction_applied,
+            chunks_coverage_ratio=chunks_coverage_ratio,
+            chars_coverage_ratio=chars_coverage_ratio,
+            ocr_content_included=ocr_content_included,
+            vision_content_included=vision_content_included,
         )
     except Exception as exc:
         logger.warning(
@@ -476,6 +688,9 @@ async def enqueue_document_intelligence_job(
             "analysis_status": "queued",
             "analysis_error": None,
             "analysis_completed_at": None,
+            "analysis_fidelity_level": "pending",
+            "analysis_selection_strategy": None,
+            "analysis_context_reduction_applied": None,
             "analysis_queue_provider": (
                 "cloud_tasks" if settings.RILEY_DOC_INTEL_USE_CLOUD_TASKS else "inline"
             ),
@@ -533,6 +748,7 @@ async def run_document_intelligence_job(
             "analysis_job_status": "processing",
             "analysis_job_started_at": started_at,
             "analysis_started_at": started_at,
+            "analysis_fidelity_level": "pending",
         },
         points=[file_id],
     )
@@ -547,23 +763,114 @@ async def run_document_intelligence_job(
     )
 
     try:
-        parent_payload, context_text, source_chunk_count, source_char_count = await _load_document_context(
-            collection_name=collection_name,
-            file_id=file_id,
+        retry_attempts = max(0, int(settings.RILEY_DOC_INTEL_RETRY_ATTEMPTS))
+        max_attempts = retry_attempts + 1
+        backoff_seconds = max(0.25, float(settings.RILEY_DOC_INTEL_RETRY_BACKOFF_SECONDS))
+        max_timeout_seconds = max(
+            int(settings.RILEY_DOC_INTEL_TIMEOUT_SECONDS),
+            int(getattr(settings, "RILEY_DOC_INTEL_MAX_TIMEOUT_SECONDS", settings.RILEY_DOC_INTEL_TIMEOUT_SECONDS)),
         )
-        filename = str(parent_payload.get("filename") or file_id)
-        file_type = str(parent_payload.get("file_type") or parent_payload.get("type") or "unknown")
-        prompt = _build_doc_intel_prompt(
-            filename=filename,
-            file_type=file_type,
-            context_text=context_text,
-        )
-        raw_output = await _call_openai_document_intel(
-            prompt=prompt,
-            model_name=settings.RILEY_DOC_INTEL_MODEL,
-            timeout_seconds=settings.RILEY_DOC_INTEL_TIMEOUT_SECONDS,
-        )
+        # Intelligence-first degradation ladder:
+        # - Keep full context for first two attempts.
+        # - Then step down gradually, preserving broad evidence coverage.
+        # - Avoid severe shrink in normal operation; heavy reduction is last resort only.
+        attempt_plan = [
+            {"chunks_scale": 1.00, "chars_scale": 1.00, "timeout_scale": 1.00, "fidelity": "full"},
+            {"chunks_scale": 1.00, "chars_scale": 1.00, "timeout_scale": 1.45, "fidelity": "full"},
+            {"chunks_scale": 0.95, "chars_scale": 0.95, "timeout_scale": 1.85, "fidelity": "lightly_reduced"},
+            {"chunks_scale": 0.90, "chars_scale": 0.90, "timeout_scale": 2.30, "fidelity": "lightly_reduced"},
+            {"chunks_scale": 0.85, "chars_scale": 0.85, "timeout_scale": 2.90, "fidelity": "moderately_reduced"},
+            {"chunks_scale": 0.80, "chars_scale": 0.80, "timeout_scale": 3.60, "fidelity": "moderately_reduced"},
+            {"chunks_scale": 0.72, "chars_scale": 0.72, "timeout_scale": 4.20, "fidelity": "heavily_reduced"},
+        ]
+        base_max_chunks = max(10, int(settings.RILEY_DOC_INTEL_MAX_CHUNKS))
+        base_max_chars = max(4000, int(settings.RILEY_DOC_INTEL_MAX_CONTEXT_CHARS))
+        base_timeout = max(60, int(settings.RILEY_DOC_INTEL_TIMEOUT_SECONDS))
+
+        raw_output: Optional[Dict[str, Any]] = None
+        parent_payload: Dict[str, Any] = {}
+        source_chunk_count = 0
+        source_char_count = 0
+        context_stats: Dict[str, Any] = {}
+        filename = file_id
+        file_type = "unknown"
+        last_exc: Optional[Exception] = None
+        retry_count_used = 0
+        attempt_count_used = 0
+        used_timeout_seconds = base_timeout
+        used_fidelity_level = "unknown"
+
+        for attempt_idx in range(max_attempts):
+            plan = attempt_plan[min(attempt_idx, len(attempt_plan) - 1)]
+            attempt_max_chunks = max(10, int(round(base_max_chunks * float(plan["chunks_scale"]))))
+            attempt_max_chars = max(4000, int(round(base_max_chars * float(plan["chars_scale"]))))
+            used_timeout_seconds = min(
+                max_timeout_seconds,
+                max(base_timeout, int(round(base_timeout * float(plan["timeout_scale"])))),
+            )
+            parent_payload, context_text, source_chunk_count, source_char_count, context_stats = await _load_document_context(
+                collection_name=collection_name,
+                file_id=file_id,
+                max_chunks_override=attempt_max_chunks,
+                max_chars_override=attempt_max_chars,
+            )
+            used_fidelity_level = str(plan["fidelity"])
+            filename = str(parent_payload.get("filename") or file_id)
+            file_type = str(parent_payload.get("file_type") or parent_payload.get("type") or "unknown")
+            prompt = _build_doc_intel_prompt(
+                filename=filename,
+                file_type=file_type,
+                context_text=context_text,
+            )
+            try:
+                raw_output = await _call_openai_document_intel(
+                    prompt=prompt,
+                    model_name=settings.RILEY_DOC_INTEL_MODEL,
+                    timeout_seconds=used_timeout_seconds,
+                )
+                attempt_count_used = attempt_idx + 1
+                retry_count_used = attempt_idx
+                break
+            except Exception as exc:
+                last_exc = exc
+                should_retry = _is_retryable_doc_intel_error(exc) and attempt_idx < retry_attempts
+                logger.warning(
+                    "doc_intel_attempt_failed file_id=%s tenant=%s job_id=%s attempt=%s/%s retryable=%s "
+                    "error_type=%s source_chunks=%s source_chars=%s max_chunks=%s max_chars=%s timeout_s=%s fidelity=%s selection=%s",
+                    file_id,
+                    tenant_id,
+                    job_id,
+                    attempt_idx + 1,
+                    max_attempts,
+                    should_retry,
+                    type(exc).__name__,
+                    source_chunk_count,
+                    source_char_count,
+                    attempt_max_chunks,
+                    attempt_max_chars,
+                    used_timeout_seconds,
+                    used_fidelity_level,
+                    context_stats.get("selection_strategy"),
+                )
+                if not should_retry:
+                    raise
+                await asyncio.sleep(backoff_seconds * (2 ** attempt_idx))
+
+        if raw_output is None:
+            raise RuntimeError(f"Document intelligence retries exhausted: {type(last_exc).__name__ if last_exc else 'UnknownError'}")
+
         normalized = _normalize_analysis(raw_output)
+        chunks_coverage_ratio = float(context_stats.get("chunks_coverage_ratio") or 0.0)
+        chars_coverage_ratio = float(context_stats.get("chars_coverage_ratio") or 0.0)
+        if chunks_coverage_ratio >= 0.98 and chars_coverage_ratio >= 0.98:
+            analysis_fidelity_level = "full"
+        elif chunks_coverage_ratio >= 0.88 and chars_coverage_ratio >= 0.88:
+            analysis_fidelity_level = "lightly_reduced"
+        elif chunks_coverage_ratio >= 0.72 and chars_coverage_ratio >= 0.72:
+            analysis_fidelity_level = "moderately_reduced"
+        else:
+            analysis_fidelity_level = "heavily_reduced"
+
         completed_at = datetime.now().isoformat()
         await vector_service.client.set_payload(
             collection_name=collection_name,
@@ -590,6 +897,20 @@ async def run_document_intelligence_job(
                 "analysis_job_completed_at": completed_at,
                 "analysis_source_chunk_count": source_chunk_count,
                 "analysis_source_char_count": source_char_count,
+                "analysis_total_chunks_available": int(context_stats.get("total_chunks_available") or source_chunk_count),
+                "analysis_total_chars_available": int(context_stats.get("total_chars_available") or source_char_count),
+                "analysis_chunks_coverage_ratio": chunks_coverage_ratio,
+                "analysis_chars_coverage_ratio": chars_coverage_ratio,
+                "analysis_fidelity_level": analysis_fidelity_level,
+                "analysis_retry_count_used": retry_count_used,
+                "analysis_attempt_count_used": max(1, attempt_count_used),
+                "analysis_timeout_seconds_used": used_timeout_seconds,
+                "analysis_selection_strategy": str(context_stats.get("selection_strategy") or "unknown"),
+                "analysis_context_reduction_applied": bool(context_stats.get("selection_applied")),
+                "analysis_ocr_content_available": bool(context_stats.get("ocr_content_available")),
+                "analysis_vision_content_available": bool(context_stats.get("vision_content_available")),
+                "analysis_ocr_content_included": bool(context_stats.get("ocr_content_included")),
+                "analysis_vision_content_included": bool(context_stats.get("vision_content_included")),
             },
             points=[file_id],
         )
@@ -618,44 +939,53 @@ async def run_document_intelligence_job(
             major_claims_or_evidence=normalized["major_claims_or_evidence"],
             source_chunk_count=source_chunk_count,
             source_char_count=source_char_count,
+            analysis_fidelity_level=analysis_fidelity_level,
+            analysis_retry_count_used=retry_count_used,
+            analysis_selection_strategy=str(context_stats.get("selection_strategy") or "unknown"),
+            analysis_context_reduction_applied=bool(context_stats.get("selection_applied")),
+            chunks_coverage_ratio=chunks_coverage_ratio,
+            chars_coverage_ratio=chars_coverage_ratio,
+            ocr_content_included=bool(context_stats.get("ocr_content_included")),
+            vision_content_included=bool(context_stats.get("vision_content_included")),
         )
-        if (
-            settings.RILEY_CAMPAIGN_INTEL_ENABLED
-            and graph is not None
-            and not is_global
-        ):
-            try:
-                from app.services.campaign_intelligence import enqueue_campaign_intelligence_job
-
-                await enqueue_campaign_intelligence_job(
-                    graph=graph,
-                    tenant_id=tenant_id,
-                    requested_by_user_id=None,
-                    trigger_source="doc_indexed",
-                )
-            except Exception as campaign_exc:
-                logger.warning(
-                    "campaign_intel_enqueue_failed file_id=%s tenant=%s error=%s",
-                    file_id,
-                    tenant_id,
-                    campaign_exc,
-                )
+        await _enqueue_campaign_intel_refresh_if_needed(
+            settings=settings,
+            graph=graph,
+            tenant_id=tenant_id,
+            is_global=is_global,
+            trigger_source="doc_intel_complete",
+            file_id=file_id,
+        )
         logger.info(
-            "doc_intel_complete file_id=%s tenant=%s chunks=%s chars=%s",
+            "doc_intel_complete file_id=%s tenant=%s chunks=%s/%s chars=%s/%s fidelity=%s selection=%s "
+            "ocr_included=%s vision_included=%s model=%s timeout_s=%s retries=%s",
             file_id,
             tenant_id,
             source_chunk_count,
+            int(context_stats.get("total_chunks_available") or source_chunk_count),
             source_char_count,
+            int(context_stats.get("total_chars_available") or source_char_count),
+            analysis_fidelity_level,
+            context_stats.get("selection_strategy"),
+            bool(context_stats.get("ocr_content_included")),
+            bool(context_stats.get("vision_content_included")),
+            settings.RILEY_DOC_INTEL_MODEL,
+            used_timeout_seconds,
+            retry_count_used,
         )
     except Exception as exc:
         completed_at = datetime.now().isoformat()
         error_message = f"{type(exc).__name__}: {exc}"
         logger.exception(
-            "doc_intel_failed file_id=%s tenant=%s job_id=%s error=%s",
+            "doc_intel_failed file_id=%s tenant=%s job_id=%s error=%s timeout_s=%s retries=%s max_chunks=%s max_chars=%s",
             file_id,
             tenant_id,
             job_id,
             exc,
+            int(settings.RILEY_DOC_INTEL_TIMEOUT_SECONDS),
+            max(0, int(settings.RILEY_DOC_INTEL_RETRY_ATTEMPTS)),
+            int(settings.RILEY_DOC_INTEL_MAX_CHUNKS),
+            int(settings.RILEY_DOC_INTEL_MAX_CONTEXT_CHARS),
         )
         await vector_service.client.set_payload(
             collection_name=collection_name,
@@ -665,6 +995,8 @@ async def run_document_intelligence_job(
                 "analysis_error": error_message[:2000],
                 "analysis_job_status": "failed",
                 "analysis_job_completed_at": completed_at,
+                "analysis_fidelity_level": "failed",
+                "analysis_selection_strategy": "none",
             },
             points=[file_id],
         )
@@ -677,4 +1009,12 @@ async def run_document_intelligence_job(
             analysis_started_at=started_at,
             analysis_completed_at=completed_at,
             analysis_error=error_message[:2000],
+        )
+        await _enqueue_campaign_intel_refresh_if_needed(
+            settings=settings,
+            graph=graph,
+            tenant_id=tenant_id,
+            is_global=is_global,
+            trigger_source="doc_intel_failed",
+            file_id=file_id,
         )

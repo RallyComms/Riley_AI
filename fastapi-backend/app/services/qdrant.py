@@ -880,6 +880,21 @@ class VectorService:
                 "ingestion_status": payload.get("ingestion_status"),
                 "extracted_char_count": payload.get("extracted_char_count"),
                 "chunk_count": payload.get("chunk_count"),
+                "analysis_status": payload.get("analysis_status"),
+                "doc_summary_short": payload.get("doc_summary_short"),
+                "key_themes": payload.get("key_themes"),
+                "key_entities": payload.get("key_entities"),
+                "sentiment_overall": payload.get("sentiment_overall"),
+                "tone_labels": payload.get("tone_labels"),
+                "framing_labels": payload.get("framing_labels"),
+                "audience_implications": payload.get("audience_implications"),
+                "persuasion_risks": payload.get("persuasion_risks"),
+                "strategic_opportunities": payload.get("strategic_opportunities"),
+                "major_claims_or_evidence": payload.get("major_claims_or_evidence"),
+                "analysis_fidelity_level": payload.get("analysis_fidelity_level"),
+                "analysis_chunks_coverage_ratio": payload.get("analysis_chunks_coverage_ratio"),
+                "analysis_chars_coverage_ratio": payload.get("analysis_chars_coverage_ratio"),
+                "analysis_context_reduction_applied": payload.get("analysis_context_reduction_applied"),
             })
 
         return files
@@ -979,6 +994,21 @@ class VectorService:
                 "ingestion_status": payload.get("ingestion_status"),
                 "extracted_char_count": payload.get("extracted_char_count"),
                 "chunk_count": payload.get("chunk_count"),
+                "analysis_status": payload.get("analysis_status"),
+                "doc_summary_short": payload.get("doc_summary_short"),
+                "key_themes": payload.get("key_themes"),
+                "key_entities": payload.get("key_entities"),
+                "sentiment_overall": payload.get("sentiment_overall"),
+                "tone_labels": payload.get("tone_labels"),
+                "framing_labels": payload.get("framing_labels"),
+                "audience_implications": payload.get("audience_implications"),
+                "persuasion_risks": payload.get("persuasion_risks"),
+                "strategic_opportunities": payload.get("strategic_opportunities"),
+                "major_claims_or_evidence": payload.get("major_claims_or_evidence"),
+                "analysis_fidelity_level": payload.get("analysis_fidelity_level"),
+                "analysis_chunks_coverage_ratio": payload.get("analysis_chunks_coverage_ratio"),
+                "analysis_chars_coverage_ratio": payload.get("analysis_chars_coverage_ratio"),
+                "analysis_context_reduction_applied": payload.get("analysis_context_reduction_applied"),
             })
 
         return files

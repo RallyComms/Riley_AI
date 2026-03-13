@@ -805,6 +805,14 @@ class GraphService:
         major_claims_or_evidence: Optional[List[str]] = None,
         source_chunk_count: Optional[int] = None,
         source_char_count: Optional[int] = None,
+        analysis_fidelity_level: Optional[str] = None,
+        analysis_retry_count_used: Optional[int] = None,
+        analysis_selection_strategy: Optional[str] = None,
+        analysis_context_reduction_applied: Optional[bool] = None,
+        chunks_coverage_ratio: Optional[float] = None,
+        chars_coverage_ratio: Optional[float] = None,
+        ocr_content_included: Optional[bool] = None,
+        vision_content_included: Optional[bool] = None,
     ) -> None:
         """Persist per-document intelligence artifact in Neo4j."""
         artifact_id = f"{tenant_id}:{file_id}"
@@ -867,7 +875,15 @@ class GraphService:
                     ELSE $major_claims_or_evidence
                 END,
                 d.source_chunk_count = $source_chunk_count,
-                d.source_char_count = $source_char_count
+                d.source_char_count = $source_char_count,
+                d.analysis_fidelity_level = $analysis_fidelity_level,
+                d.analysis_retry_count_used = $analysis_retry_count_used,
+                d.analysis_selection_strategy = $analysis_selection_strategy,
+                d.analysis_context_reduction_applied = $analysis_context_reduction_applied,
+                d.chunks_coverage_ratio = $chunks_coverage_ratio,
+                d.chars_coverage_ratio = $chars_coverage_ratio,
+                d.ocr_content_included = $ocr_content_included,
+                d.vision_content_included = $vision_content_included
             """
             await session.run(
                 query,
@@ -895,6 +911,14 @@ class GraphService:
                 major_claims_or_evidence=major_claims_or_evidence,
                 source_chunk_count=source_chunk_count,
                 source_char_count=source_char_count,
+                analysis_fidelity_level=analysis_fidelity_level,
+                analysis_retry_count_used=analysis_retry_count_used,
+                analysis_selection_strategy=analysis_selection_strategy,
+                analysis_context_reduction_applied=analysis_context_reduction_applied,
+                chunks_coverage_ratio=chunks_coverage_ratio,
+                chars_coverage_ratio=chars_coverage_ratio,
+                ocr_content_included=ocr_content_included,
+                vision_content_included=vision_content_included,
             )
 
     async def create_riley_campaign_intelligence_job(
@@ -1020,6 +1044,14 @@ class GraphService:
         docs_analyzed: int,
         docs_failed: int,
         partial_recompute: bool,
+        doc_intel_coverage_ratio: float,
+        input_completeness_status: str,
+        input_completeness_note: str,
+        doc_intel_full_fidelity_docs: int,
+        doc_intel_degraded_docs: int,
+        doc_intel_degraded_ratio: float,
+        input_quality_status: str,
+        input_quality_note: str,
     ) -> int:
         """Create a versioned campaign intelligence snapshot and return the version."""
         async with self._driver.session() as session:
@@ -1046,7 +1078,15 @@ class GraphService:
                 docs_total: $docs_total,
                 docs_analyzed: $docs_analyzed,
                 docs_failed: $docs_failed,
-                partial_recompute: $partial_recompute
+                partial_recompute: $partial_recompute,
+                doc_intel_coverage_ratio: $doc_intel_coverage_ratio,
+                input_completeness_status: $input_completeness_status,
+                input_completeness_note: $input_completeness_note,
+                doc_intel_full_fidelity_docs: $doc_intel_full_fidelity_docs,
+                doc_intel_degraded_docs: $doc_intel_degraded_docs,
+                doc_intel_degraded_ratio: $doc_intel_degraded_ratio,
+                input_quality_status: $input_quality_status,
+                input_quality_note: $input_quality_note
             })
             RETURN next_version as version
             """
@@ -1070,6 +1110,14 @@ class GraphService:
                 docs_analyzed=docs_analyzed,
                 docs_failed=docs_failed,
                 partial_recompute=partial_recompute,
+                doc_intel_coverage_ratio=doc_intel_coverage_ratio,
+                input_completeness_status=input_completeness_status,
+                input_completeness_note=input_completeness_note,
+                doc_intel_full_fidelity_docs=doc_intel_full_fidelity_docs,
+                doc_intel_degraded_docs=doc_intel_degraded_docs,
+                doc_intel_degraded_ratio=doc_intel_degraded_ratio,
+                input_quality_status=input_quality_status,
+                input_quality_note=input_quality_note,
             )
             record = await result.single()
             return int(record["version"]) if record else 1
@@ -1103,7 +1151,15 @@ class GraphService:
                 s.docs_total as docs_total,
                 s.docs_analyzed as docs_analyzed,
                 s.docs_failed as docs_failed,
-                s.partial_recompute as partial_recompute
+                s.partial_recompute as partial_recompute,
+                s.doc_intel_coverage_ratio as doc_intel_coverage_ratio,
+                s.input_completeness_status as input_completeness_status,
+                s.input_completeness_note as input_completeness_note,
+                s.doc_intel_full_fidelity_docs as doc_intel_full_fidelity_docs,
+                s.doc_intel_degraded_docs as doc_intel_degraded_docs,
+                s.doc_intel_degraded_ratio as doc_intel_degraded_ratio,
+                s.input_quality_status as input_quality_status,
+                s.input_quality_note as input_quality_note
             ORDER BY s.version DESC
             LIMIT 1
             """

@@ -39,6 +39,14 @@ class RileyCampaignIntelligenceResponse(BaseModel):
     docs_analyzed: int
     docs_failed: int
     partial_recompute: bool
+    doc_intel_coverage_ratio: float = 0.0
+    input_completeness_status: str = "unknown"
+    input_completeness_note: str = ""
+    doc_intel_full_fidelity_docs: int = 0
+    doc_intel_degraded_docs: int = 0
+    doc_intel_degraded_ratio: float = 0.0
+    input_quality_status: str = "unknown"
+    input_quality_note: str = ""
 
 
 class RileyCampaignIntelligenceRefreshResponse(BaseModel):
@@ -119,4 +127,12 @@ async def get_campaign_intelligence(
         docs_analyzed=int(snapshot.get("docs_analyzed") or 0),
         docs_failed=int(snapshot.get("docs_failed") or 0),
         partial_recompute=bool(snapshot.get("partial_recompute")),
+        doc_intel_coverage_ratio=float(snapshot.get("doc_intel_coverage_ratio") or 0.0),
+        input_completeness_status=str(snapshot.get("input_completeness_status") or "unknown"),
+        input_completeness_note=str(snapshot.get("input_completeness_note") or ""),
+        doc_intel_full_fidelity_docs=int(snapshot.get("doc_intel_full_fidelity_docs") or 0),
+        doc_intel_degraded_docs=int(snapshot.get("doc_intel_degraded_docs") or 0),
+        doc_intel_degraded_ratio=float(snapshot.get("doc_intel_degraded_ratio") or 0.0),
+        input_quality_status=str(snapshot.get("input_quality_status") or "unknown"),
+        input_quality_note=str(snapshot.get("input_quality_note") or ""),
     )

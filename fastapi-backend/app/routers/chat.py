@@ -427,7 +427,15 @@ def _build_doc_intel_context_block(doc_intel_items: List[Dict[str, Any]]) -> str
         framings = item.get("framing_labels") or []
         opportunities = item.get("strategic_opportunities") or []
         risks = item.get("persuasion_risks") or []
+        fidelity = str(item.get("analysis_fidelity_level") or "unknown").strip()
+        chunks_cov = item.get("analysis_chunks_coverage_ratio")
+        chars_cov = item.get("analysis_chars_coverage_ratio")
         lines.append(f"[[Document Intelligence: {filename}]]")
+        lines.append(f"- fidelity: {fidelity}")
+        if chunks_cov is not None or chars_cov is not None:
+            lines.append(
+                f"- coverage: chunks={float(chunks_cov or 0.0):.2%}, chars={float(chars_cov or 0.0):.2%}"
+            )
         if short_summary:
             lines.append(f"- summary: {short_summary}")
         if themes:
@@ -456,6 +464,43 @@ def _build_campaign_intel_context_block(snapshot: Optional[Dict[str, Any]]) -> s
     framing_distribution = _safe_json_loads(snapshot.get("framing_distribution_json"), {})
     lines: List[str] = ["### 🌐 CAMPAIGN-WIDE INTELLIGENCE"]
     lines.append(f"- snapshot_version: {snapshot.get('version')}")
+    docs_total = int(snapshot.get("docs_total") or 0)
+    docs_analyzed = int(snapshot.get("docs_analyzed") or 0)
+    docs_failed = int(snapshot.get("docs_failed") or 0)
+    coverage_ratio = float(snapshot.get("doc_intel_coverage_ratio") or 0.0)
+    completeness_status = str(snapshot.get("input_completeness_status") or "").strip().lower()
+    completeness_note = str(snapshot.get("input_completeness_note") or "").strip()
+    quality_status = str(snapshot.get("input_quality_status") or "").strip().lower()
+    quality_note = str(snapshot.get("input_quality_note") or "").strip()
+    degraded_docs = int(snapshot.get("doc_intel_degraded_docs") or 0)
+    full_fidelity_docs = int(snapshot.get("doc_intel_full_fidelity_docs") or 0)
+    if docs_total > 0:
+        lines.append(
+            f"- input_coverage: analyzed {docs_analyzed}/{docs_total} indexed docs "
+            f"(coverage={coverage_ratio:.2%}, missing={docs_failed})"
+        )
+    if completeness_status:
+        lines.append(f"- input_completeness_status: {completeness_status}")
+    if completeness_note:
+        lines.append(f"- input_completeness_note: {completeness_note}")
+    if docs_analyzed > 0:
+        lines.append(
+            f"- input_fidelity_mix: full_fidelity_docs={full_fidelity_docs}, degraded_docs={degraded_docs}"
+        )
+    if quality_status:
+        lines.append(f"- input_quality_status: {quality_status}")
+    if quality_note:
+        lines.append(f"- input_quality_note: {quality_note}")
+    if completeness_status in {"partial", "none"}:
+        lines.append(
+            "- caution: campaign intelligence is based on incomplete document-intelligence inputs; "
+            "treat strategic synthesis as provisional."
+        )
+    if quality_status in {"mixed_fidelity", "degraded_fidelity"}:
+        lines.append(
+            "- caution: some document-intelligence inputs were reduced-context; avoid false precision and "
+            "validate high-impact claims against raw evidence."
+        )
     if dominant_narratives:
         lines.append(f"- dominant_narratives: {', '.join(str(x) for x in dominant_narratives)}")
     if opportunities:
