@@ -3,8 +3,8 @@
 import logging
 import os
 from datetime import timedelta
-from typing import List, Optional
-from urllib.parse import urlparse
+from typing import List, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 import google.auth
 import google.auth.transport.requests
@@ -22,6 +22,55 @@ class StorageService:
     """Service for managing file uploads to Google Cloud Storage."""
 
     _client: Optional[storage.Client] = None
+
+    @staticmethod
+    def _canonical_blob_name(raw_name: str) -> str:
+        """Return canonical internal blob name (decoded exactly once)."""
+        candidate = (raw_name or "").strip()
+        if not candidate:
+            raise ValueError("Blob name is empty")
+        # Canonical internal format: no leading slash, URL-decoded once.
+        normalized = unquote(candidate.lstrip("/"))
+        if not normalized.strip():
+            raise ValueError("Blob name is empty after normalization")
+        return normalized
+
+    @staticmethod
+    def _parse_gcs_location(file_url: str, default_bucket: Optional[str] = None) -> Tuple[str, str, str]:
+        """Parse URL/gs URI into (bucket, parsed_blob_name, decoded_blob_name)."""
+        parsed = urlparse((file_url or "").strip())
+        if not parsed.scheme:
+            raise ValueError("Missing URL scheme")
+
+        bucket_name = ""
+        parsed_blob_name = ""
+        netloc = (parsed.netloc or "").strip()
+        path = (parsed.path or "").lstrip("/")
+
+        if parsed.scheme == "gs":
+            bucket_name = netloc
+            parsed_blob_name = path
+        elif "storage.googleapis.com" in netloc:
+            if netloc.endswith(".storage.googleapis.com") and netloc != "storage.googleapis.com":
+                bucket_name = netloc[: -len(".storage.googleapis.com")]
+                parsed_blob_name = path
+            else:
+                parts = path.split("/", 1)
+                bucket_name = parts[0] if parts else ""
+                parsed_blob_name = parts[1] if len(parts) > 1 else ""
+        elif default_bucket and path:
+            bucket_name = default_bucket
+            parsed_blob_name = path
+        else:
+            raise ValueError(f"Unsupported URL format: {file_url}")
+
+        if not bucket_name:
+            raise ValueError("Missing bucket name in storage URL")
+        if not parsed_blob_name:
+            raise ValueError("Missing object path in storage URL")
+
+        decoded_blob_name = StorageService._canonical_blob_name(parsed_blob_name)
+        return bucket_name, parsed_blob_name, decoded_blob_name
 
     @classmethod
     def _get_client(cls) -> storage.Client:
@@ -66,7 +115,8 @@ class StorageService:
         
         try:
             # Create blob
-            blob = bucket.blob(filename)
+            canonical_name = cls._canonical_blob_name(filename)
+            blob = bucket.blob(canonical_name)
             
             # Reset file pointer to beginning to ensure we read it all, 
             # in case it was read previously for text extraction.
@@ -112,7 +162,8 @@ class StorageService:
         bucket = client.bucket(settings.GCS_BUCKET_NAME)
 
         try:
-            blob = bucket.blob(object_name)
+            canonical_name = cls._canonical_blob_name(object_name)
+            blob = bucket.blob(canonical_name)
             blob.upload_from_string(data, content_type=content_type)
             return blob.public_url
         except GoogleCloudError as exc:
@@ -146,7 +197,8 @@ class StorageService:
         settings = get_settings()
         client = cls._get_client()
         bucket = client.bucket(settings.GCS_BUCKET_NAME)
-        blob = bucket.blob(object_name)
+        canonical_name = cls._canonical_blob_name(object_name)
+        blob = bucket.blob(canonical_name)
 
         try:
             # Get default credentials and project
@@ -228,40 +280,41 @@ class StorageService:
         Raises:
             HTTPException: If download fails
         """
-        settings = get_settings()
         client = cls._get_client()
         
         try:
-            # Parse the GCS URL to extract bucket and blob name
-            # Format: https://storage.googleapis.com/bucket-name/blob-name
-            # or: gs://bucket-name/blob-name
-            from urllib.parse import urlparse
-            
-            parsed = urlparse(file_url)
-            
-            if parsed.scheme == "gs":
-                # gs://bucket/path format
-                bucket_name = parsed.netloc
-                blob_name = parsed.path.lstrip("/")
-            else:
-                # https://storage.googleapis.com/bucket/path format
-                # Extract bucket name from hostname or path
-                if "storage.googleapis.com" in parsed.netloc:
-                    # Path format: /bucket-name/blob-path
-                    path_parts = parsed.path.lstrip("/").split("/", 1)
-                    bucket_name = path_parts[0]
-                    blob_name = path_parts[1] if len(path_parts) > 1 else ""
-                else:
-                    raise ValueError(f"Unsupported URL format: {file_url}")
-            
+            bucket_name, parsed_blob_name, decoded_blob_name = cls._parse_gcs_location(file_url)
+            logger.info(
+                "gcs_download_path_resolved original_file_url=%s parsed_blob_name=%s decoded_blob_name=%s bucket=%s",
+                file_url,
+                parsed_blob_name,
+                decoded_blob_name,
+                bucket_name,
+            )
             bucket = client.bucket(bucket_name)
-            blob = bucket.blob(blob_name)
+            blob = bucket.blob(decoded_blob_name)
+            if not blob.exists():
+                raise HTTPException(
+                    status_code=404,
+                    detail=(
+                        "Storage path not found in GCS. "
+                        f"bucket={bucket_name}, parsed_blob_name={parsed_blob_name}, "
+                        f"decoded_blob_name={decoded_blob_name}"
+                    ),
+                )
             
             # Download blob content
             file_content = blob.download_as_bytes()
             
             return file_content
             
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid storage path in file URL '{file_url}': {exc}",
+            ) from exc
+        except HTTPException:
+            raise
         except GoogleCloudError as exc:
             raise HTTPException(
                 status_code=500,
@@ -286,30 +339,40 @@ class StorageService:
         """
         settings = get_settings()
         client = cls._get_client()
-        bucket = client.bucket(settings.GCS_BUCKET_NAME)
         
         try:
-            # Parse filename from URL
-            # URL format: https://storage.googleapis.com/bucket-name/filename.pdf
-            parsed_url = urlparse(file_url)
-            # Extract filename from path (remove leading slash)
-            filename = parsed_url.path.lstrip("/")
-            
-            # Remove bucket name prefix if present in path
-            if filename.startswith(settings.GCS_BUCKET_NAME + "/"):
-                filename = filename[len(settings.GCS_BUCKET_NAME) + 1:]
-            
+            bucket_name, parsed_blob_name, decoded_blob_name = cls._parse_gcs_location(
+                file_url,
+                default_bucket=settings.GCS_BUCKET_NAME,
+            )
+            logger.info(
+                "gcs_delete_path_resolved original_file_url=%s parsed_blob_name=%s decoded_blob_name=%s bucket=%s",
+                file_url,
+                parsed_blob_name,
+                decoded_blob_name,
+                bucket_name,
+            )
+            bucket = client.bucket(bucket_name)
             # Get blob and delete
-            blob = bucket.blob(filename)
+            blob = bucket.blob(decoded_blob_name)
             
             if not blob.exists():
                 raise HTTPException(
                     status_code=404,
-                    detail=f"File not found in GCS: {filename}"
+                    detail=(
+                        "File not found in GCS for storage path. "
+                        f"bucket={bucket_name}, parsed_blob_name={parsed_blob_name}, "
+                        f"decoded_blob_name={decoded_blob_name}"
+                    ),
                 )
             
             blob.delete()
             
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid storage path in file URL '{file_url}': {exc}",
+            ) from exc
         except HTTPException:
             raise
         except GoogleCloudError as exc:

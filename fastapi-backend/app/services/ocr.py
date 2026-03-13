@@ -4,7 +4,7 @@ import json
 import logging
 import uuid
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from fastapi.concurrency import run_in_threadpool
 
@@ -25,19 +25,24 @@ def gcs_uri_from_url(url: str, default_bucket: Optional[str] = None) -> Optional
     parsed = urlparse(url)
     if parsed.scheme == "gs":
         bucket = parsed.netloc
-        name = parsed.path.lstrip("/")
+        name = unquote(parsed.path.lstrip("/"))
         return f"gs://{bucket}/{name}" if bucket and name else None
     if "storage.googleapis.com" in parsed.netloc:
+        netloc = parsed.netloc.strip()
         path = parsed.path.lstrip("/")
+        if netloc.endswith(".storage.googleapis.com") and netloc != "storage.googleapis.com":
+            bucket = netloc[: -len(".storage.googleapis.com")]
+            name = unquote(path)
+            return f"gs://{bucket}/{name}" if bucket and name else None
         if not path:
             return None
         parts = path.split("/", 1)
         if len(parts) == 1 and default_bucket:
-            return f"gs://{default_bucket}/{parts[0]}"
+            return f"gs://{default_bucket}/{unquote(parts[0])}"
         if len(parts) >= 2:
-            return f"gs://{parts[0]}/{parts[1]}"
+            return f"gs://{parts[0]}/{unquote(parts[1])}"
     if default_bucket and parsed.path:
-        return f"gs://{default_bucket}/{parsed.path.lstrip('/')}"
+        return f"gs://{default_bucket}/{unquote(parsed.path.lstrip('/'))}"
     return None
 
 
