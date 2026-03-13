@@ -12,6 +12,10 @@ import { apiFetch, ApiRequestError } from "@app/lib/api";
 import { toAsset } from "@app/lib/files";
 
 const MAX_UPLOAD_BATCH_SIZE = 10;
+const UPLOAD_STATUS_POLL_INTERVAL_MS = 3000;
+const UPLOAD_STATUS_MAX_POLL_MS = 180000;
+const TERMINAL_INGESTION_STATUSES = new Set(["indexed", "partial", "failed", "low_text", "ocr_needed"]);
+const TRANSIENT_INGESTION_STATUSES = new Set(["queued", "processing", "uploaded"]);
 
 type UploadStatusItem = {
   fileName: string;
@@ -87,7 +91,20 @@ export default function MediaPage() {
   const [selectedFile, setSelectedFile] = useState<Asset | null>(null);
   const [toast, setToast] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const [uploadStatuses, setUploadStatuses] = useState<UploadStatusItem[]>([]);
+  const [recentUploadedNames, setRecentUploadedNames] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadPollIntervalRef = useRef<number | null>(null);
+  const uploadPollStartedAtRef = useRef<number | null>(null);
+
+  const normalizeFilename = useCallback((name: string) => name.trim().toLowerCase(), []);
+
+  const stopUploadStatusPolling = useCallback(() => {
+    if (uploadPollIntervalRef.current !== null) {
+      window.clearInterval(uploadPollIntervalRef.current);
+      uploadPollIntervalRef.current = null;
+    }
+    uploadPollStartedAtRef.current = null;
+  }, []);
 
   const showToast = useCallback((kind: "success" | "error", message: string) => {
     setToast({ kind, message });
@@ -97,8 +114,8 @@ export default function MediaPage() {
   }, []);
 
   // Fetch files from backend and filter by Media tag
-  const fetchFiles = useCallback(async () => {
-    if (!campaignId) return;
+  const fetchFiles = useCallback(async (): Promise<Asset[]> => {
+    if (!campaignId) return [];
 
     try {
       const token = await getToken();
@@ -123,9 +140,11 @@ export default function MediaPage() {
         .map((file: any) => toAsset(file, { status: "ready" }));
 
       setAssets(fetchedAssets);
+      return fetchedAssets;
     } catch (error) {
       console.error("Error fetching files:", error);
       setAssets([]);
+      return [];
     } finally {
       setIsLoading(false);
     }
@@ -134,6 +153,61 @@ export default function MediaPage() {
   useEffect(() => {
     fetchFiles();
   }, [fetchFiles]);
+
+  useEffect(() => {
+    return () => {
+      stopUploadStatusPolling();
+    };
+  }, [stopUploadStatusPolling]);
+
+  const areRecentUploadsSettled = useCallback(
+    (latestAssets: Asset[], trackedNames: string[]): boolean => {
+      if (trackedNames.length === 0) return true;
+      const byName = new Map<string, Asset>();
+      for (const asset of latestAssets) {
+        byName.set(normalizeFilename(asset.name), asset);
+      }
+      for (const trackedName of trackedNames) {
+        const asset = byName.get(normalizeFilename(trackedName));
+        if (!asset) return false;
+        const status = String(asset.ingestionStatus || "uploaded").toLowerCase();
+        if (TRANSIENT_INGESTION_STATUSES.has(status)) return false;
+        if (!TERMINAL_INGESTION_STATUSES.has(status)) return false;
+      }
+      return true;
+    },
+    [normalizeFilename]
+  );
+
+  useEffect(() => {
+    if (recentUploadedNames.length === 0) {
+      stopUploadStatusPolling();
+      return;
+    }
+    if (uploadPollIntervalRef.current !== null) return;
+
+    uploadPollStartedAtRef.current = Date.now();
+
+    const pollOnce = async () => {
+      const latestAssets = await fetchFiles();
+      if (areRecentUploadsSettled(latestAssets, recentUploadedNames)) {
+        stopUploadStatusPolling();
+        setRecentUploadedNames([]);
+        return;
+      }
+      if (
+        uploadPollStartedAtRef.current !== null &&
+        Date.now() - uploadPollStartedAtRef.current > UPLOAD_STATUS_MAX_POLL_MS
+      ) {
+        stopUploadStatusPolling();
+      }
+    };
+
+    void pollOnce();
+    uploadPollIntervalRef.current = window.setInterval(() => {
+      void pollOnce();
+    }, UPLOAD_STATUS_POLL_INTERVAL_MS);
+  }, [areRecentUploadsSettled, fetchFiles, recentUploadedNames, stopUploadStatusPolling]);
 
   const handleUploadClick = () => {
     if (!isUploading) {
@@ -168,6 +242,7 @@ export default function MediaPage() {
         throw new Error("Authentication required");
       }
 
+      const successfulUploads: string[] = [];
       for (const file of files) {
         setUploadStatuses((prev) =>
           prev.map((item) =>
@@ -193,6 +268,7 @@ export default function MediaPage() {
             body: formData,
             headers: { "X-Upload-Batch-Size": String(files.length) },
           });
+          successfulUploads.push(file.name);
 
           setUploadStatuses((prev) =>
             prev.map((item) =>
@@ -215,6 +291,12 @@ export default function MediaPage() {
       }
 
       await fetchFiles();
+      if (successfulUploads.length > 0) {
+        setRecentUploadedNames((prev) => {
+          const merged = new Set([...prev, ...successfulUploads.map((name) => normalizeFilename(name))]);
+          return Array.from(merged);
+        });
+      }
       showToast("success", `Queued indexing for ${files.length} file(s).`);
     } catch (error) {
       if (error instanceof ApiRequestError) {

@@ -14,6 +14,10 @@ import { apiFetch } from "@app/lib/api";
 import { cn } from "@app/lib/utils";
 
 const MAX_UPLOAD_BATCH_SIZE = 10;
+const UPLOAD_STATUS_POLL_INTERVAL_MS = 3000;
+const UPLOAD_STATUS_MAX_POLL_MS = 180000;
+const TERMINAL_INGESTION_STATUSES = new Set(["indexed", "partial", "failed", "low_text", "ocr_needed"]);
+const TRANSIENT_INGESTION_STATUSES = new Set(["queued", "processing", "uploaded"]);
 
 type UploadStatusItem = {
   fileName: string;
@@ -142,8 +146,21 @@ export default function CampaignAssetsPage() {
   const [deletingAsset, setDeletingAsset] = useState<Asset | null>(null);
   const [promotingAsset, setPromotingAsset] = useState<Asset | null>(null);
   const [uploadStatuses, setUploadStatuses] = useState<UploadStatusItem[]>([]);
+  const [recentUploadedNames, setRecentUploadedNames] = useState<string[]>([]);
   const [toast, setToast] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploadPollIntervalRef = useRef<number | null>(null);
+  const uploadPollStartedAtRef = useRef<number | null>(null);
+
+  const normalizeFilename = useCallback((name: string) => name.trim().toLowerCase(), []);
+
+  const stopUploadStatusPolling = useCallback(() => {
+    if (uploadPollIntervalRef.current !== null) {
+      window.clearInterval(uploadPollIntervalRef.current);
+      uploadPollIntervalRef.current = null;
+    }
+    uploadPollStartedAtRef.current = null;
+  }, []);
 
   const showToast = useCallback((kind: "success" | "error", message: string) => {
     setToast({ kind, message });
@@ -153,8 +170,8 @@ export default function CampaignAssetsPage() {
   }, []);
 
   // Fetch files from backend - reusable function
-  const fetchFiles = async () => {
-    if (!campaignId) return; // Don't fetch if no campaign ID
+  const fetchFiles = useCallback(async (): Promise<Asset[]> => {
+    if (!campaignId) return []; // Don't fetch if no campaign ID
     
     try {
       const token = await getToken();
@@ -206,19 +223,77 @@ export default function CampaignAssetsPage() {
       });
       
       setAssets(fetchedAssets);
+      return fetchedAssets;
     } catch (error) {
       console.error("Error fetching files:", error);
       // Return empty array if fetch fails (Qdrant is source of truth)
       setAssets([]);
+      return [];
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [campaignId, getToken]);
 
   // Fetch files from backend on mount
   useEffect(() => {
     fetchFiles();
-  }, [campaignId]);
+  }, [fetchFiles]);
+
+  useEffect(() => {
+    return () => {
+      stopUploadStatusPolling();
+    };
+  }, [stopUploadStatusPolling]);
+
+  const areRecentUploadsSettled = useCallback(
+    (latestAssets: Asset[], trackedNames: string[]): boolean => {
+      if (trackedNames.length === 0) return true;
+      const byName = new Map<string, Asset>();
+      for (const asset of latestAssets) {
+        byName.set(normalizeFilename(asset.name), asset);
+      }
+
+      for (const rawName of trackedNames) {
+        const asset = byName.get(normalizeFilename(rawName));
+        if (!asset) return false;
+        const status = String(asset.ingestionStatus || "uploaded").toLowerCase();
+        if (TRANSIENT_INGESTION_STATUSES.has(status)) return false;
+        if (!TERMINAL_INGESTION_STATUSES.has(status)) return false;
+      }
+      return true;
+    },
+    [normalizeFilename]
+  );
+
+  useEffect(() => {
+    if (recentUploadedNames.length === 0) {
+      stopUploadStatusPolling();
+      return;
+    }
+    if (uploadPollIntervalRef.current !== null) return;
+
+    uploadPollStartedAtRef.current = Date.now();
+
+    const pollOnce = async () => {
+      const latestAssets = await fetchFiles();
+      if (areRecentUploadsSettled(latestAssets, recentUploadedNames)) {
+        stopUploadStatusPolling();
+        setRecentUploadedNames([]);
+        return;
+      }
+      if (
+        uploadPollStartedAtRef.current !== null &&
+        Date.now() - uploadPollStartedAtRef.current > UPLOAD_STATUS_MAX_POLL_MS
+      ) {
+        stopUploadStatusPolling();
+      }
+    };
+
+    void pollOnce();
+    uploadPollIntervalRef.current = window.setInterval(() => {
+      void pollOnce();
+    }, UPLOAD_STATUS_POLL_INTERVAL_MS);
+  }, [areRecentUploadsSettled, fetchFiles, recentUploadedNames, stopUploadStatusPolling]);
 
   const handleUpload = () => {
     fileInputRef.current?.click();
@@ -264,6 +339,7 @@ export default function CampaignAssetsPage() {
     };
 
     try {
+      const successfulUploads: string[] = [];
       for (const file of selectedFiles) {
         setUploadStatuses((prev) =>
           prev.map((item) =>
@@ -275,6 +351,7 @@ export default function CampaignAssetsPage() {
 
         try {
           await uploadFile(file, selectedFiles.length, false);
+          successfulUploads.push(file.name);
           setUploadStatuses((prev) =>
             prev.map((item) =>
               item.fileName === file.name
@@ -290,6 +367,7 @@ export default function CampaignAssetsPage() {
             );
             if (shouldOverwrite) {
               await uploadFile(file, selectedFiles.length, true);
+              successfulUploads.push(file.name);
               setUploadStatuses((prev) =>
                 prev.map((item) =>
                   item.fileName === file.name
@@ -322,6 +400,12 @@ export default function CampaignAssetsPage() {
       // including preview fields (preview_url, preview_status, preview_error) from Qdrant
       // This ensures the UI sees the latest preview state without waiting
       await fetchFiles();
+      if (successfulUploads.length > 0) {
+        setRecentUploadedNames((prev) => {
+          const merged = new Set([...prev, ...successfulUploads.map((name) => normalizeFilename(name))]);
+          return Array.from(merged);
+        });
+      }
       showToast("success", `Queued indexing for ${selectedFiles.length} file(s).`);
     } catch (error) {
       console.error("Upload error:", error);

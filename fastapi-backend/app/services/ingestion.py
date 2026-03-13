@@ -1753,7 +1753,7 @@ async def _run_ingestion_pipeline(
 
         chunk_rows: List[Dict[str, Any]] = []
         total_tokens = 0
-        bm25_available = True
+        bm25_available = await vector_service.bm25_enabled_for_collection(collection_name)
         for chunk_type, chunk_list in (("micro", micro_chunks), ("macro", macro_chunks)):
             for chunk_idx, chunk in enumerate(chunk_list):
                 chunk_text = str(chunk.get("text") or "").strip()
@@ -1857,19 +1857,41 @@ async def _run_ingestion_pipeline(
                 )
             return points
 
-        try:
-            await vector_service.client.upsert(
-                collection_name=collection_name,
-                points=_build_chunk_points(include_bm25=True),
-            )
-        except Exception as bm25_exc:
-            bm25_available = False
-            logger.warning(
-                "bm25_chunk_upsert_failed collection=%s file_id=%s error=%s; falling back to dense-only indexing",
-                collection_name,
-                point_id,
-                bm25_exc,
-            )
+        if bm25_available:
+            try:
+                await vector_service.client.upsert(
+                    collection_name=collection_name,
+                    points=_build_chunk_points(include_bm25=True),
+                )
+            except Exception as bm25_exc:
+                if vector_service.is_missing_bm25_vector_error(bm25_exc):
+                    # Try one safe migration refresh in case the collection predates sparse config.
+                    bm25_available = await vector_service.refresh_bm25_support(collection_name)
+                    if bm25_available:
+                        try:
+                            await vector_service.client.upsert(
+                                collection_name=collection_name,
+                                points=_build_chunk_points(include_bm25=True),
+                            )
+                        except Exception as bm25_retry_exc:
+                            bm25_available = False
+                            vector_service.mark_bm25_unavailable(collection_name, str(bm25_retry_exc))
+                    else:
+                        vector_service.mark_bm25_unavailable(collection_name, str(bm25_exc))
+                else:
+                    logger.warning(
+                        "bm25_chunk_upsert_failed collection=%s file_id=%s error=%s; falling back to dense-only indexing",
+                        collection_name,
+                        point_id,
+                        bm25_exc,
+                    )
+                    bm25_available = False
+            if not bm25_available:
+                await vector_service.client.upsert(
+                    collection_name=collection_name,
+                    points=_build_chunk_points(include_bm25=False),
+                )
+        else:
             await vector_service.client.upsert(
                 collection_name=collection_name,
                 points=_build_chunk_points(include_bm25=False),

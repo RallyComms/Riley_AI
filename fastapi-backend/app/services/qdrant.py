@@ -35,6 +35,8 @@ class VectorService:
                 host=settings.QDRANT_HOST,
                 port=settings.QDRANT_PORT,
             )
+        self._bm25_support_cache: Dict[str, bool] = {}
+        self._bm25_warned_collections: set[str] = set()
 
     @property
     def client(self) -> AsyncQdrantClient:
@@ -51,6 +53,92 @@ class VectorService:
         await self._ensure_collection(settings.QDRANT_COLLECTION_TIER_2)
         await self._ensure_payload_indexes(settings.QDRANT_COLLECTION_TIER_1)
         await self._ensure_payload_indexes(settings.QDRANT_COLLECTION_TIER_2)
+        logger.info(
+            "bm25_collection_status collection=%s enabled=%s",
+            settings.QDRANT_COLLECTION_TIER_1,
+            await self.bm25_enabled_for_collection(settings.QDRANT_COLLECTION_TIER_1),
+        )
+        logger.info(
+            "bm25_collection_status collection=%s enabled=%s",
+            settings.QDRANT_COLLECTION_TIER_2,
+            await self.bm25_enabled_for_collection(settings.QDRANT_COLLECTION_TIER_2),
+        )
+
+    @staticmethod
+    def _extract_sparse_vectors_map(collection_info: Any) -> Dict[str, Any]:
+        """Best-effort extractor for sparse vector config across Qdrant versions."""
+        dumped = collection_info.model_dump() if hasattr(collection_info, "model_dump") else {}
+        params = ((dumped.get("config") or {}).get("params") or {})
+        sparse_vectors = (
+            params.get("sparse_vectors")
+            or params.get("sparse_vectors_config")
+            or dumped.get("sparse_vectors")
+            or dumped.get("sparse_vectors_config")
+            or {}
+        )
+        return sparse_vectors if isinstance(sparse_vectors, dict) else {}
+
+    @staticmethod
+    def _is_missing_vector_name_error(exc: Exception, vector_name: str) -> bool:
+        message = str(exc).lower()
+        return (
+            "not existing vector name" in message
+            or "unknown vector name" in message
+        ) and vector_name.lower() in message
+
+    @staticmethod
+    def is_missing_bm25_vector_error(exc: Exception) -> bool:
+        return VectorService._is_missing_vector_name_error(exc, "bm25")
+
+    async def bm25_enabled_for_collection(self, collection_name: str) -> bool:
+        """Return whether BM25 sparse vector is currently available for a collection."""
+        settings = get_settings()
+        if not settings.BM25_ENABLED:
+            return False
+        if collection_name in self._bm25_support_cache:
+            return self._bm25_support_cache[collection_name]
+        return await self._refresh_bm25_support(collection_name, attempt_enable=True)
+
+    async def refresh_bm25_support(self, collection_name: str) -> bool:
+        """Force refresh BM25 support state (best-effort migration + verify)."""
+        return await self._refresh_bm25_support(collection_name, attempt_enable=True)
+
+    async def _refresh_bm25_support(
+        self,
+        collection_name: str,
+        *,
+        attempt_enable: bool,
+    ) -> bool:
+        try:
+            info = await self._client.get_collection(collection_name=collection_name)
+            has_bm25 = "bm25" in self._extract_sparse_vectors_map(info)
+            if has_bm25:
+                self._bm25_support_cache[collection_name] = True
+                return True
+        except Exception:
+            # If collection introspection fails, prefer dense-only behavior.
+            self._bm25_support_cache[collection_name] = False
+            return False
+
+        if not attempt_enable:
+            self._bm25_support_cache[collection_name] = False
+            return False
+
+        enabled = await self._ensure_sparse_vectors_config(collection_name)
+        self._bm25_support_cache[collection_name] = enabled
+        return enabled
+
+    def mark_bm25_unavailable(self, collection_name: str, reason: str) -> None:
+        """Mark BM25 as unavailable and warn once per collection."""
+        self._bm25_support_cache[collection_name] = False
+        if collection_name in self._bm25_warned_collections:
+            return
+        self._bm25_warned_collections.add(collection_name)
+        logger.warning(
+            "bm25_disabled collection=%s reason=%s; using dense-only retrieval/indexing",
+            collection_name,
+            reason,
+        )
 
     @staticmethod
     def _is_missing_payload_index_error(exc: Exception, field_name: str) -> bool:
@@ -94,7 +182,8 @@ class VectorService:
 
         try:
             await self._client.get_collection(collection_name=collection_name)
-            await self._ensure_sparse_vectors_config(collection_name)
+            bm25_enabled = await self._ensure_sparse_vectors_config(collection_name)
+            self._bm25_support_cache[collection_name] = bm25_enabled
             return  # exists
         except Exception:
             # If get_collection fails (not found / connection), attempt create. Any real errors
@@ -127,18 +216,19 @@ class VectorService:
                     distance=distance,
                 ),
             )
-        await self._ensure_sparse_vectors_config(collection_name)
+        bm25_enabled = await self._ensure_sparse_vectors_config(collection_name)
+        self._bm25_support_cache[collection_name] = bm25_enabled
 
-    async def _ensure_sparse_vectors_config(self, collection_name: str) -> None:
+    async def _ensure_sparse_vectors_config(self, collection_name: str) -> bool:
         """Best-effort idempotent ensure for BM25 sparse vector config."""
+        settings = get_settings()
+        if not settings.BM25_ENABLED:
+            return False
+
         try:
             info = await self._client.get_collection(collection_name=collection_name)
-            dumped = info.model_dump() if hasattr(info, "model_dump") else {}
-            sparse_vectors = (
-                ((dumped.get("config") or {}).get("params") or {}).get("sparse_vectors") or {}
-            )
-            if "bm25" in sparse_vectors:
-                return
+            if "bm25" in self._extract_sparse_vectors_map(info):
+                return True
         except Exception:
             # If introspection fails, still attempt update in a best-effort way.
             pass
@@ -152,6 +242,10 @@ class VectorService:
                     )
                 },
             )
+            # Verify update took effect.
+            info = await self._client.get_collection(collection_name=collection_name)
+            if "bm25" in self._extract_sparse_vectors_map(info):
+                return True
         except Exception as exc:
             # Do not fail startup for clusters/plans that don't support sparse vectors yet.
             logger.warning(
@@ -159,6 +253,8 @@ class VectorService:
                 collection_name,
                 exc,
             )
+            return False
+        return False
 
     @staticmethod
     def _point_to_dict(point: Any) -> Dict[str, Any]:
@@ -380,45 +476,55 @@ class VectorService:
                 dense_results = []
 
         # BM25 branch (best-effort)
-        try:
-            bm25_raw = await self._client.query_points(
-                collection_name=collection_name,
-                query=models.Document(text=query_text, model="qdrant/bm25"),
-                using="bm25",
-                query_filter=tenant_filter,
-                limit=limit,
-                with_payload=True,
-            )
-            bm25_points = self._extract_points_from_query_points(bm25_raw)
-            bm25_results = self._filter_chunk_only([self._point_to_dict(point) for point in bm25_points])
-        except Exception as exc:
-            if self._is_missing_payload_index_error(exc, "record_type"):
-                try:
-                    fallback_filter = self._drop_record_type_from_must_not(tenant_filter)
-                    bm25_raw = await self._client.query_points(
-                        collection_name=collection_name,
-                        query=models.Document(text=query_text, model="qdrant/bm25"),
-                        using="bm25",
-                        query_filter=fallback_filter,
-                        limit=limit,
-                        with_payload=True,
-                    )
-                    bm25_points = self._extract_points_from_query_points(bm25_raw)
-                    bm25_results = self._filter_chunk_only([self._point_to_dict(point) for point in bm25_points])
-                except Exception as bm25_fallback_exc:
-                    logger.warning(
-                        "hybrid_bm25_search_unavailable collection=%s error=%s",
-                        collection_name,
-                        bm25_fallback_exc,
-                    )
-                    bm25_results = []
-            else:
-                logger.warning(
-                    "hybrid_bm25_search_unavailable collection=%s error=%s",
-                    collection_name,
-                    exc,
+        bm25_available = await self.bm25_enabled_for_collection(collection_name)
+        if bm25_available:
+            try:
+                bm25_raw = await self._client.query_points(
+                    collection_name=collection_name,
+                    query=models.Document(text=query_text, model="qdrant/bm25"),
+                    using="bm25",
+                    query_filter=tenant_filter,
+                    limit=limit,
+                    with_payload=True,
                 )
-                bm25_results = []
+                bm25_points = self._extract_points_from_query_points(bm25_raw)
+                bm25_results = self._filter_chunk_only([self._point_to_dict(point) for point in bm25_points])
+            except Exception as exc:
+                if self._is_missing_payload_index_error(exc, "record_type"):
+                    try:
+                        fallback_filter = self._drop_record_type_from_must_not(tenant_filter)
+                        bm25_raw = await self._client.query_points(
+                            collection_name=collection_name,
+                            query=models.Document(text=query_text, model="qdrant/bm25"),
+                            using="bm25",
+                            query_filter=fallback_filter,
+                            limit=limit,
+                            with_payload=True,
+                        )
+                        bm25_points = self._extract_points_from_query_points(bm25_raw)
+                        bm25_results = self._filter_chunk_only([self._point_to_dict(point) for point in bm25_points])
+                    except Exception as bm25_fallback_exc:
+                        if self._is_missing_vector_name_error(bm25_fallback_exc, "bm25"):
+                            self.mark_bm25_unavailable(collection_name, str(bm25_fallback_exc))
+                        else:
+                            logger.warning(
+                                "hybrid_bm25_search_unavailable collection=%s error=%s",
+                                collection_name,
+                                bm25_fallback_exc,
+                            )
+                        bm25_results = []
+                else:
+                    if self._is_missing_vector_name_error(exc, "bm25"):
+                        self.mark_bm25_unavailable(collection_name, str(exc))
+                    else:
+                        logger.warning(
+                            "hybrid_bm25_search_unavailable collection=%s error=%s",
+                            collection_name,
+                            exc,
+                        )
+                    bm25_results = []
+        else:
+            bm25_results = []
 
         dense_results = dense_results or []
         bm25_results = bm25_results or []

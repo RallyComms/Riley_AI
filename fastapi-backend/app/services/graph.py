@@ -32,6 +32,20 @@ class GraphService:
         if self._driver:
             await self._driver.close()
 
+    async def _label_exists(self, label: str) -> bool:
+        """Return True if the Neo4j label exists in current DB."""
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                CALL db.labels() YIELD label
+                WHERE label = $label
+                RETURN count(*) > 0 AS exists
+                """,
+                label=label,
+            )
+            record = await result.single()
+            return bool(record and record.get("exists"))
+
     async def get_client_structure(self, client_id: str) -> Dict[str, Any]:
         """Retrieve the structure of a client including campaigns and assets.
 
@@ -575,27 +589,13 @@ class GraphService:
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
         """List report jobs for tenant/user scope."""
+        if not await self._label_exists("RileyReportJob"):
+            return []
+
         async with self._driver.session() as session:
             query = """
             MATCH (r:RileyReportJob {tenant_id: $tenant_id, user_id: $user_id})
-            RETURN
-                r.id as report_job_id,
-                r.tenant_id as tenant_id,
-                r.user_id as user_id,
-                r.conversation_id as conversation_id,
-                r.report_type as report_type,
-                r.title as title,
-                r.status as status,
-                toString(r.created_at) as created_at,
-                toString(r.started_at) as started_at,
-                toString(r.completed_at) as completed_at,
-                r.error_message as error_message,
-                r.output_file_id as output_file_id,
-                r.output_url as output_url,
-                r.summary_text as summary_text,
-                r.query_text as query,
-                r.mode as mode
-            ORDER BY coalesce(r.started_at, r.created_at) DESC
+            RETURN properties(r) as props
             LIMIT $limit
             """
             result = await session.run(
@@ -606,7 +606,31 @@ class GraphService:
             )
             jobs: List[Dict[str, Any]] = []
             async for record in result:
-                jobs.append(dict(record))
+                props = dict(record.get("props") or {})
+                jobs.append(
+                    {
+                        "report_job_id": props.get("id"),
+                        "tenant_id": props.get("tenant_id"),
+                        "user_id": props.get("user_id"),
+                        "conversation_id": props.get("conversation_id"),
+                        "report_type": props.get("report_type"),
+                        "title": props.get("title"),
+                        "status": props.get("status"),
+                        "created_at": str(props.get("created_at")) if props.get("created_at") else None,
+                        "started_at": str(props.get("started_at")) if props.get("started_at") else None,
+                        "completed_at": str(props.get("completed_at")) if props.get("completed_at") else None,
+                        "error_message": props.get("error_message"),
+                        "output_file_id": props.get("output_file_id"),
+                        "output_url": props.get("output_url"),
+                        "summary_text": props.get("summary_text"),
+                        "query": props.get("query_text"),
+                        "mode": props.get("mode"),
+                    }
+                )
+            jobs.sort(
+                key=lambda item: (item.get("started_at") or item.get("created_at") or ""),
+                reverse=True,
+            )
             return jobs
 
     async def get_riley_report_job(
@@ -617,6 +641,9 @@ class GraphService:
         user_id: str,
     ) -> Optional[Dict[str, Any]]:
         """Get one report job in tenant/user scope, including report body."""
+        if not await self._label_exists("RileyReportJob"):
+            return None
+
         async with self._driver.session() as session:
             query = """
             MATCH (r:RileyReportJob {
@@ -624,24 +651,7 @@ class GraphService:
                 tenant_id: $tenant_id,
                 user_id: $user_id
             })
-            RETURN
-                r.id as report_job_id,
-                r.tenant_id as tenant_id,
-                r.user_id as user_id,
-                r.conversation_id as conversation_id,
-                r.report_type as report_type,
-                r.title as title,
-                r.status as status,
-                toString(r.created_at) as created_at,
-                toString(r.started_at) as started_at,
-                toString(r.completed_at) as completed_at,
-                r.error_message as error_message,
-                r.output_file_id as output_file_id,
-                r.output_url as output_url,
-                r.summary_text as summary_text,
-                r.query_text as query,
-                r.mode as mode,
-                r.report_body as report_body
+            RETURN properties(r) as props
             """
             result = await session.run(
                 query,
@@ -650,7 +660,28 @@ class GraphService:
                 user_id=user_id,
             )
             record = await result.single()
-            return dict(record) if record else None
+            if not record:
+                return None
+            props = dict(record.get("props") or {})
+            return {
+                "report_job_id": props.get("id"),
+                "tenant_id": props.get("tenant_id"),
+                "user_id": props.get("user_id"),
+                "conversation_id": props.get("conversation_id"),
+                "report_type": props.get("report_type"),
+                "title": props.get("title"),
+                "status": props.get("status"),
+                "created_at": str(props.get("created_at")) if props.get("created_at") else None,
+                "started_at": str(props.get("started_at")) if props.get("started_at") else None,
+                "completed_at": str(props.get("completed_at")) if props.get("completed_at") else None,
+                "error_message": props.get("error_message"),
+                "output_file_id": props.get("output_file_id"),
+                "output_url": props.get("output_url"),
+                "summary_text": props.get("summary_text"),
+                "query": props.get("query_text"),
+                "mode": props.get("mode"),
+                "report_body": props.get("report_body"),
+            }
 
     async def get_riley_report_job_for_worker(
         self,
@@ -658,31 +689,38 @@ class GraphService:
         report_job_id: str,
     ) -> Optional[Dict[str, Any]]:
         """Get one report job by ID for trusted internal worker execution."""
+        if not await self._label_exists("RileyReportJob"):
+            return None
+
         async with self._driver.session() as session:
             query = """
             MATCH (r:RileyReportJob {id: $report_job_id})
-            RETURN
-                r.id as report_job_id,
-                r.tenant_id as tenant_id,
-                r.user_id as user_id,
-                r.conversation_id as conversation_id,
-                r.report_type as report_type,
-                r.title as title,
-                r.status as status,
-                toString(r.created_at) as created_at,
-                toString(r.started_at) as started_at,
-                toString(r.completed_at) as completed_at,
-                r.error_message as error_message,
-                r.output_file_id as output_file_id,
-                r.output_url as output_url,
-                r.summary_text as summary_text,
-                r.query_text as query,
-                r.mode as mode,
-                r.report_body as report_body
+            RETURN properties(r) as props
             """
             result = await session.run(query, report_job_id=report_job_id)
             record = await result.single()
-            return dict(record) if record else None
+            if not record:
+                return None
+            props = dict(record.get("props") or {})
+            return {
+                "report_job_id": props.get("id"),
+                "tenant_id": props.get("tenant_id"),
+                "user_id": props.get("user_id"),
+                "conversation_id": props.get("conversation_id"),
+                "report_type": props.get("report_type"),
+                "title": props.get("title"),
+                "status": props.get("status"),
+                "created_at": str(props.get("created_at")) if props.get("created_at") else None,
+                "started_at": str(props.get("started_at")) if props.get("started_at") else None,
+                "completed_at": str(props.get("completed_at")) if props.get("completed_at") else None,
+                "error_message": props.get("error_message"),
+                "output_file_id": props.get("output_file_id"),
+                "output_url": props.get("output_url"),
+                "summary_text": props.get("summary_text"),
+                "query": props.get("query_text"),
+                "mode": props.get("mode"),
+                "report_body": props.get("report_body"),
+            }
 
     async def update_riley_report_job(
         self,

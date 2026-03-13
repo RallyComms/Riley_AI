@@ -23,7 +23,15 @@ def _extract_sparse_vectors(collection_info: Any) -> Dict[str, Any]:
         dumped = collection_info.dict()
     else:
         return {}
-    return ((dumped.get("config") or {}).get("params") or {}).get("sparse_vectors") or {}
+    params = ((dumped.get("config") or {}).get("params") or {})
+    sparse_vectors = (
+        params.get("sparse_vectors")
+        or params.get("sparse_vectors_config")
+        or dumped.get("sparse_vectors")
+        or dumped.get("sparse_vectors_config")
+        or {}
+    )
+    return sparse_vectors if isinstance(sparse_vectors, dict) else {}
 
 
 def main() -> None:
@@ -36,6 +44,7 @@ def main() -> None:
     args = parser.parse_args()
 
     settings = get_settings()
+    print(f"BM25_ENABLED setting: {settings.BM25_ENABLED}")
     if settings.QDRANT_URL:
         client = QdrantClient(url=settings.QDRANT_URL, api_key=settings.QDRANT_API_KEY)
     else:

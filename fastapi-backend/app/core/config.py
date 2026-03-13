@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # Qdrant vector configuration
     # NOTE: Keep as a string for env override; code maps to qdrant_client Distance enum.
     QDRANT_DISTANCE: str = "Cosine"
+    BM25_ENABLED: bool = True
     HYBRID_SEARCH_ENABLED: bool = True
     RERANK_ENABLED: bool = True
     RERANK_PROVIDER: str = "gemini"
