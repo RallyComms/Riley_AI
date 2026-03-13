@@ -243,6 +243,113 @@ def _format_rag_context(
     return "\n\n".join(parts)
 
 
+def _safe_json_loads(raw: Any, default: Any) -> Any:
+    if not isinstance(raw, str) or not raw.strip():
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+async def _load_parent_document_intelligence(
+    *,
+    collection_name: str,
+    results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    parent_ids: List[str] = []
+    seen: set[str] = set()
+    for result in results:
+        payload = result.get("payload", {}) or {}
+        parent_id = str(payload.get("parent_file_id") or "").strip()
+        if not parent_id or parent_id in seen:
+            continue
+        seen.add(parent_id)
+        parent_ids.append(parent_id)
+    if not parent_ids:
+        return []
+    try:
+        parent_points = await vector_service.client.retrieve(
+            collection_name=collection_name,
+            ids=parent_ids,
+            with_payload=True,
+            with_vectors=False,
+        )
+    except Exception:
+        return []
+    docs: List[Dict[str, Any]] = []
+    for point in parent_points:
+        payload = point.payload or {}
+        if str(payload.get("analysis_status") or "").lower() != "complete":
+            continue
+        docs.append(payload)
+    return docs
+
+
+def _build_doc_intel_context_block(doc_intel_items: List[Dict[str, Any]]) -> str:
+    if not doc_intel_items:
+        return ""
+    lines: List[str] = ["=== SYNTHESIZED DOCUMENT INTELLIGENCE ==="]
+    for item in doc_intel_items[:14]:
+        filename = str(item.get("filename") or "Unknown")
+        short_summary = str(item.get("doc_summary_short") or "").strip()
+        themes = item.get("key_themes") or []
+        tones = item.get("tone_labels") or []
+        framings = item.get("framing_labels") or []
+        opportunities = item.get("strategic_opportunities") or []
+        risks = item.get("persuasion_risks") or []
+        lines.append(f"[Doc Intelligence] {filename}")
+        if short_summary:
+            lines.append(f"- summary: {short_summary}")
+        if themes:
+            lines.append(f"- themes: {', '.join(str(x) for x in themes[:6])}")
+        if tones:
+            lines.append(f"- tone: {', '.join(str(x) for x in tones[:6])}")
+        if framings:
+            lines.append(f"- framing: {', '.join(str(x) for x in framings[:6])}")
+        if opportunities:
+            lines.append(f"- opportunities: {' | '.join(str(x) for x in opportunities[:4])}")
+        if risks:
+            lines.append(f"- risks: {' | '.join(str(x) for x in risks[:4])}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _build_campaign_intel_context_block(snapshot: Optional[Dict[str, Any]]) -> str:
+    if not snapshot:
+        return ""
+    dominant_narratives = list(snapshot.get("dominant_narratives") or [])[:10]
+    opportunities = list(snapshot.get("strategic_opportunities") or [])[:10]
+    risks = list(snapshot.get("strategic_risks") or [])[:10]
+    contradictions = _safe_json_loads(snapshot.get("contradiction_tensions_json"), [])
+    sentiment_distribution = _safe_json_loads(snapshot.get("sentiment_distribution_json"), {})
+    tone_distribution = _safe_json_loads(snapshot.get("tone_distribution_json"), {})
+    framing_distribution = _safe_json_loads(snapshot.get("framing_distribution_json"), {})
+    lines: List[str] = ["=== CAMPAIGN-WIDE INTELLIGENCE ==="]
+    lines.append(f"- snapshot_version: {snapshot.get('version')}")
+    if dominant_narratives:
+        lines.append(f"- dominant_narratives: {', '.join(str(x) for x in dominant_narratives)}")
+    if opportunities:
+        lines.append(f"- strategic_opportunities: {' | '.join(str(x) for x in opportunities[:6])}")
+    if risks:
+        lines.append(f"- strategic_risks: {' | '.join(str(x) for x in risks[:6])}")
+    if isinstance(sentiment_distribution, dict) and sentiment_distribution:
+        lines.append(f"- sentiment_distribution: {sentiment_distribution}")
+    if isinstance(tone_distribution, dict) and tone_distribution:
+        lines.append(f"- tone_distribution: {tone_distribution}")
+    if isinstance(framing_distribution, dict) and framing_distribution:
+        lines.append(f"- framing_distribution: {framing_distribution}")
+    if isinstance(contradictions, list) and contradictions:
+        summaries = [
+            str(item.get("contradiction_summary") or "").strip()
+            for item in contradictions[:6]
+            if isinstance(item, dict) and str(item.get("contradiction_summary") or "").strip()
+        ]
+        if summaries:
+            lines.append(f"- contradiction_tensions: {' | '.join(summaries)}")
+    return "\n".join(lines).strip()
+
+
 def _extract_openai_response_text(response_json: Dict[str, Any]) -> str:
     output_text = response_json.get("output_text")
     if isinstance(output_text, str) and output_text.strip():
@@ -330,10 +437,12 @@ PERSONALITY AND LEADERSHIP STANDARD:
 REPORT TASK:
 - Produce a high-quality strategy report for {user_display_name}.
 - Synthesize campaign documents first, then use global sources as supporting context.
+- Use campaign intelligence artifacts by default when available.
+- Use document intelligence summaries to accelerate synthesis, then verify claims against source evidence.
 - Separate clearly:
   1) what sources explicitly say,
-  2) your strategic analysis/inference,
-  3) your recommendation and execution plan.
+  2) synthesized intelligence (cross-document patterns, narratives, sentiment, framing, tensions),
+  3) your strategic recommendation and execution plan.
 - Compare sources, identify contradictions and patterns, and surface strategic implications.
 - Ask clarifying questions at the end when unresolved uncertainty materially affects recommendations.
 - Ground factual claims with source references in format `[[Source: Filename.ext]]`.
@@ -900,6 +1009,35 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
         )
         has_context = bool(private_results or global_results or graph_results or file_manifest)
         context = _format_rag_context(private_results, global_results, graph_results, file_manifest)
+        try:
+            private_doc_intel = await _load_parent_document_intelligence(
+                collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                results=private_results,
+            )
+            global_doc_intel = await _load_parent_document_intelligence(
+                collection_name=settings.QDRANT_COLLECTION_TIER_1,
+                results=global_results,
+            )
+            campaign_snapshot = await graph.get_latest_riley_campaign_intelligence_snapshot(
+                tenant_id=tenant_id
+            )
+            intelligence_blocks: List[str] = []
+            doc_intel_block = _build_doc_intel_context_block([*private_doc_intel, *global_doc_intel])
+            if doc_intel_block:
+                intelligence_blocks.append(doc_intel_block)
+            campaign_block = _build_campaign_intel_context_block(campaign_snapshot)
+            if campaign_block:
+                intelligence_blocks.append(campaign_block)
+            if intelligence_blocks:
+                context = f"{context}\n\n" + "\n\n".join(intelligence_blocks) if context else "\n\n".join(intelligence_blocks)
+                has_context = True
+        except Exception as intelligence_exc:
+            logger.warning(
+                "report_intelligence_context_unavailable report_job_id=%s tenant_id=%s error_type=%s",
+                report_job_id,
+                tenant_id,
+                type(intelligence_exc).__name__,
+            )
         prompt = _build_report_prompt(
             query=query_text,
             context=context,

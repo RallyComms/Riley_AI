@@ -1556,6 +1556,9 @@ async def _run_ingestion_pipeline(
                     "ingestion_job_completed_at": completed_at if job_id else None,
                     "ingestion_job_error_message": quality_reason if job_id else None,
                     "ingestion_job_processing_duration_ms": duration_ms if job_id else None,
+                    "analysis_status": "not_requested",
+                    "analysis_completed_at": None,
+                    "analysis_error": None,
                 },
                 points=[point_id],
             )
@@ -1757,6 +1760,9 @@ async def _run_ingestion_pipeline(
             "vision_enabled": vision_enabled,
             "vision_status": vision_status if vision_enabled else "not_requested",
             "vision_segments_annotated": vision_segments_annotated,
+            "analysis_status": "queued" if settings.RILEY_DOC_INTEL_ENABLED else "not_requested",
+            "analysis_completed_at": None,
+            "analysis_error": None,
         }
         if not is_global:
             parent_payload["client_id"] = tenant_id
@@ -1777,6 +1783,23 @@ async def _run_ingestion_pipeline(
                 },
                 points=[point_id],
             )
+        if settings.RILEY_DOC_INTEL_ENABLED:
+            try:
+                from app.services.document_intelligence import enqueue_document_intelligence_job
+
+                await enqueue_document_intelligence_job(
+                    collection_name=collection_name,
+                    file_id=point_id,
+                    tenant_id=tenant_id,
+                    is_global=is_global,
+                )
+            except Exception as doc_intel_exc:
+                logger.warning(
+                    "doc_intel_enqueue_failed file_id=%s tenant=%s error=%s",
+                    point_id,
+                    tenant_id,
+                    doc_intel_exc,
+                )
         logger.info(
             "ingestion_complete file_id=%s tenant=%s status=indexed chars=%s chunks=%s duration_ms=%s tokens=%s est_cost_usd=%s",
             point_id, tenant_id, len(cleaned_text), len(chunk_rows), duration_ms, total_tokens, embedding_cost_estimate
@@ -1803,6 +1826,9 @@ async def _run_ingestion_pipeline(
                 "ocr_processed": True,
                 "vision_processed": False,
                 "visual_chunk_count": 0,
+                "analysis_status": "failed",
+                "analysis_completed_at": completed_at,
+                "analysis_error": "Ingestion failed; document intelligence was not generated.",
             },
             points=[point_id],
         )
@@ -1946,6 +1972,9 @@ async def process_upload(
             "vision_enabled": bool(settings.RILEY_VISION_ENABLED),
             "vision_status": "queued" if is_image else "not_requested",
             "vision_segments_annotated": 0,
+            "analysis_status": "not_requested",
+            "analysis_completed_at": None,
+            "analysis_error": None,
         }
         if not is_global_upload:
             payload["client_id"] = tenant_id

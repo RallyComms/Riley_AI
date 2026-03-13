@@ -64,8 +64,26 @@ class Settings(BaseSettings):
     RILEY_REPORT_TIMEOUT_SECONDS: int = 120
     RILEY_VISION_ENABLED: bool = True
     RILEY_VISION_MODEL: str = "gpt-4.1-mini"
-    RILEY_VISION_TIMEOUT_SECONDS: int = 20
-    RILEY_VISION_MAX_SEGMENTS: int = 8
+    RILEY_VISION_TIMEOUT_SECONDS: int = 30
+    RILEY_VISION_MAX_SEGMENTS: int = 30
+    RILEY_DOC_INTEL_ENABLED: bool = True
+    RILEY_DOC_INTEL_USE_CLOUD_TASKS: bool = True
+    RILEY_DOC_INTEL_TASKS_QUEUE: str = "riley-doc-intel-jobs"
+    RILEY_DOC_INTEL_TASKS_LOCATION: str = "us-west1"
+    RILEY_DOC_INTEL_WORKER_URL: Optional[str] = None
+    RILEY_DOC_INTEL_WORKER_TOKEN: Optional[str] = None
+    RILEY_DOC_INTEL_TASKS_SERVICE_ACCOUNT_EMAIL: Optional[str] = None
+    RILEY_DOC_INTEL_MODEL: str = "gpt-5.4"
+    RILEY_DOC_INTEL_TIMEOUT_SECONDS: int = 45
+    RILEY_DOC_INTEL_MAX_CHUNKS: int = 80
+    RILEY_DOC_INTEL_MAX_CONTEXT_CHARS: int = 45000
+    RILEY_CAMPAIGN_INTEL_ENABLED: bool = True
+    RILEY_CAMPAIGN_INTEL_USE_CLOUD_TASKS: bool = True
+    RILEY_CAMPAIGN_INTEL_TASKS_QUEUE: str = "riley-campaign-intel-jobs"
+    RILEY_CAMPAIGN_INTEL_TASKS_LOCATION: str = "us-west1"
+    RILEY_CAMPAIGN_INTEL_WORKER_URL: Optional[str] = None
+    RILEY_CAMPAIGN_INTEL_WORKER_TOKEN: Optional[str] = None
+    RILEY_CAMPAIGN_INTEL_TASKS_SERVICE_ACCOUNT_EMAIL: Optional[str] = None
 
     # Google Cloud Storage configuration
     GCS_BUCKET_NAME: str = "riley-assets-riley-ai-479422"
@@ -74,7 +92,7 @@ class Settings(BaseSettings):
     # OCR configuration
     OCR_ENABLED_SYSTEMWIDE: bool = False  # Master switch for OCR functionality
     OCR_MIN_CONFIDENCE: float = 0.50  # Minimum confidence threshold (0-1)
-    OCR_MAX_CHARS: int = 8000  # Maximum characters to extract from OCR
+    OCR_MAX_CHARS: int = 10000  # Maximum characters to extract from OCR
 
     # Upload limits (server-side hard cap)
     MAX_UPLOAD_MB: int = 25

@@ -7,7 +7,19 @@ from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from app.routers import chat, files, search, campaign, ingestion_worker, reports, report_worker
+from app.routers import (
+    chat,
+    files,
+    search,
+    campaign,
+    ingestion_worker,
+    reports,
+    report_worker,
+    document_intel_worker,
+    campaign_intelligence,
+    campaign_intel_worker,
+    comparisons,
+)
 from app.dependencies.auth import verify_clerk_token
 from app.services.graph import GraphService
 from app.services.qdrant import vector_service
@@ -108,10 +120,18 @@ app.include_router(files.router, prefix="/api/v1", dependencies=[Depends(verify_
 app.include_router(campaign.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # Riley report jobs route (authenticated)
 app.include_router(reports.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
+# Riley campaign intelligence route (authenticated)
+app.include_router(campaign_intelligence.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
+# Riley comparison tables route (authenticated)
+app.include_router(comparisons.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # Internal worker route for Cloud Tasks ingestion callbacks (token-protected, not Clerk-protected)
 app.include_router(ingestion_worker.router, prefix="/api/v1")
 # Internal worker route for Cloud Tasks report callbacks (token-protected, not Clerk-protected)
 app.include_router(report_worker.router, prefix="/api/v1")
+# Internal worker route for Cloud Tasks document intelligence callbacks (token-protected)
+app.include_router(document_intel_worker.router, prefix="/api/v1")
+# Internal worker route for Cloud Tasks campaign intelligence callbacks (token-protected)
+app.include_router(campaign_intel_worker.router, prefix="/api/v1")
 
 # Ensure static directory exists BEFORE mounting (required for Cloud Run)
 # This must happen synchronously at module load time, not in lifespan

@@ -741,6 +741,338 @@ class GraphService:
                 report_body=report_body,
             )
 
+    async def upsert_riley_document_intelligence(
+        self,
+        *,
+        file_id: str,
+        tenant_id: str,
+        is_global: bool,
+        status: str,
+        analysis_started_at: Optional[str] = None,
+        analysis_completed_at: Optional[str] = None,
+        analysis_error: Optional[str] = None,
+        doc_summary_short: Optional[str] = None,
+        doc_summary_long: Optional[str] = None,
+        key_themes: Optional[List[str]] = None,
+        key_entities: Optional[List[str]] = None,
+        sentiment_overall: Optional[str] = None,
+        tone_labels: Optional[List[str]] = None,
+        framing_labels: Optional[List[str]] = None,
+        audience_implications: Optional[List[str]] = None,
+        persuasion_risks: Optional[List[str]] = None,
+        strategic_opportunities: Optional[List[str]] = None,
+        tone_profile: Optional[str] = None,
+        framing_profile: Optional[str] = None,
+        strategic_notes: Optional[str] = None,
+        major_claims_or_evidence: Optional[List[str]] = None,
+        source_chunk_count: Optional[int] = None,
+        source_char_count: Optional[int] = None,
+    ) -> None:
+        """Persist per-document intelligence artifact in Neo4j."""
+        artifact_id = f"{tenant_id}:{file_id}"
+        async with self._driver.session() as session:
+            query = """
+            MERGE (d:RileyDocumentIntelligence {id: $artifact_id})
+            ON CREATE SET
+                d.created_at = datetime(),
+                d.file_id = $file_id,
+                d.tenant_id = $tenant_id,
+                d.is_global = $is_global
+            SET
+                d.updated_at = datetime(),
+                d.status = $status,
+                d.analysis_started_at = CASE
+                    WHEN $analysis_started_at IS NULL THEN d.analysis_started_at
+                    ELSE datetime($analysis_started_at)
+                END,
+                d.analysis_completed_at = CASE
+                    WHEN $analysis_completed_at IS NULL THEN d.analysis_completed_at
+                    ELSE datetime($analysis_completed_at)
+                END,
+                d.analysis_error = $analysis_error,
+                d.doc_summary_short = $doc_summary_short,
+                d.doc_summary_long = $doc_summary_long,
+                d.key_themes = CASE
+                    WHEN $key_themes IS NULL THEN d.key_themes
+                    ELSE $key_themes
+                END,
+                d.key_entities = CASE
+                    WHEN $key_entities IS NULL THEN d.key_entities
+                    ELSE $key_entities
+                END,
+                d.sentiment_overall = $sentiment_overall,
+                d.tone_labels = CASE
+                    WHEN $tone_labels IS NULL THEN d.tone_labels
+                    ELSE $tone_labels
+                END,
+                d.framing_labels = CASE
+                    WHEN $framing_labels IS NULL THEN d.framing_labels
+                    ELSE $framing_labels
+                END,
+                d.audience_implications = CASE
+                    WHEN $audience_implications IS NULL THEN d.audience_implications
+                    ELSE $audience_implications
+                END,
+                d.persuasion_risks = CASE
+                    WHEN $persuasion_risks IS NULL THEN d.persuasion_risks
+                    ELSE $persuasion_risks
+                END,
+                d.strategic_opportunities = CASE
+                    WHEN $strategic_opportunities IS NULL THEN d.strategic_opportunities
+                    ELSE $strategic_opportunities
+                END,
+                d.tone_profile = $tone_profile,
+                d.framing_profile = $framing_profile,
+                d.strategic_notes = $strategic_notes,
+                d.major_claims_or_evidence = CASE
+                    WHEN $major_claims_or_evidence IS NULL THEN d.major_claims_or_evidence
+                    ELSE $major_claims_or_evidence
+                END,
+                d.source_chunk_count = $source_chunk_count,
+                d.source_char_count = $source_char_count
+            """
+            await session.run(
+                query,
+                artifact_id=artifact_id,
+                file_id=file_id,
+                tenant_id=tenant_id,
+                is_global=is_global,
+                status=status,
+                analysis_started_at=analysis_started_at,
+                analysis_completed_at=analysis_completed_at,
+                analysis_error=analysis_error,
+                doc_summary_short=doc_summary_short,
+                doc_summary_long=doc_summary_long,
+                key_themes=key_themes,
+                key_entities=key_entities,
+                sentiment_overall=sentiment_overall,
+                tone_labels=tone_labels,
+                framing_labels=framing_labels,
+                audience_implications=audience_implications,
+                persuasion_risks=persuasion_risks,
+                strategic_opportunities=strategic_opportunities,
+                tone_profile=tone_profile,
+                framing_profile=framing_profile,
+                strategic_notes=strategic_notes,
+                major_claims_or_evidence=major_claims_or_evidence,
+                source_chunk_count=source_chunk_count,
+                source_char_count=source_char_count,
+            )
+
+    async def create_riley_campaign_intelligence_job(
+        self,
+        *,
+        job_id: str,
+        tenant_id: str,
+        requested_by_user_id: Optional[str],
+        trigger_source: str,
+    ) -> Dict[str, Any]:
+        """Create a campaign-level intelligence aggregation job record."""
+        async with self._driver.session() as session:
+            query = """
+            CREATE (j:RileyCampaignIntelligenceJob {
+                id: $job_id,
+                tenant_id: $tenant_id,
+                requested_by_user_id: $requested_by_user_id,
+                trigger_source: $trigger_source,
+                status: "queued",
+                created_at: datetime(),
+                started_at: null,
+                completed_at: null,
+                error_message: null
+            })
+            RETURN
+                j.id as job_id,
+                j.tenant_id as tenant_id,
+                j.requested_by_user_id as requested_by_user_id,
+                j.trigger_source as trigger_source,
+                j.status as status,
+                toString(j.created_at) as created_at,
+                toString(j.started_at) as started_at,
+                toString(j.completed_at) as completed_at,
+                j.error_message as error_message
+            """
+            result = await session.run(
+                query,
+                job_id=job_id,
+                tenant_id=tenant_id,
+                requested_by_user_id=requested_by_user_id,
+                trigger_source=trigger_source,
+            )
+            record = await result.single()
+            if not record:
+                raise Exception("Failed to create campaign intelligence job")
+            return dict(record)
+
+    async def get_riley_campaign_intelligence_job_for_worker(
+        self,
+        *,
+        job_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get one campaign intelligence job by ID for trusted worker execution."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (j:RileyCampaignIntelligenceJob {id: $job_id})
+            RETURN
+                j.id as job_id,
+                j.tenant_id as tenant_id,
+                j.requested_by_user_id as requested_by_user_id,
+                j.trigger_source as trigger_source,
+                j.status as status,
+                toString(j.created_at) as created_at,
+                toString(j.started_at) as started_at,
+                toString(j.completed_at) as completed_at,
+                j.error_message as error_message
+            """
+            result = await session.run(query, job_id=job_id)
+            record = await result.single()
+            return dict(record) if record else None
+
+    async def update_riley_campaign_intelligence_job(
+        self,
+        *,
+        job_id: str,
+        status: str,
+        started_at: Optional[str] = None,
+        completed_at: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """Update campaign intelligence job status."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (j:RileyCampaignIntelligenceJob {id: $job_id})
+            SET
+                j.status = $status,
+                j.started_at = CASE
+                    WHEN $started_at IS NULL THEN j.started_at
+                    ELSE datetime($started_at)
+                END,
+                j.completed_at = CASE
+                    WHEN $completed_at IS NULL THEN j.completed_at
+                    ELSE datetime($completed_at)
+                END,
+                j.error_message = $error_message
+            """
+            await session.run(
+                query,
+                job_id=job_id,
+                status=status,
+                started_at=started_at,
+                completed_at=completed_at,
+                error_message=error_message,
+            )
+
+    async def create_riley_campaign_intelligence_snapshot(
+        self,
+        *,
+        tenant_id: str,
+        job_id: str,
+        campaign_theme_clusters_json: str,
+        dominant_narratives: List[str],
+        key_actors_entities: List[str],
+        sentiment_distribution_json: str,
+        tone_distribution_json: str,
+        framing_distribution_json: str,
+        campaign_contradictions: List[str],
+        contradiction_tensions_json: str,
+        strategic_opportunities: List[str],
+        strategic_risks: List[str],
+        evidence_snippets: List[str],
+        docs_total: int,
+        docs_analyzed: int,
+        docs_failed: int,
+        partial_recompute: bool,
+    ) -> int:
+        """Create a versioned campaign intelligence snapshot and return the version."""
+        async with self._driver.session() as session:
+            query = """
+            OPTIONAL MATCH (prev:RileyCampaignIntelligenceSnapshot {tenant_id: $tenant_id})
+            WITH coalesce(max(prev.version), 0) + 1 as next_version
+            CREATE (s:RileyCampaignIntelligenceSnapshot {
+                id: $snapshot_id,
+                tenant_id: $tenant_id,
+                job_id: $job_id,
+                version: next_version,
+                created_at: datetime(),
+                campaign_theme_clusters_json: $campaign_theme_clusters_json,
+                dominant_narratives: $dominant_narratives,
+                key_actors_entities: $key_actors_entities,
+                sentiment_distribution_json: $sentiment_distribution_json,
+                tone_distribution_json: $tone_distribution_json,
+                framing_distribution_json: $framing_distribution_json,
+                campaign_contradictions: $campaign_contradictions,
+                contradiction_tensions_json: $contradiction_tensions_json,
+                strategic_opportunities: $strategic_opportunities,
+                strategic_risks: $strategic_risks,
+                evidence_snippets: $evidence_snippets,
+                docs_total: $docs_total,
+                docs_analyzed: $docs_analyzed,
+                docs_failed: $docs_failed,
+                partial_recompute: $partial_recompute
+            })
+            RETURN next_version as version
+            """
+            result = await session.run(
+                query,
+                snapshot_id=f"{tenant_id}:{job_id}",
+                tenant_id=tenant_id,
+                job_id=job_id,
+                campaign_theme_clusters_json=campaign_theme_clusters_json,
+                dominant_narratives=dominant_narratives,
+                key_actors_entities=key_actors_entities,
+                sentiment_distribution_json=sentiment_distribution_json,
+                tone_distribution_json=tone_distribution_json,
+                framing_distribution_json=framing_distribution_json,
+                campaign_contradictions=campaign_contradictions,
+                contradiction_tensions_json=contradiction_tensions_json,
+                strategic_opportunities=strategic_opportunities,
+                strategic_risks=strategic_risks,
+                evidence_snippets=evidence_snippets,
+                docs_total=docs_total,
+                docs_analyzed=docs_analyzed,
+                docs_failed=docs_failed,
+                partial_recompute=partial_recompute,
+            )
+            record = await result.single()
+            return int(record["version"]) if record else 1
+
+    async def get_latest_riley_campaign_intelligence_snapshot(
+        self,
+        *,
+        tenant_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return latest campaign intelligence snapshot for a tenant."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (s:RileyCampaignIntelligenceSnapshot {tenant_id: $tenant_id})
+            RETURN
+                s.id as snapshot_id,
+                s.tenant_id as tenant_id,
+                s.job_id as job_id,
+                s.version as version,
+                toString(s.created_at) as created_at,
+                s.campaign_theme_clusters_json as campaign_theme_clusters_json,
+                s.dominant_narratives as dominant_narratives,
+                s.key_actors_entities as key_actors_entities,
+                s.sentiment_distribution_json as sentiment_distribution_json,
+                s.tone_distribution_json as tone_distribution_json,
+                s.framing_distribution_json as framing_distribution_json,
+                s.campaign_contradictions as campaign_contradictions,
+                s.contradiction_tensions_json as contradiction_tensions_json,
+                s.strategic_opportunities as strategic_opportunities,
+                s.strategic_risks as strategic_risks,
+                s.evidence_snippets as evidence_snippets,
+                s.docs_total as docs_total,
+                s.docs_analyzed as docs_analyzed,
+                s.docs_failed as docs_failed,
+                s.partial_recompute as partial_recompute
+            ORDER BY s.version DESC
+            LIMIT 1
+            """
+            result = await session.run(query, tenant_id=tenant_id)
+            record = await result.single()
+            return dict(record) if record else None
+
     async def search_campaigns_fuzzy(self, query: str) -> str:
         """Search campaigns in the graph using fuzzy matching on name and description.
         

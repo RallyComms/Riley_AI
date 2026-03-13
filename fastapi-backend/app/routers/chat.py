@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import re
 from typing import Any, Dict, List, Literal, Optional
@@ -369,6 +370,113 @@ def _build_sources_payload(
             }
         )
     return sources
+
+
+def _safe_json_loads(raw: Any, default: Any) -> Any:
+    if not isinstance(raw, str) or not raw.strip():
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+async def _load_parent_document_intelligence(
+    *,
+    collection_name: str,
+    results: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    parent_ids: List[str] = []
+    seen: set[str] = set()
+    for result in results:
+        payload = result.get("payload", {}) or {}
+        parent_id = str(payload.get("parent_file_id") or "").strip()
+        if not parent_id or parent_id in seen:
+            continue
+        seen.add(parent_id)
+        parent_ids.append(parent_id)
+    if not parent_ids:
+        return []
+    try:
+        parent_points = await vector_service.client.retrieve(
+            collection_name=collection_name,
+            ids=parent_ids,
+            with_payload=True,
+            with_vectors=False,
+        )
+    except Exception:
+        return []
+    docs: List[Dict[str, Any]] = []
+    for point in parent_points:
+        payload = point.payload or {}
+        if str(payload.get("analysis_status") or "").lower() != "complete":
+            continue
+        docs.append(payload)
+    return docs
+
+
+def _build_doc_intel_context_block(doc_intel_items: List[Dict[str, Any]]) -> str:
+    if not doc_intel_items:
+        return ""
+    lines: List[str] = ["### 🧠 SYNTHESIZED DOCUMENT INTELLIGENCE"]
+    for item in doc_intel_items[:10]:
+        filename = str(item.get("filename") or "Unknown")
+        short_summary = str(item.get("doc_summary_short") or "").strip()
+        themes = item.get("key_themes") or []
+        tones = item.get("tone_labels") or []
+        framings = item.get("framing_labels") or []
+        opportunities = item.get("strategic_opportunities") or []
+        risks = item.get("persuasion_risks") or []
+        lines.append(f"[[Document Intelligence: {filename}]]")
+        if short_summary:
+            lines.append(f"- summary: {short_summary}")
+        if themes:
+            lines.append(f"- themes: {', '.join(str(x) for x in themes[:5])}")
+        if tones:
+            lines.append(f"- tone: {', '.join(str(x) for x in tones[:5])}")
+        if framings:
+            lines.append(f"- framing: {', '.join(str(x) for x in framings[:5])}")
+        if opportunities:
+            lines.append(f"- opportunities: {' | '.join(str(x) for x in opportunities[:3])}")
+        if risks:
+            lines.append(f"- risks: {' | '.join(str(x) for x in risks[:3])}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _build_campaign_intel_context_block(snapshot: Optional[Dict[str, Any]]) -> str:
+    if not snapshot:
+        return ""
+    dominant_narratives = list(snapshot.get("dominant_narratives") or [])[:8]
+    opportunities = list(snapshot.get("strategic_opportunities") or [])[:8]
+    risks = list(snapshot.get("strategic_risks") or [])[:8]
+    contradictions = _safe_json_loads(snapshot.get("contradiction_tensions_json"), [])
+    sentiment_distribution = _safe_json_loads(snapshot.get("sentiment_distribution_json"), {})
+    tone_distribution = _safe_json_loads(snapshot.get("tone_distribution_json"), {})
+    framing_distribution = _safe_json_loads(snapshot.get("framing_distribution_json"), {})
+    lines: List[str] = ["### 🌐 CAMPAIGN-WIDE INTELLIGENCE"]
+    lines.append(f"- snapshot_version: {snapshot.get('version')}")
+    if dominant_narratives:
+        lines.append(f"- dominant_narratives: {', '.join(str(x) for x in dominant_narratives)}")
+    if opportunities:
+        lines.append(f"- strategic_opportunities: {' | '.join(str(x) for x in opportunities[:5])}")
+    if risks:
+        lines.append(f"- strategic_risks: {' | '.join(str(x) for x in risks[:5])}")
+    if isinstance(sentiment_distribution, dict) and sentiment_distribution:
+        lines.append(f"- sentiment_distribution: {sentiment_distribution}")
+    if isinstance(tone_distribution, dict) and tone_distribution:
+        lines.append(f"- tone_distribution: {tone_distribution}")
+    if isinstance(framing_distribution, dict) and framing_distribution:
+        lines.append(f"- framing_distribution: {framing_distribution}")
+    if isinstance(contradictions, list) and contradictions:
+        summaries = [
+            str(item.get("contradiction_summary") or "").strip()
+            for item in contradictions[:4]
+            if isinstance(item, dict) and str(item.get("contradiction_summary") or "").strip()
+        ]
+        if summaries:
+            lines.append(f"- contradiction_tensions: {' | '.join(summaries)}")
+    return "\n".join(lines).strip()
 
 
 def _validate_and_sanitize_quotes(
@@ -884,7 +992,7 @@ async def chat(
         except Exception as exc:
             chat_history = []
 
-    # Step D: Format context (includes Graph + Vector results + File Manifest)
+    # Step D: Format context (includes Graph + Vector results + File Manifest + intelligence artifacts)
     has_context = (
         (private_results and len(private_results) > 0) or
         (global_results and len(global_results) > 0) or
@@ -892,6 +1000,41 @@ async def chat(
         (file_manifest and len(file_manifest) > 0)
     )
     context = _format_rag_context(private_results, global_results, graph_results, file_manifest)
+    intelligence_blocks: List[str] = []
+    try:
+        private_doc_intel = await _load_parent_document_intelligence(
+            collection_name=settings.QDRANT_COLLECTION_TIER_2,
+            results=private_results,
+        )
+    except Exception:
+        private_doc_intel = []
+    try:
+        global_doc_intel = await _load_parent_document_intelligence(
+            collection_name=settings.QDRANT_COLLECTION_TIER_1,
+            results=global_results,
+        )
+    except Exception:
+        global_doc_intel = []
+    all_doc_intel = [*private_doc_intel, *global_doc_intel]
+    doc_intel_block = _build_doc_intel_context_block(all_doc_intel)
+    if doc_intel_block:
+        intelligence_blocks.append(doc_intel_block)
+
+    campaign_snapshot: Optional[Dict[str, Any]] = None
+    if graph:
+        try:
+            campaign_snapshot = await graph.get_latest_riley_campaign_intelligence_snapshot(
+                tenant_id=request.tenant_id
+            )
+        except Exception:
+            campaign_snapshot = None
+    campaign_block = _build_campaign_intel_context_block(campaign_snapshot)
+    if campaign_block:
+        intelligence_blocks.append(campaign_block)
+
+    if intelligence_blocks:
+        context = f"{context}\n\n" + "\n\n".join(intelligence_blocks) if context else "\n\n".join(intelligence_blocks)
+        has_context = True
     total_sources = len(private_results) + len(global_results) + (1 if graph_results else 0)
     source_items = _build_sources_payload(private_results, global_results)
 
@@ -899,10 +1042,13 @@ async def chat(
     normal_mode_instruction = """NORMAL MODE INSTRUCTION:
 - Answer directly and get to the point.
 - Use retrieved evidence efficiently; prioritize the highest-signal facts.
+- Use document/campaign intelligence artifacts when available to speed synthesis, but verify with source evidence.
 - Stay strategic, but do not be excessively long unless the user asks for deeper detail.
 - Give a clear recommendation with rationale and concrete next steps."""
     deep_mode_instruction = """DEEP RESEARCH MODE INSTRUCTION:
 - Think broadly across campaign and global sources before concluding.
+- Use campaign intelligence artifacts by default and reconcile them with raw evidence.
+- Use document intelligence summaries to accelerate synthesis, then validate with chunk evidence.
 - Compare sources explicitly and call out contradictions, gaps, and recurring patterns.
 - Surface strategic implications, second-order effects, and risk/opportunity tradeoffs.
 - Ask clarifying questions when key constraints or decision criteria are missing.
@@ -942,6 +1088,7 @@ STRATEGIC OPERATING MODE:
 SOURCE HIERARCHY AND GROUNDING:
 - Use campaign materials first.
 - Use global knowledge base as secondary context when relevant.
+- Use synthesized document intelligence and campaign intelligence as an analysis layer, not a substitute for evidence.
 - Distinguish clearly between:
   1) what the documents explicitly say,
   2) your inference/analysis,
@@ -964,8 +1111,8 @@ RESPONSE STRUCTURE:
 - Start with a direct answer.
 - Then include clear sections:
   - `### Evidence from Sources`
-  - `### Strategic Analysis`
-  - `### Recommendation`
+  - `### Synthesized Intelligence`
+  - `### Strategic Recommendation`
 - When uncertainty is material, add:
   - `### Clarifying Questions`
 - Use bullet points for lists, tradeoffs, and action steps.
