@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.responses import PlainTextResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from app.dependencies.auth import check_tenant_membership, verify_clerk_token
@@ -111,14 +111,14 @@ async def get_riley_report(
     return RileyReportJobResponse(**job)
 
 
-@router.get("/riley/reports/{report_job_id}/download")
+@router.get("/riley/reports/{report_job_id}/download", response_model=None)
 async def download_riley_report(
     report_job_id: str,
     http_request: Request,
     tenant_id: str = Query(..., max_length=50),
     current_user: Dict = Depends(verify_clerk_token),
     graph: GraphService = Depends(get_graph),
-) -> RedirectResponse | PlainTextResponse:
+) -> Response:
     user_id = current_user.get("id", "unknown")
     await check_tenant_membership(user_id, tenant_id, http_request)
     job = await graph.get_riley_report_job(
