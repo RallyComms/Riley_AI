@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import csv
@@ -1465,6 +1466,8 @@ async def _run_ingestion_pipeline(
                             point_id,
                             type(preview_exc).__name__,
                         )
+                repeated_failure_counts: Dict[str, int] = {}
+                max_repeated_page_failures = 3
                 for segment in structured_segments:
                     if vision_segments_annotated >= max_vision_segments:
                         break
@@ -1490,12 +1493,32 @@ async def _run_ingestion_pipeline(
                         segment["multimodal_status"] = "vision_enriched"
                         vision_segments_annotated += 1
                     except Exception as vision_exc:
-                        logger.warning(
-                            "vision_caption_failed file_id=%s page=%s error=%s",
-                            point_id,
-                            page_num,
-                            type(vision_exc).__name__,
+                        error_type = type(vision_exc).__name__
+                        error_message = str(vision_exc).strip() or "<empty>"
+                        failure_signature = f"{error_type}:{error_message}"
+                        repeated_failure_counts[failure_signature] = (
+                            repeated_failure_counts.get(failure_signature, 0) + 1
                         )
+                        repeat_count = repeated_failure_counts[failure_signature]
+                        logger.warning(
+                            "vision_caption_failed file_id=%s filename=%s page=%s error_type=%s error_message=%s repeat_count=%s",
+                            point_id,
+                            filename,
+                            page_num,
+                            error_type,
+                            error_message,
+                            repeat_count,
+                        )
+                        if repeat_count >= max_repeated_page_failures:
+                            logger.warning(
+                                "vision_caption_short_circuit file_id=%s filename=%s page=%s failure_signature=%s threshold=%s",
+                                point_id,
+                                filename,
+                                page_num,
+                                failure_signature,
+                                max_repeated_page_failures,
+                            )
+                            break
                 if vision_segments_annotated > 0:
                     vision_status = "complete"
                     multimodal_status = "vision_enriched"
