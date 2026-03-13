@@ -54,6 +54,9 @@ BM25_MODEL = "qdrant/bm25"
 OCR_APPEND_MAX_CHARS = 2500
 VISION_APPEND_MAX_CHARS = 600
 MERGED_CHUNK_MAX_CHARS = 6000
+MIN_MEANINGFUL_NATIVE_CHARS = 80
+MIN_MEANINGFUL_TOTAL_CHARS = 120
+MIN_PARTIAL_TOTAL_CHARS = 35
 
 TEXT_NATIVE_EXTENSIONS = {
     "pdf", "docx", "doc", "pptx", "ppt", "txt", "md", "rtf",
@@ -616,23 +619,14 @@ def _clean_extracted_text(text: str) -> str:
 
 
 def _assess_extraction_quality(text: str, filename: str, file_size_bytes: int) -> Tuple[str, str]:
-    """Classify extraction quality and return (status, reason)."""
+    """Classify native extraction quality and return (status, reason)."""
     cleaned = _clean_extracted_text(text)
     ext = filename.split(".")[-1].lower() if "." in filename else ""
 
     if not cleaned:
-        if ext == "pdf":
-            return "ocr_needed", "No extractable native PDF text detected"
+        if ext in {"pdf", "pptx", "ppt"}:
+            return "ocr_needed", "No extractable native text detected for visual document"
         return "low_text", "No extractable text detected"
-
-    if len(cleaned) < MIN_EXTRACTED_CHARS and file_size_bytes > 10_000:
-        if ext == "pdf":
-            return "ocr_needed", "PDF appears image-based or text-poor"
-        return "low_text", "Extracted text too short for file size"
-
-    unique_ratio = len(set(cleaned.lower())) / max(1, len(cleaned))
-    if unique_ratio < 0.03:
-        return "low_text", "Low-information repetitive text"
 
     lowered = cleaned.lower()
     placeholder_markers = [
@@ -644,7 +638,103 @@ def _assess_extraction_quality(text: str, filename: str, file_size_bytes: int) -
     if any(marker in lowered for marker in placeholder_markers):
         return "low_text", "Extraction returned placeholder text"
 
-    return "indexed", "Extraction passed quality gate"
+    # Keep native gate permissive; final status now uses multimodal scoring.
+    if len(cleaned) < MIN_MEANINGFUL_NATIVE_CHARS and file_size_bytes > 10_000:
+        if ext in {"pdf", "pptx", "ppt"}:
+            return "ocr_needed", "Native text is weak for visual-heavy document; OCR recommended"
+        return "low_text", "Extracted text too short for file size"
+
+    if len(cleaned) < MIN_PARTIAL_TOTAL_CHARS:
+        if ext in {"pdf", "pptx", "ppt"}:
+            return "ocr_needed", "Native text is very short; OCR recommended"
+        return "low_text", "Native extraction too short"
+
+    return "indexed", "Native extraction sufficient"
+
+
+def _compute_content_signals(
+    *,
+    native_text: str,
+    merged_text: str,
+    segments: List[Dict[str, Any]],
+) -> Dict[str, int]:
+    native_char_count = len(_clean_extracted_text(native_text))
+    merged_char_count = len(_clean_extracted_text(merged_text))
+    ocr_char_count = 0
+    vision_caption_count = 0
+    vision_caption_chars = 0
+    all_slots: set[str] = set()
+    nonempty_slots: set[str] = set()
+
+    for idx, segment in enumerate(segments):
+        text = _clean_extracted_text(str(segment.get("text") or segment.get("raw_text") or ""))
+        has_ocr = bool(segment.get("ocr_text_present")) or str(segment.get("ocr_status") or "").lower() == "complete"
+        if has_ocr and text:
+            ocr_char_count += len(text)
+
+        caption = str(segment.get("vision_caption") or "").strip()
+        if caption:
+            vision_caption_count += 1
+            vision_caption_chars += len(caption)
+
+        loc_type = str(segment.get("location_type") or "").lower()
+        loc_value = str(segment.get("location_value") or "").strip()
+        if loc_type in {"page", "slide", "image_page"} and loc_value:
+            slot = f"{loc_type}:{loc_value}"
+        else:
+            slot = f"segment:{idx + 1}"
+        all_slots.add(slot)
+        if text or caption:
+            nonempty_slots.add(slot)
+
+    total_page_count = len(all_slots)
+    nonempty_page_count = len(nonempty_slots)
+    return {
+        "native_char_count": native_char_count,
+        "ocr_char_count": ocr_char_count,
+        "vision_caption_count": vision_caption_count,
+        "vision_caption_chars": vision_caption_chars,
+        "merged_char_count": merged_char_count,
+        "nonempty_page_count": nonempty_page_count,
+        "total_page_count": total_page_count,
+    }
+
+
+def _decide_final_ingestion_status(
+    *,
+    file_type: str,
+    quality_status: str,
+    quality_reason: str,
+    signals: Dict[str, int],
+) -> Tuple[str, str, str]:
+    native_chars = int(signals.get("native_char_count") or 0)
+    ocr_chars = int(signals.get("ocr_char_count") or 0)
+    merged_chars = int(signals.get("merged_char_count") or 0)
+    nonempty_pages = int(signals.get("nonempty_page_count") or 0)
+    total_pages = int(signals.get("total_page_count") or 0)
+    vision_caption_count = int(signals.get("vision_caption_count") or 0)
+    vision_caption_chars = int(signals.get("vision_caption_chars") or 0)
+
+    if (
+        merged_chars >= MIN_MEANINGFUL_TOTAL_CHARS
+        or native_chars >= MIN_MEANINGFUL_TOTAL_CHARS
+        or ocr_chars >= MIN_MEANINGFUL_TOTAL_CHARS
+        or (nonempty_pages >= 2 and merged_chars >= 70)
+    ):
+        return "indexed", "indexed_multichannel_sufficient", "indexed: native/OCR/merged content is sufficiently usable"
+
+    if (
+        merged_chars >= MIN_PARTIAL_TOTAL_CHARS
+        or native_chars >= MIN_PARTIAL_TOTAL_CHARS
+        or ocr_chars >= MIN_PARTIAL_TOTAL_CHARS
+        or (vision_caption_count >= 2 and vision_caption_chars >= 80)
+        or (nonempty_pages >= 1 and total_pages >= 1 and (merged_chars + vision_caption_chars) >= 50)
+    ):
+        return "partial", "partial_multichannel_limited", "partial: meaningful content exists but coverage/quality is limited"
+
+    if quality_status == "ocr_needed":
+        return "low_text", "low_text_all_channels_weak", "low_text: native extraction weak and OCR/vision did not recover enough usable content"
+    return "low_text", "low_text_all_channels_weak", "low_text: all content channels are insufficient"
 
 
 def _chunk_text_by_tokens(text: str, chunk_size_tokens: int = CHUNK_SIZE_TOKENS, overlap_tokens: int = CHUNK_OVERLAP_TOKENS) -> List[str]:
@@ -1522,13 +1612,54 @@ async def _run_ingestion_pipeline(
                 if vision_segments_annotated > 0:
                     vision_status = "complete"
                     multimodal_status = "vision_enriched"
+                    # Rebuild merged text so vision-only or weak-native docs remain searchable.
+                    for segment in structured_segments:
+                        caption = str(segment.get("vision_caption") or "").strip()
+                        if not caption:
+                            continue
+                        base_text = str(segment.get("text") or segment.get("raw_text") or "").strip()
+                        if caption and caption not in base_text:
+                            enriched = f"{base_text}\n\n[VISION]\n{caption}".strip() if base_text else f"[VISION]\n{caption}"
+                            segment["text"] = enriched
+                            segment["raw_text"] = enriched
+                    merged_cleaned_text, prepared_segments = _prepare_segments_for_chunking(structured_segments)
+                    cleaned_text = _clean_extracted_text(merged_cleaned_text or raw_text)[:MAX_CHARS_TOTAL]
                 else:
                     vision_status = "failed"
 
-        if quality_status != "indexed":
+        content_signals = _compute_content_signals(
+            native_text=raw_text,
+            merged_text=cleaned_text,
+            segments=structured_segments,
+        )
+        final_status, decision_code, decision_why = _decide_final_ingestion_status(
+            file_type=file_type,
+            quality_status=quality_status,
+            quality_reason=quality_reason,
+            signals=content_signals,
+        )
+        quality_status = final_status
+        quality_reason = decision_why
+
+        if quality_status == "low_text":
             await _delete_chunk_points(collection_name, point_id)
             duration_ms = int((time.perf_counter() - started) * 1000)
             completed_at = datetime.now().isoformat()
+            logger.info(
+                "ingestion_decision file_id=%s filename=%s file_type=%s native_char_count=%s ocr_char_count=%s "
+                "vision_caption_count=%s merged_char_count=%s nonempty_page_count=%s total_page_count=%s final_status=%s decision_reason=%s",
+                point_id,
+                filename,
+                file_type,
+                content_signals.get("native_char_count", 0),
+                content_signals.get("ocr_char_count", 0),
+                content_signals.get("vision_caption_count", 0),
+                content_signals.get("merged_char_count", 0),
+                content_signals.get("nonempty_page_count", 0),
+                content_signals.get("total_page_count", 0),
+                quality_status,
+                quality_reason,
+            )
             await vector_service.client.set_payload(
                 collection_name=collection_name,
                 payload={
@@ -1582,6 +1713,18 @@ async def _run_ingestion_pipeline(
                     "analysis_status": "not_requested",
                     "analysis_completed_at": None,
                     "analysis_error": None,
+                    "ingestion_decision_code": decision_code,
+                    "ingestion_decision_why": quality_reason,
+                    "ingestion_decision": {
+                        "code": decision_code,
+                        "why": quality_reason,
+                        "native_char_count": content_signals.get("native_char_count", 0),
+                        "ocr_char_count": content_signals.get("ocr_char_count", 0),
+                        "vision_caption_count": content_signals.get("vision_caption_count", 0),
+                        "merged_char_count": content_signals.get("merged_char_count", 0),
+                        "nonempty_page_count": content_signals.get("nonempty_page_count", 0),
+                        "total_page_count": content_signals.get("total_page_count", 0),
+                    },
                 },
                 points=[point_id],
             )
@@ -1651,7 +1794,7 @@ async def _run_ingestion_pipeline(
                     "url": file_url,
                     "tags": tags,
                     "ai_enabled": True,
-                    "ingestion_status": "indexed",
+                    "ingestion_status": quality_status,
                     "text": merged_chunk_text,
                     "content": merged_chunk_text,
                     "raw_text": str(best_segment.get("raw_text") or chunk_text),
@@ -1737,6 +1880,21 @@ async def _run_ingestion_pipeline(
         )
         duration_ms = int((time.perf_counter() - started) * 1000)
         embedding_cost_estimate = round((total_tokens / 1000.0) * EMBEDDING_COST_PER_1K_TOKENS_USD, 6)
+        logger.info(
+            "ingestion_decision file_id=%s filename=%s file_type=%s native_char_count=%s ocr_char_count=%s "
+            "vision_caption_count=%s merged_char_count=%s nonempty_page_count=%s total_page_count=%s final_status=%s decision_reason=%s",
+            point_id,
+            filename,
+            file_type,
+            content_signals.get("native_char_count", 0),
+            content_signals.get("ocr_char_count", 0),
+            content_signals.get("vision_caption_count", 0),
+            content_signals.get("merged_char_count", 0),
+            content_signals.get("nonempty_page_count", 0),
+            content_signals.get("total_page_count", 0),
+            quality_status,
+            quality_reason,
+        )
         parent_payload: Dict[str, Any] = {
             "record_type": "file",
             "filename": filename,
@@ -1758,7 +1916,7 @@ async def _run_ingestion_pipeline(
             "preview_status": preview_status,
             "preview_error": preview_error,
             "ai_enabled": True,
-            "ingestion_status": "indexed",
+            "ingestion_status": quality_status,
             "ingestion_error": None,
             "extracted_char_count": len(cleaned_text),
             "chunk_count": len(chunk_rows),
@@ -1786,6 +1944,18 @@ async def _run_ingestion_pipeline(
             "analysis_status": "queued" if settings.RILEY_DOC_INTEL_ENABLED else "not_requested",
             "analysis_completed_at": None,
             "analysis_error": None,
+            "ingestion_decision_code": decision_code,
+            "ingestion_decision_why": quality_reason,
+            "ingestion_decision": {
+                "code": decision_code,
+                "why": quality_reason,
+                "native_char_count": content_signals.get("native_char_count", 0),
+                "ocr_char_count": content_signals.get("ocr_char_count", 0),
+                "vision_caption_count": content_signals.get("vision_caption_count", 0),
+                "merged_char_count": content_signals.get("merged_char_count", 0),
+                "nonempty_page_count": content_signals.get("nonempty_page_count", 0),
+                "total_page_count": content_signals.get("total_page_count", 0),
+            },
         }
         if not is_global:
             parent_payload["client_id"] = tenant_id
@@ -1799,7 +1969,7 @@ async def _run_ingestion_pipeline(
             await vector_service.client.set_payload(
                 collection_name=collection_name,
                 payload={
-                    "ingestion_job_status": "indexed",
+                    "ingestion_job_status": quality_status,
                     "ingestion_job_completed_at": completed_at,
                     "ingestion_job_error_message": None,
                     "ingestion_job_processing_duration_ms": duration_ms,
@@ -1824,12 +1994,35 @@ async def _run_ingestion_pipeline(
                     doc_intel_exc,
                 )
         logger.info(
-            "ingestion_complete file_id=%s tenant=%s status=indexed chars=%s chunks=%s duration_ms=%s tokens=%s est_cost_usd=%s",
-            point_id, tenant_id, len(cleaned_text), len(chunk_rows), duration_ms, total_tokens, embedding_cost_estimate
+            "ingestion_complete file_id=%s tenant=%s status=%s chars=%s chunks=%s duration_ms=%s tokens=%s est_cost_usd=%s",
+            point_id,
+            tenant_id,
+            quality_status,
+            len(cleaned_text),
+            len(chunk_rows),
+            duration_ms,
+            total_tokens,
+            embedding_cost_estimate,
         )
     except Exception as exc:
         duration_ms = int((time.perf_counter() - started) * 1000)
         logger.exception("ingestion_failed file_id=%s tenant=%s error=%s", point_id, tenant_id, exc)
+        fallback_signals = locals().get("content_signals") or {}
+        logger.info(
+            "ingestion_decision file_id=%s filename=%s file_type=%s native_char_count=%s ocr_char_count=%s "
+            "vision_caption_count=%s merged_char_count=%s nonempty_page_count=%s total_page_count=%s final_status=%s decision_reason=%s",
+            point_id,
+            filename,
+            file_type,
+            fallback_signals.get("native_char_count", 0),
+            fallback_signals.get("ocr_char_count", 0),
+            fallback_signals.get("vision_caption_count", 0),
+            fallback_signals.get("merged_char_count", 0),
+            fallback_signals.get("nonempty_page_count", 0),
+            fallback_signals.get("total_page_count", 0),
+            "failed",
+            f"failed: processing exception: {type(exc).__name__}",
+        )
         completed_at = datetime.now().isoformat()
         await vector_service.client.set_payload(
             collection_name=collection_name,
@@ -1852,6 +2045,12 @@ async def _run_ingestion_pipeline(
                 "analysis_status": "failed",
                 "analysis_completed_at": completed_at,
                 "analysis_error": "Ingestion failed; document intelligence was not generated.",
+                "ingestion_decision_code": "failed_processing_exception",
+                "ingestion_decision_why": f"failed: processing exception: {type(exc).__name__}",
+                "ingestion_decision": {
+                    "code": "failed_processing_exception",
+                    "why": f"failed: processing exception: {type(exc).__name__}",
+                },
             },
             points=[point_id],
         )
