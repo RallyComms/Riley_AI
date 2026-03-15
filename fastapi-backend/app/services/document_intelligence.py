@@ -659,8 +659,12 @@ def _build_doc_profile(
 
 
 def _route_doc_intel_mode(profile: Dict[str, Any], settings: Any) -> str:
+    return _route_doc_intel_decision(profile, settings)["mode"]
+
+
+def _route_doc_intel_decision(profile: Dict[str, Any], settings: Any) -> Dict[str, str]:
     if not bool(getattr(settings, "RILEY_DOC_INTEL_MULTIPASS_ENABLED", True)):
-        return "single_pass"
+        return {"mode": "single_pass", "reason": "multipass_disabled"}
     chunk_count = int(profile.get("chunk_count") or 0)
     char_count = int(profile.get("char_count") or 0)
     page_count = int(profile.get("page_or_slide_count") or 0)
@@ -670,18 +674,18 @@ def _route_doc_intel_mode(profile: Dict[str, Any], settings: Any) -> str:
     complex_file = file_type in {"pdf", "pptx", "ppt"}
 
     if chunk_count >= int(settings.RILEY_DOC_INTEL_MULTIPASS_MIN_CHUNKS):
-        return "multi_pass"
+        return {"mode": "multi_pass", "reason": "chunk_count_threshold"}
     if char_count >= int(settings.RILEY_DOC_INTEL_MULTIPASS_MIN_CHARS):
-        return "multi_pass"
+        return {"mode": "multi_pass", "reason": "char_count_threshold"}
     if page_count >= int(settings.RILEY_DOC_INTEL_MULTIPASS_MIN_PAGES):
-        return "multi_pass"
+        return {"mode": "multi_pass", "reason": "page_or_slide_threshold"}
     if section_count >= 24:
-        return "multi_pass"
+        return {"mode": "multi_pass", "reason": "section_complexity_threshold"}
     if multimodal_complex and chunk_count >= 28:
-        return "multi_pass"
+        return {"mode": "multi_pass", "reason": "multimodal_complexity_threshold"}
     if complex_file and chunk_count >= 40:
-        return "multi_pass"
-    return "single_pass"
+        return {"mode": "multi_pass", "reason": "complex_file_threshold"}
+    return {"mode": "single_pass", "reason": "below_multipass_thresholds"}
 
 
 def _band_id(file_id: str, band_index: int) -> str:
@@ -1602,7 +1606,23 @@ async def run_document_intelligence_job(
         filename = str(parent_payload.get("filename") or file_id)
         file_type = str(parent_payload.get("file_type") or parent_payload.get("type") or "unknown")
         profile = _build_doc_profile(chunk_payloads=chunk_payloads, file_type=file_type)
-        execution_mode = _route_doc_intel_mode(profile, settings)
+        routing_decision = _route_doc_intel_decision(profile, settings)
+        execution_mode = str(routing_decision.get("mode") or "single_pass")
+        routing_reason = str(routing_decision.get("reason") or "unknown")
+        logger.info(
+            "doc_intel_routing file_id=%s filename=%s mode=%s chunk_count=%s char_count=%s "
+            "page_or_slide_count=%s section_count=%s ocr_present=%s vision_present=%s routing_reason=%s",
+            file_id,
+            filename,
+            execution_mode,
+            int(profile.get("chunk_count") or 0),
+            int(profile.get("char_count") or 0),
+            int(profile.get("page_or_slide_count") or 0),
+            int(profile.get("section_count") or 0),
+            bool(profile.get("ocr_present")),
+            bool(profile.get("vision_present")),
+            routing_reason,
+        )
 
         if execution_mode == "multi_pass":
             bands = _build_analysis_bands(
@@ -1753,6 +1773,25 @@ async def run_document_intelligence_job(
                 "ocr_included_in_analyzed_bands": bool(pre_validation.get("ocr_included")),
                 "vision_included_in_analyzed_bands": bool(pre_validation.get("vision_included")),
             }
+            logger.info(
+                "doc_intel_bands_summary file_id=%s total_bands=%s analyzed_bands=%s failed_bands_count=%s "
+                "appendix_required=%s appendix_covered=%s high_signal_band_coverage_ratio=%s bme_covered=%s",
+                file_id,
+                int(pre_validation.get("total_bands") or 0),
+                int(pre_validation.get("analyzed_bands") or 0),
+                int(pre_validation.get("failed_bands_count") or 0),
+                bool(pre_validation.get("appendix_required")),
+                bool(pre_validation.get("appendix_covered")),
+                float(pre_validation.get("high_signal_ratio") or 0.0),
+                bool(pre_validation.get("has_beginning_middle_end")),
+            )
+            logger.info(
+                "doc_intel_synthesis_started file_id=%s analyzed_bands=%s failed_bands_count=%s contradiction_count=%s",
+                file_id,
+                int(pre_validation.get("analyzed_bands") or 0),
+                int(pre_validation.get("failed_bands_count") or 0),
+                len(tensions),
+            )
             synth_prompt = _build_multipass_synthesis_prompt(
                 filename=filename,
                 file_type=file_type,
@@ -1793,6 +1832,43 @@ async def run_document_intelligence_job(
                 band_artifacts=successful_bands,
                 profile=profile,
                 failed_bands=failed_bands,
+            )
+            missing_zones = not bool(validation.get("has_beginning_middle_end"))
+            missing_appendix = bool(validation.get("appendix_required")) and not bool(validation.get("appendix_covered"))
+            missing_ocr = bool(profile.get("ocr_present")) and not bool(validation.get("ocr_included"))
+            missing_vision = bool(profile.get("vision_present")) and not bool(validation.get("vision_included"))
+            low_high_signal_coverage = (
+                int(validation.get("high_signal_total") or 0) > 0
+                and float(validation.get("high_signal_ratio") or 0.0) < 0.85
+            )
+            if (
+                missing_zones
+                or missing_appendix
+                or int(validation.get("failed_bands_count") or 0) > 0
+                or missing_ocr
+                or missing_vision
+                or low_high_signal_coverage
+            ):
+                logger.warning(
+                    "doc_intel_validation_downgrade file_id=%s missing_zones=%s missing_appendix=%s "
+                    "failed_bands_count=%s missing_ocr_coverage=%s missing_vision_coverage=%s "
+                    "low_high_signal_coverage=%s",
+                    file_id,
+                    missing_zones,
+                    missing_appendix,
+                    int(validation.get("failed_bands_count") or 0),
+                    missing_ocr,
+                    missing_vision,
+                    low_high_signal_coverage,
+                )
+            logger.info(
+                "doc_intel_synthesis_completed file_id=%s contradiction_count=%s final_fidelity_level=%s "
+                "validation_status=%s validation_note=%s",
+                file_id,
+                len(tensions),
+                str(validation.get("fidelity") or "unknown"),
+                str(validation.get("validation_status") or "unknown"),
+                str(validation.get("validation_note") or "")[:280],
             )
             completed_at = datetime.now().isoformat()
             contradictions_count = len(tensions)
