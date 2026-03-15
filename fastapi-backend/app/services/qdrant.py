@@ -895,6 +895,19 @@ class VectorService:
                 "analysis_chunks_coverage_ratio": payload.get("analysis_chunks_coverage_ratio"),
                 "analysis_chars_coverage_ratio": payload.get("analysis_chars_coverage_ratio"),
                 "analysis_context_reduction_applied": payload.get("analysis_context_reduction_applied"),
+                "analysis_execution_mode": payload.get("analysis_execution_mode"),
+                "analysis_total_bands": payload.get("analysis_total_bands"),
+                "analysis_analyzed_bands": payload.get("analysis_analyzed_bands"),
+                "analysis_band_coverage_ratio": payload.get("analysis_band_coverage_ratio"),
+                "analysis_final_fidelity_level": payload.get("analysis_final_fidelity_level"),
+                "analysis_validation_status": payload.get("analysis_validation_status"),
+                "analysis_validation_note": payload.get("analysis_validation_note"),
+                "analysis_contradiction_count": payload.get("analysis_contradiction_count"),
+                "analysis_failed_bands_count": payload.get("analysis_failed_bands_count"),
+                "analysis_validation_reasons_json": payload.get("analysis_validation_reasons_json"),
+                "analysis_high_signal_band_coverage_ratio": payload.get("analysis_high_signal_band_coverage_ratio"),
+                "analysis_appendix_required": payload.get("analysis_appendix_required"),
+                "analysis_appendix_covered": payload.get("analysis_appendix_covered"),
             })
 
         return files
@@ -1009,6 +1022,19 @@ class VectorService:
                 "analysis_chunks_coverage_ratio": payload.get("analysis_chunks_coverage_ratio"),
                 "analysis_chars_coverage_ratio": payload.get("analysis_chars_coverage_ratio"),
                 "analysis_context_reduction_applied": payload.get("analysis_context_reduction_applied"),
+                "analysis_execution_mode": payload.get("analysis_execution_mode"),
+                "analysis_total_bands": payload.get("analysis_total_bands"),
+                "analysis_analyzed_bands": payload.get("analysis_analyzed_bands"),
+                "analysis_band_coverage_ratio": payload.get("analysis_band_coverage_ratio"),
+                "analysis_final_fidelity_level": payload.get("analysis_final_fidelity_level"),
+                "analysis_validation_status": payload.get("analysis_validation_status"),
+                "analysis_validation_note": payload.get("analysis_validation_note"),
+                "analysis_contradiction_count": payload.get("analysis_contradiction_count"),
+                "analysis_failed_bands_count": payload.get("analysis_failed_bands_count"),
+                "analysis_validation_reasons_json": payload.get("analysis_validation_reasons_json"),
+                "analysis_high_signal_band_coverage_ratio": payload.get("analysis_high_signal_band_coverage_ratio"),
+                "analysis_appendix_required": payload.get("analysis_appendix_required"),
+                "analysis_appendix_covered": payload.get("analysis_appendix_covered"),
             })
 
         return files
