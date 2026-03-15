@@ -299,14 +299,45 @@ def _build_doc_intel_context_block(doc_intel_items: List[Dict[str, Any]]) -> str
         opportunities = item.get("strategic_opportunities") or []
         risks = item.get("persuasion_risks") or []
         fidelity = str(item.get("analysis_fidelity_level") or "unknown").strip()
+        exec_mode = str(item.get("analysis_execution_mode") or "unknown").strip()
         chunks_cov = item.get("analysis_chunks_coverage_ratio")
         chars_cov = item.get("analysis_chars_coverage_ratio")
+        bands_total = int(item.get("analysis_total_bands") or 0)
+        bands_analyzed = int(item.get("analysis_analyzed_bands") or 0)
+        band_cov = item.get("analysis_band_coverage_ratio")
+        validation_status = str(item.get("analysis_validation_status") or "").strip()
+        validation_note = str(item.get("analysis_validation_note") or "").strip()
+        contradiction_count = int(item.get("analysis_contradiction_count") or 0)
+        failed_bands = int(item.get("analysis_failed_bands_count") or 0)
+        high_signal_cov = item.get("analysis_high_signal_band_coverage_ratio")
+        appendix_required = bool(item.get("analysis_appendix_required"))
+        appendix_covered = bool(item.get("analysis_appendix_covered"))
         lines.append(f"[Doc Intelligence] {filename}")
         lines.append(f"- fidelity: {fidelity}")
+        lines.append(f"- execution_mode: {exec_mode}")
+        if bands_total > 0:
+            if band_cov is not None:
+                lines.append(
+                    f"- band_coverage: {bands_analyzed}/{bands_total} ({float(band_cov or 0.0):.2%})"
+                )
+            else:
+                lines.append(f"- band_coverage: {bands_analyzed}/{bands_total}")
         if chunks_cov is not None or chars_cov is not None:
             lines.append(
                 f"- coverage: chunks={float(chunks_cov or 0.0):.2%}, chars={float(chars_cov or 0.0):.2%}"
             )
+        if validation_status:
+            lines.append(f"- validation_status: {validation_status}")
+        if validation_note:
+            lines.append(f"- validation_note: {validation_note}")
+        if contradiction_count > 0:
+            lines.append(f"- intra_document_tensions: {contradiction_count}")
+        if failed_bands > 0:
+            lines.append(f"- failed_bands: {failed_bands}")
+        if high_signal_cov is not None:
+            lines.append(f"- high_signal_coverage: {float(high_signal_cov or 0.0):.2%}")
+        if appendix_required:
+            lines.append(f"- appendix_coverage: {'covered' if appendix_covered else 'missing'}")
         if short_summary:
             lines.append(f"- summary: {short_summary}")
         if themes:

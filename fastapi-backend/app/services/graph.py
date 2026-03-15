@@ -813,6 +813,15 @@ class GraphService:
         chars_coverage_ratio: Optional[float] = None,
         ocr_content_included: Optional[bool] = None,
         vision_content_included: Optional[bool] = None,
+        analysis_execution_mode: Optional[str] = None,
+        total_bands: Optional[int] = None,
+        analyzed_bands: Optional[int] = None,
+        band_coverage_ratio: Optional[float] = None,
+        contradiction_count: Optional[int] = None,
+        validation_status: Optional[str] = None,
+        validation_note: Optional[str] = None,
+        band_artifacts_json: Optional[str] = None,
+        intra_document_tensions_json: Optional[str] = None,
     ) -> None:
         """Persist per-document intelligence artifact in Neo4j."""
         artifact_id = f"{tenant_id}:{file_id}"
@@ -883,7 +892,22 @@ class GraphService:
                 d.chunks_coverage_ratio = $chunks_coverage_ratio,
                 d.chars_coverage_ratio = $chars_coverage_ratio,
                 d.ocr_content_included = $ocr_content_included,
-                d.vision_content_included = $vision_content_included
+                d.vision_content_included = $vision_content_included,
+                d.analysis_execution_mode = $analysis_execution_mode,
+                d.total_bands = $total_bands,
+                d.analyzed_bands = $analyzed_bands,
+                d.band_coverage_ratio = $band_coverage_ratio,
+                d.contradiction_count = $contradiction_count,
+                d.validation_status = $validation_status,
+                d.validation_note = $validation_note,
+                d.band_artifacts_json = CASE
+                    WHEN $band_artifacts_json IS NULL THEN d.band_artifacts_json
+                    ELSE $band_artifacts_json
+                END,
+                d.intra_document_tensions_json = CASE
+                    WHEN $intra_document_tensions_json IS NULL THEN d.intra_document_tensions_json
+                    ELSE $intra_document_tensions_json
+                END
             """
             await session.run(
                 query,
@@ -919,6 +943,15 @@ class GraphService:
                 chars_coverage_ratio=chars_coverage_ratio,
                 ocr_content_included=ocr_content_included,
                 vision_content_included=vision_content_included,
+                analysis_execution_mode=analysis_execution_mode,
+                total_bands=total_bands,
+                analyzed_bands=analyzed_bands,
+                band_coverage_ratio=band_coverage_ratio,
+                contradiction_count=contradiction_count,
+                validation_status=validation_status,
+                validation_note=validation_note,
+                band_artifacts_json=band_artifacts_json,
+                intra_document_tensions_json=intra_document_tensions_json,
             )
 
     async def create_riley_campaign_intelligence_job(
