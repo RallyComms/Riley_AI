@@ -1265,11 +1265,10 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
         base_context_chars = max(8000, int(settings.RILEY_REPORT_MAX_CONTEXT_CHARS))
         attempt_plan = [
             {"context_scale": 1.00, "timeout_scale": 1.00, "fidelity": "full", "strategy": "full_context"},
-            {"context_scale": 1.00, "timeout_scale": 1.35, "fidelity": "full", "strategy": "full_context_retry"},
-            {"context_scale": 0.95, "timeout_scale": 1.80, "fidelity": "lightly_reduced", "strategy": "coverage_preserving_95"},
-            {"context_scale": 0.90, "timeout_scale": 2.30, "fidelity": "lightly_reduced", "strategy": "coverage_preserving_90"},
-            {"context_scale": 0.85, "timeout_scale": 2.90, "fidelity": "moderately_reduced", "strategy": "coverage_preserving_85"},
-            {"context_scale": 0.80, "timeout_scale": 3.40, "fidelity": "heavily_reduced", "strategy": "coverage_preserving_80"},
+            {"context_scale": 0.85, "timeout_scale": 1.35, "fidelity": "moderately_reduced", "strategy": "coverage_preserving_85"},
+            {"context_scale": 0.70, "timeout_scale": 1.80, "fidelity": "heavily_reduced", "strategy": "coverage_preserving_70"},
+            {"context_scale": 0.55, "timeout_scale": 2.30, "fidelity": "heavily_reduced", "strategy": "coverage_preserving_55"},
+            {"context_scale": 0.40, "timeout_scale": 2.90, "fidelity": "survival_mode", "strategy": "coverage_preserving_40"},
         ]
 
         report_body: Optional[str] = None
