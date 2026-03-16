@@ -163,7 +163,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [openSourcesByMessageId, setOpenSourcesByMessageId] = useState<Record<string, boolean>>({});
   const [indexSummary, setIndexSummary] = useState<RileyIndexSummary | null>(null);
   const [reportJobs, setReportJobs] = useState<ReportJob[]>([]);
-  const [hiddenReportJobIds, setHiddenReportJobIds] = useState<Record<string, true>>({});
+  const [hiddenReportJobIds, setHiddenReportJobIds] = useState<Record<string, boolean>>({});
   const [reportActionLoadingById, setReportActionLoadingById] = useState<Record<string, boolean>>({});
   const [reportActionErrorById, setReportActionErrorById] = useState<Record<string, string>>({});
   const [isReportsLoading, setIsReportsLoading] = useState(false);
@@ -176,7 +176,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const knownReportStatusRef = useRef<
     Record<string, "queued" | "processing" | "cancelling" | "cancelled" | "complete" | "failed" | "deleted">
   >({});
-  const hiddenReportJobIdsRef = useRef<Record<string, true>>({});
+  const hiddenReportJobIdsRef = useRef<Record<string, boolean>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
