@@ -1229,13 +1229,36 @@ Context Data:
         )
         response_text = _validate_and_sanitize_quotes(response_text, private_results, global_results)
     except Exception as exc:
-        logger.warning(
-            "riley_answer_generation_failed provider=%s model=%s tenant=%s error_type=%s",
-            provider,
-            model_name,
-            request.tenant_id,
-            type(exc).__name__,
-        )
+        status_code: Optional[int] = None
+        response_body: Optional[str] = None
+        try:
+            import httpx  # type: ignore
+
+            if isinstance(exc, httpx.HTTPStatusError):
+                status_code = int(exc.response.status_code) if exc.response is not None else None
+                if exc.response is not None:
+                    response_body = (exc.response.text or "")[:1200]
+        except Exception:
+            pass
+
+        if status_code is not None:
+            logger.warning(
+                "riley_answer_generation_failed provider=%s model=%s tenant=%s error_type=%s http_status=%s response_body=%s",
+                provider,
+                model_name,
+                request.tenant_id,
+                type(exc).__name__,
+                status_code,
+                response_body or "",
+            )
+        else:
+            logger.warning(
+                "riley_answer_generation_failed provider=%s model=%s tenant=%s error_type=%s",
+                provider,
+                model_name,
+                request.tenant_id,
+                type(exc).__name__,
+            )
         raise HTTPException(
             status_code=503,
             detail="Riley is temporarily unavailable. Please try again in a moment.",
