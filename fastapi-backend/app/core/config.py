@@ -62,6 +62,8 @@ class Settings(BaseSettings):
     RILEY_REPORT_WORKER_URL: Optional[str] = None
     RILEY_REPORT_WORKER_TOKEN: Optional[str] = None
     RILEY_REPORTS_TASKS_SERVICE_ACCOUNT_EMAIL: Optional[str] = None
+    RILEY_REPORT_MODEL: str = "gpt-4.1-mini"
+    RILEY_REPORT_DEEP_MODEL: str = "gpt-4.1"
     RILEY_REPORT_TIMEOUT_SECONDS: int = 120
     RILEY_REPORT_MAX_TIMEOUT_SECONDS: int = 420
     RILEY_REPORT_RETRY_ATTEMPTS: int = 4

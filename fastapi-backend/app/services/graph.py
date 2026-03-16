@@ -679,6 +679,23 @@ class GraphService:
             )
             return jobs
 
+    async def count_active_riley_report_jobs_for_tenant(self, *, tenant_id: str) -> int:
+        """Count active report jobs for a tenant across all users."""
+        if not await self._label_exists("RileyReportJob"):
+            return 0
+        async with self._driver.session() as session:
+            query = """
+            MATCH (r:RileyReportJob {tenant_id: $tenant_id})
+            WHERE r.deleted_at IS NULL
+              AND coalesce(r.status, "") IN ["queued", "processing", "cancelling"]
+            RETURN count(r) as active_count
+            """
+            result = await session.run(query, tenant_id=tenant_id)
+            record = await result.single()
+            if not record:
+                return 0
+            return int(record.get("active_count") or 0)
+
     async def get_riley_report_job(
         self,
         *,

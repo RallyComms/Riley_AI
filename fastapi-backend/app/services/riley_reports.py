@@ -1183,7 +1183,7 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
     report_type = _normalize_report_type(str(job.get("report_type") or "strategy_memo"))
     title = str(job.get("title") or "Riley Strategy Report").strip() or "Riley Strategy Report"
     mode = _normalize_report_mode(str(job.get("mode") or "deep"))
-    model_name = settings.RILEY_DEEP_MODEL if mode == "deep" else settings.RILEY_MODEL
+    model_name = settings.RILEY_REPORT_DEEP_MODEL if mode == "deep" else settings.RILEY_REPORT_MODEL
 
     logger.info(
         "report_job_worker_started report_job_id=%s tenant_id=%s report_type=%s model=%s deep_mode=%s",

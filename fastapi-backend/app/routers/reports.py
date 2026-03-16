@@ -150,6 +150,12 @@ async def create_riley_report(
 ) -> RileyReportJobResponse:
     user_id = current_user.get("id", "unknown")
     await check_tenant_membership(user_id, request.tenant_id, http_request)
+    active_count = await graph.count_active_riley_report_jobs_for_tenant(tenant_id=request.tenant_id)
+    if active_count >= 1:
+        raise HTTPException(
+            status_code=409,
+            detail="A report is already running for this campaign. Please wait for it to finish or cancel it before starting another.",
+        )
     try:
         job = await create_report_job(
             graph=graph,
