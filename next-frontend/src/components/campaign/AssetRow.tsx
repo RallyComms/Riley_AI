@@ -38,8 +38,19 @@ interface AssetRowProps {
 }
 
 // Helper function to determine if file type supports AI processing
-function isAISupportedType(type: Asset["type"]): boolean {
-  return type === "pdf" || type === "docx";
+function normalizeAssetType(type: string | undefined | null): Asset["type"] | "unknown" {
+  const normalized = String(type || "").trim().toLowerCase().replace(/^\./, "");
+  if (normalized === "pdf") return "pdf";
+  if (normalized === "doc" || normalized === "docx") return "docx";
+  if (normalized === "xls" || normalized === "xlsx" || normalized === "csv" || normalized === "tsv") return "xlsx";
+  if (normalized === "ppt" || normalized === "pptx") return "pptx";
+  if (["png", "jpg", "jpeg", "webp", "gif", "svg", "img", "image"].includes(normalized)) return "img";
+  return "unknown";
+}
+
+function isAISupportedType(type: string | undefined | null): boolean {
+  const normalized = normalizeAssetType(type);
+  return normalized === "pdf" || normalized === "docx";
 }
 
 const allTags: AssetTag[] = ["Messaging", "Research", "Strategy", "Media", "Pitch", "Other"];
@@ -77,8 +88,14 @@ const tagColors: Record<AssetTag, { bg: string; text: string; border: string }> 
   },
 };
 
-function getFileIcon(type: Asset["type"]) {
-  switch (type) {
+const defaultTagColor = tagColors.Other;
+
+function getTagColor(tag: string): { bg: string; text: string; border: string } {
+  return tagColors[tag as AssetTag] || defaultTagColor;
+}
+
+function getFileIcon(type: string | undefined | null) {
+  switch (normalizeAssetType(type)) {
     case "pdf":
       return { icon: FileText, color: "text-red-500" };
     case "docx":
@@ -162,6 +179,7 @@ function formatStatusLabel(value: string): string {
 
 export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabledChange, onClick, onRename, onPromote, campaignId }: AssetRowProps) {
   const { getToken } = useAuth();
+  const normalizedType = normalizeAssetType(asset.type);
   const { icon: FileIcon, color: iconColor } = getFileIcon(asset.type);
   const [isUpdatingTags, setIsUpdatingTags] = useState(false);
 
@@ -233,17 +251,22 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
           {/* Active Tags */}
           <div className="flex flex-wrap items-center gap-1.5">
             {asset.tags.map((tag) => (
-              <span
-                key={tag}
-                className={cn(
-                  "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium",
-                  tagColors[tag].bg,
-                  tagColors[tag].text,
-                  tagColors[tag].border
-                )}
-              >
-                {tag}
-              </span>
+              (() => {
+                const colors = getTagColor(tag);
+                return (
+                  <span
+                    key={tag}
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium",
+                      colors.bg,
+                      colors.text,
+                      colors.border
+                    )}
+                  >
+                    {tag}
+                  </span>
+                );
+              })()
             ))}
           </div>
 
@@ -289,15 +312,15 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
                               "flex h-4 w-4 items-center justify-center rounded border-2 transition-colors",
                               isChecked
                                 ? cn(
-                                    tagColors[tag].border,
-                                    tagColors[tag].bg,
+                                    getTagColor(tag).border,
+                                    getTagColor(tag).bg,
                                     "border-transparent"
                                   )
                                 : "border-zinc-600 bg-transparent"
                             )}
                           >
                             {isChecked && (
-                              <Check className={cn("h-3 w-3", tagColors[tag].text)} />
+                              <Check className={cn("h-3 w-3", getTagColor(tag).text)} />
                             )}
                           </div>
                         </div>
@@ -370,7 +393,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
       {/* Riley's Memory (AI Toggle) */}
       <td className="px-6 py-4">
         <div className="flex items-center justify-center">
-          {isAISupportedType(asset.type) ? (
+          {isAISupportedType(normalizedType) ? (
             <button
               type="button"
               onClick={() => onAIEnabledChange(asset.id, !asset.aiEnabled)}
