@@ -15,6 +15,10 @@ from app.dependencies.auth import verify_clerk_token, check_tenant_membership
 from app.dependencies.graph_dep import get_graph, get_graph_optional
 from app.services.genai_client import get_genai_client
 from app.services.graph import GraphService
+from app.services.provider_fallback import (
+    classify_openai_generation_failure,
+    generate_text_with_gemini,
+)
 from app.services.qdrant import vector_service
 from app.services.rerank import rerank_candidates
 
@@ -1219,6 +1223,9 @@ Context Data:
     model_name = _get_riley_model_name(deep=deep)
     provider = (settings.RILEY_PROVIDER or "openai").strip().lower()
 
+    fallback_model = settings.RILEY_GEMINI_FALLBACK_MODEL
+    response_text: Optional[str] = None
+    last_error: Optional[Exception] = None
     try:
         if provider != "openai":
             raise RuntimeError(f"Unsupported Riley provider: {provider}")
@@ -1227,42 +1234,79 @@ Context Data:
             model_name=model_name,
             timeout_seconds=max(5, int(settings.RILEY_TIMEOUT_SECONDS)),
         )
-        response_text = _validate_and_sanitize_quotes(response_text, private_results, global_results)
     except Exception as exc:
-        status_code: Optional[int] = None
-        response_body: Optional[str] = None
-        try:
-            import httpx  # type: ignore
-
-            if isinstance(exc, httpx.HTTPStatusError):
-                status_code = int(exc.response.status_code) if exc.response is not None else None
-                if exc.response is not None:
-                    response_body = (exc.response.text or "")[:1200]
-        except Exception:
-            pass
-
-        if status_code is not None:
+        last_error = exc
+        failure = classify_openai_generation_failure(exc)
+        logger.warning(
+            "openai_generation_failed subsystem=%s tenant_id=%s primary_provider=%s primary_model=%s error_type=%s http_status=%s provider_error_code=%s provider_error_type=%s fallback_eligible=%s response_body=%s",
+            "chat",
+            request.tenant_id,
+            "openai",
+            model_name,
+            failure.error_type,
+            failure.http_status,
+            failure.provider_error_code,
+            failure.provider_error_type,
+            failure.fallback_eligible,
+            failure.response_body_excerpt or "",
+        )
+        if failure.fallback_eligible:
             logger.warning(
-                "riley_answer_generation_failed provider=%s model=%s tenant=%s error_type=%s http_status=%s response_body=%s",
-                provider,
-                model_name,
+                "openai_generation_fallback_to_gemini subsystem=%s tenant_id=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s error_type=%s http_status=%s provider_error_code=%s provider_error_type=%s fallback_eligible=%s",
+                "chat",
                 request.tenant_id,
-                type(exc).__name__,
-                status_code,
-                response_body or "",
-            )
-        else:
-            logger.warning(
-                "riley_answer_generation_failed provider=%s model=%s tenant=%s error_type=%s",
-                provider,
+                "openai",
+                "gemini",
                 model_name,
-                request.tenant_id,
-                type(exc).__name__,
+                fallback_model,
+                failure.error_type,
+                failure.http_status,
+                failure.provider_error_code,
+                failure.provider_error_type,
+                True,
             )
+            try:
+                response_text = await generate_text_with_gemini(
+                    prompt=system_prompt,
+                    model_name=fallback_model,
+                    timeout_seconds=max(5, int(settings.RILEY_TIMEOUT_SECONDS)),
+                )
+                logger.info(
+                    "provider_fallback_succeeded subsystem=%s tenant_id=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s",
+                    "chat",
+                    request.tenant_id,
+                    "openai",
+                    "gemini",
+                    model_name,
+                    fallback_model,
+                )
+            except Exception as fallback_exc:
+                last_error = fallback_exc
+                logger.warning(
+                    "provider_fallback_failed subsystem=%s tenant_id=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s error_type=%s",
+                    "chat",
+                    request.tenant_id,
+                    "openai",
+                    "gemini",
+                    model_name,
+                    fallback_model,
+                    type(fallback_exc).__name__,
+                )
+
+    if response_text is None:
+        logger.warning(
+            "riley_answer_generation_failed provider=%s model=%s tenant=%s error_type=%s",
+            provider,
+            model_name,
+            request.tenant_id,
+            type(last_error).__name__ if last_error else "UnknownError",
+        )
         raise HTTPException(
             status_code=503,
             detail="Riley is temporarily unavailable. Please try again in a moment.",
-        ) from exc
+        ) from last_error
+
+    response_text = _validate_and_sanitize_quotes(response_text, private_results, global_results)
 
     # Step G: Save messages to Neo4j using background tasks (non-blocking)
     if request.session_id and graph:
