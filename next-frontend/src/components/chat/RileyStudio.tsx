@@ -180,10 +180,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [reportTitle, setReportTitle] = useState("");
   const [reportPrompt, setReportPrompt] = useState("");
   const [reportDeepMode, setReportDeepMode] = useState(true);
+  const [animatingAssistantMessageId, setAnimatingAssistantMessageId] = useState<string | null>(null);
   const knownReportStatusRef = useRef<
     Record<string, "queued" | "processing" | "cancelling" | "cancelled" | "complete" | "failed" | "deleted">
   >({});
   const hiddenReportJobIdsRef = useRef<Record<string, boolean>>({});
+  const instantScrollRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -197,7 +199,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    messagesEndRef.current?.scrollIntoView({ behavior: instantScrollRef.current ? "auto" : "smooth" });
   }, [messages]);
 
   useEffect(() => {
@@ -558,12 +560,15 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   useEffect(() => {
     if (!activeConversationId) {
       // Clear messages when no conversation is selected
+      setAnimatingAssistantMessageId(null);
       setMessages([]);
       return;
     }
 
     setIsLoading(true);
     // Reset to a clean per-conversation state before loading history.
+    instantScrollRef.current = true;
+    setAnimatingAssistantMessageId(null);
     setMessages([]);
     let cancelled = false;
     const targetConversationId = activeConversationId;
@@ -602,6 +607,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             },
             ...historyMessages,
           ]);
+          window.setTimeout(() => {
+            instantScrollRef.current = false;
+          }, 0);
         } else {
           setMessages([
             {
@@ -610,6 +618,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
             },
           ]);
+          window.setTimeout(() => {
+            instantScrollRef.current = false;
+          }, 0);
         }
       } catch (error) {
         console.error("Failed to load chat history:", error);
@@ -621,6 +632,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
           },
         ]);
+        window.setTimeout(() => {
+          instantScrollRef.current = false;
+        }, 0);
       } finally {
         if (!cancelled) {
           setIsLoading(false);
@@ -857,6 +871,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
   const executeSend = async (userInput: string, options?: { bypassReportIntent?: boolean }) => {
     if (!userInput.trim() || isLoading || missingAuth || missingTenantId) return;
+    setAnimatingAssistantMessageId(null);
 
     // Step 1: Ensure we have a session ID BEFORE any async operations
     // This prevents history loading from interfering with optimistic updates
@@ -968,6 +983,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         sourcesCount: data.sources_count,
         sources: Array.isArray(data.sources) ? data.sources : [],
       };
+      setAnimatingAssistantMessageId(assistantMessage.id);
 
       // Replace thinking message with actual response
       setMessages((prev) => {
@@ -1833,7 +1849,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             <div className="max-w-3xl mx-auto w-full px-6 py-8 space-y-6">
               {messages.map((message, index) => {
                 const isLastMessage = index === messages.length - 1;
-                const isLastAssistant = message.role === "assistant" && isLastMessage;
+                const isLiveAnimatingAssistant = message.role === "assistant" && message.id === animatingAssistantMessageId;
                 const citations = message.role === "assistant" ? extractCitations(message.content) : [];
                 const structuredSources = message.sources || [];
                 const fallbackSources: MessageSource[] = citations.map((citation) => ({
@@ -1904,8 +1920,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           <Loader2 className="h-4 w-4 animate-spin" />
                           <span>Riley is thinking...</span>
                         </div>
-                      ) : isLastAssistant ? (
-                        // Typewriter effect for last assistant message
+                      ) : isLiveAnimatingAssistant ? (
+                        // Typewriter effect only for the currently live assistant response
                         <TypewriterMarkdown content={message.content} />
                       ) : message.role === "assistant" ? (
                         // Static markdown for previous assistant messages
