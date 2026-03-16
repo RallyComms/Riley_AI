@@ -21,9 +21,11 @@ except Exception:  # pragma: no cover - handled at runtime per provider
 
 logger = logging.getLogger(__name__)
 
-RERANK_TIMEOUT_SECONDS = 12.0
-DEFAULT_RERANK_MAX_SNIPPET_TOKENS = 180
-DEFAULT_RERANK_MAX_TOTAL_INPUT_TOKENS = 6000
+RERANK_TIMEOUT_SECONDS = 3.0
+DEFAULT_RERANK_MAX_SNIPPET_TOKENS = 96
+DEFAULT_RERANK_MAX_TOTAL_INPUT_TOKENS = 2500
+MAX_RERANK_CANDIDATE_COUNT_IN = 20
+MAX_RERANK_CANDIDATE_COUNT_SENT = 12
 
 
 def _extract_json_object(text: str) -> Dict[str, Any]:
@@ -210,10 +212,13 @@ def _prepare_candidates_with_budget(
     candidates: List[Dict[str, Any]],
     max_snippet_tokens: int,
     max_total_input_tokens: int,
+    max_candidates_sent: int,
 ) -> Tuple[List[Dict[str, str]], int]:
     prepared: List[Dict[str, str]] = []
     total_tokens = estimate_tokens(query)
     for candidate in candidates:
+        if len(prepared) >= max_candidates_sent:
+            break
         payload = candidate.get("payload", {}) or {}
         candidate_id = _candidate_id(candidate)
         filename = str(payload.get("filename", "unknown"))
@@ -314,20 +319,28 @@ async def rerank_candidates(query: str, candidates: List[Dict[str, Any]], top_k:
         return None
 
     provider = (settings.RERANK_PROVIDER or "gemini").strip().lower()
-    max_snippet_tokens = max(32, int(getattr(settings, "RERANK_MAX_SNIPPET_TOKENS", DEFAULT_RERANK_MAX_SNIPPET_TOKENS)))
-    max_total_input_tokens = max(512, int(getattr(settings, "RERANK_MAX_TOTAL_INPUT_TOKENS", DEFAULT_RERANK_MAX_TOTAL_INPUT_TOKENS)))
+    input_candidates = candidates[:MAX_RERANK_CANDIDATE_COUNT_IN]
+    max_snippet_tokens = min(
+        DEFAULT_RERANK_MAX_SNIPPET_TOKENS,
+        max(32, int(getattr(settings, "RERANK_MAX_SNIPPET_TOKENS", DEFAULT_RERANK_MAX_SNIPPET_TOKENS))),
+    )
+    max_total_input_tokens = min(
+        DEFAULT_RERANK_MAX_TOTAL_INPUT_TOKENS,
+        max(512, int(getattr(settings, "RERANK_MAX_TOTAL_INPUT_TOKENS", DEFAULT_RERANK_MAX_TOTAL_INPUT_TOKENS))),
+    )
     prepared_candidates, estimated_input_tokens = _prepare_candidates_with_budget(
         query=query,
-        candidates=candidates,
+        candidates=input_candidates,
         max_snippet_tokens=max_snippet_tokens,
         max_total_input_tokens=max_total_input_tokens,
+        max_candidates_sent=MAX_RERANK_CANDIDATE_COUNT_SENT,
     )
     if not prepared_candidates:
         logger.warning(
             "reranker_failed provider=%s model=%s candidate_count_in=%s candidate_count_sent=%s estimated_input_tokens=%s latency_ms=%s fallback_used=%s error_type=%s",
             provider,
             settings.RERANK_MODEL,
-            len(candidates),
+            len(input_candidates),
             0,
             0,
             0,
@@ -379,7 +392,7 @@ async def rerank_candidates(query: str, candidates: List[Dict[str, Any]], top_k:
             "reranker_success provider=%s model=%s candidate_count_in=%s candidate_count_sent=%s candidate_count_out=%s estimated_input_tokens=%s latency_ms=%s fallback_used=%s",
             provider,
             settings.RERANK_MODEL,
-            len(candidates),
+            len(input_candidates),
             len(prepared_candidates),
             candidate_count_out,
             estimated_input_tokens,
@@ -393,7 +406,7 @@ async def rerank_candidates(query: str, candidates: List[Dict[str, Any]], top_k:
             "reranker_failed provider=%s model=%s candidate_count_in=%s candidate_count_sent=%s estimated_input_tokens=%s latency_ms=%s fallback_used=%s error_type=%s",
             provider,
             settings.RERANK_MODEL,
-            len(candidates),
+            len(input_candidates),
             len(prepared_candidates),
             estimated_input_tokens,
             elapsed_ms,
