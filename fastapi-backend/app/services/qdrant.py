@@ -37,6 +37,7 @@ class VectorService:
             )
         self._bm25_support_cache: Dict[str, bool] = {}
         self._bm25_warned_collections: set[str] = set()
+        self._chunk_type_index_unavailable_collections: set[str] = set()
 
     @property
     def client(self) -> AsyncQdrantClient:
@@ -167,6 +168,14 @@ class VectorService:
             )
         except Exception:
             pass
+        try:
+            await self._client.create_payload_index(
+                collection_name=collection_name,
+                field_name="chunk_type",
+                field_schema=models.PayloadSchemaType.KEYWORD,
+            )
+        except Exception:
+            pass
 
     async def _ensure_collection(self, collection_name: str) -> None:
         """Create a collection if it doesn't exist, using the configured vector params."""
@@ -292,6 +301,38 @@ class VectorService:
             must=filter_obj.must or [],
             should=filter_obj.should or [],
             must_not=must_not,
+        )
+
+    @staticmethod
+    def _has_filter_field_in_must(filter_obj: Filter, field_name: str) -> bool:
+        for condition in (filter_obj.must or []):
+            key = condition.get("key") if isinstance(condition, dict) else getattr(condition, "key", None)
+            if key == field_name:
+                return True
+        return False
+
+    @staticmethod
+    def _drop_field_from_must(filter_obj: Filter, field_name: str) -> Filter:
+        must = []
+        for condition in (filter_obj.must or []):
+            key = condition.get("key") if isinstance(condition, dict) else getattr(condition, "key", None)
+            if key == field_name:
+                continue
+            must.append(condition)
+        return Filter(
+            must=must,
+            should=filter_obj.should or [],
+            must_not=filter_obj.must_not or [],
+        )
+
+    def _mark_chunk_type_index_unavailable(self, collection_name: str, *, error: Exception) -> None:
+        if collection_name in self._chunk_type_index_unavailable_collections:
+            return
+        self._chunk_type_index_unavailable_collections.add(collection_name)
+        logger.warning(
+            "hybrid_chunk_type_filter_disabled collection=%s reason=%s fallback_without_chunk_type_filter=true",
+            collection_name,
+            str(error),
         )
 
     @staticmethod
@@ -445,20 +486,53 @@ class VectorService:
         """Hybrid dense + BM25 search with RRF fusion and graceful degradation."""
         dense_results: Optional[List[Dict[str, Any]]] = None
         bm25_results: Optional[List[Dict[str, Any]]] = None
+        effective_filter = tenant_filter
+        if (
+            collection_name in self._chunk_type_index_unavailable_collections
+            and self._has_filter_field_in_must(effective_filter, "chunk_type")
+        ):
+            effective_filter = self._drop_field_from_must(effective_filter, "chunk_type")
 
         # Dense branch (existing retrieval behavior baseline)
         try:
             dense_raw = await self._client.search(
                 collection_name=collection_name,
                 query_vector=query_embedding,
-                query_filter=tenant_filter,
+                query_filter=effective_filter,
                 limit=limit,
                 with_payload=True,
             )
             dense_results = self._filter_chunk_only([self._point_to_dict(point) for point in dense_raw])
         except Exception as exc:
             if self._is_missing_payload_index_error(exc, "record_type"):
-                fallback_filter = self._drop_record_type_from_must_not(tenant_filter)
+                fallback_filter = self._drop_record_type_from_must_not(effective_filter)
+                try:
+                    dense_raw = await self._client.search(
+                        collection_name=collection_name,
+                        query_vector=query_embedding,
+                        query_filter=fallback_filter,
+                        limit=limit,
+                        with_payload=True,
+                    )
+                    dense_results = self._filter_chunk_only([self._point_to_dict(point) for point in dense_raw])
+                except Exception as record_type_fallback_exc:
+                    if self._is_missing_payload_index_error(record_type_fallback_exc, "chunk_type"):
+                        self._mark_chunk_type_index_unavailable(collection_name, error=record_type_fallback_exc)
+                        fallback_filter = self._drop_field_from_must(fallback_filter, "chunk_type")
+                        dense_raw = await self._client.search(
+                            collection_name=collection_name,
+                            query_vector=query_embedding,
+                            query_filter=fallback_filter,
+                            limit=limit,
+                            with_payload=True,
+                        )
+                        dense_results = self._filter_chunk_only([self._point_to_dict(point) for point in dense_raw])
+                        effective_filter = fallback_filter
+                    else:
+                        raise
+            elif self._is_missing_payload_index_error(exc, "chunk_type"):
+                self._mark_chunk_type_index_unavailable(collection_name, error=exc)
+                fallback_filter = self._drop_field_from_must(effective_filter, "chunk_type")
                 dense_raw = await self._client.search(
                     collection_name=collection_name,
                     query_vector=query_embedding,
@@ -467,6 +541,7 @@ class VectorService:
                     with_payload=True,
                 )
                 dense_results = self._filter_chunk_only([self._point_to_dict(point) for point in dense_raw])
+                effective_filter = fallback_filter
             else:
                 logger.warning(
                     "hybrid_dense_search_failed collection=%s error=%s",
@@ -483,7 +558,7 @@ class VectorService:
                     collection_name=collection_name,
                     query=models.Document(text=query_text, model="qdrant/bm25"),
                     using="bm25",
-                    query_filter=tenant_filter,
+                    query_filter=effective_filter,
                     limit=limit,
                     with_payload=True,
                 )
@@ -492,7 +567,7 @@ class VectorService:
             except Exception as exc:
                 if self._is_missing_payload_index_error(exc, "record_type"):
                     try:
-                        fallback_filter = self._drop_record_type_from_must_not(tenant_filter)
+                        fallback_filter = self._drop_record_type_from_must_not(effective_filter)
                         bm25_raw = await self._client.query_points(
                             collection_name=collection_name,
                             query=models.Document(text=query_text, model="qdrant/bm25"),
@@ -503,6 +578,56 @@ class VectorService:
                         )
                         bm25_points = self._extract_points_from_query_points(bm25_raw)
                         bm25_results = self._filter_chunk_only([self._point_to_dict(point) for point in bm25_points])
+                    except Exception as bm25_fallback_exc:
+                        if self._is_missing_payload_index_error(bm25_fallback_exc, "chunk_type"):
+                            self._mark_chunk_type_index_unavailable(collection_name, error=bm25_fallback_exc)
+                            try:
+                                fallback_filter = self._drop_field_from_must(fallback_filter, "chunk_type")
+                                bm25_raw = await self._client.query_points(
+                                    collection_name=collection_name,
+                                    query=models.Document(text=query_text, model="qdrant/bm25"),
+                                    using="bm25",
+                                    query_filter=fallback_filter,
+                                    limit=limit,
+                                    with_payload=True,
+                                )
+                                bm25_points = self._extract_points_from_query_points(bm25_raw)
+                                bm25_results = self._filter_chunk_only([self._point_to_dict(point) for point in bm25_points])
+                                effective_filter = fallback_filter
+                            except Exception as bm25_chunktype_fallback_exc:
+                                if self._is_missing_vector_name_error(bm25_chunktype_fallback_exc, "bm25"):
+                                    self.mark_bm25_unavailable(collection_name, str(bm25_chunktype_fallback_exc))
+                                else:
+                                    logger.warning(
+                                        "hybrid_bm25_search_unavailable collection=%s error=%s",
+                                        collection_name,
+                                        bm25_chunktype_fallback_exc,
+                                    )
+                                bm25_results = []
+                        elif self._is_missing_vector_name_error(bm25_fallback_exc, "bm25"):
+                            self.mark_bm25_unavailable(collection_name, str(bm25_fallback_exc))
+                        else:
+                            logger.warning(
+                                "hybrid_bm25_search_unavailable collection=%s error=%s",
+                                collection_name,
+                                bm25_fallback_exc,
+                            )
+                        bm25_results = []
+                elif self._is_missing_payload_index_error(exc, "chunk_type"):
+                    self._mark_chunk_type_index_unavailable(collection_name, error=exc)
+                    try:
+                        fallback_filter = self._drop_field_from_must(effective_filter, "chunk_type")
+                        bm25_raw = await self._client.query_points(
+                            collection_name=collection_name,
+                            query=models.Document(text=query_text, model="qdrant/bm25"),
+                            using="bm25",
+                            query_filter=fallback_filter,
+                            limit=limit,
+                            with_payload=True,
+                        )
+                        bm25_points = self._extract_points_from_query_points(bm25_raw)
+                        bm25_results = self._filter_chunk_only([self._point_to_dict(point) for point in bm25_points])
+                        effective_filter = fallback_filter
                     except Exception as bm25_fallback_exc:
                         if self._is_missing_vector_name_error(bm25_fallback_exc, "bm25"):
                             self.mark_bm25_unavailable(collection_name, str(bm25_fallback_exc))

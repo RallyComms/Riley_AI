@@ -22,7 +22,12 @@ type Message = {
   reportDownloadUrl?: string;
   reportTitle?: string;
   reportSuggestionPrompt?: string;
-  reportSuggestionType?: "strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief";
+  reportSuggestionType?:
+    | "summary"
+    | "strategy_memo"
+    | "audience_analysis"
+    | "narrative_brief"
+    | "opposition_framing_brief";
 };
 
 type SourceCitation = {
@@ -169,7 +174,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [isReportsLoading, setIsReportsLoading] = useState(false);
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [isSubmittingReport, setIsSubmittingReport] = useState(false);
-  const [reportType, setReportType] = useState<"strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief">("strategy_memo");
+  const [reportType, setReportType] = useState<
+    "summary" | "strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief"
+  >("summary");
   const [reportTitle, setReportTitle] = useState("");
   const [reportPrompt, setReportPrompt] = useState("");
   const [reportDeepMode, setReportDeepMode] = useState(true);
@@ -821,10 +828,10 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     text: string
   ): {
     isReportIntent: boolean;
-    suggestedType: "strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief";
+    suggestedType: "summary" | "strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief";
   } => {
     const normalized = (text || "").toLowerCase();
-    const suggestedType: "strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief" =
+    const suggestedType: "summary" | "strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief" =
       normalized.includes("audience")
         ? "audience_analysis"
         : normalized.includes("opposition")
@@ -2125,6 +2132,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     onChange={(e) =>
                       setReportType(
                         e.target.value as
+                          | "summary"
                           | "strategy_memo"
                           | "audience_analysis"
                           | "narrative_brief"
@@ -2133,6 +2141,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     }
                     className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
                   >
+                    <option value="summary">Summary</option>
                     <option value="strategy_memo">Strategy memo</option>
                     <option value="audience_analysis">Audience analysis</option>
                     <option value="narrative_brief">Narrative brief</option>

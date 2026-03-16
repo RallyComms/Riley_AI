@@ -38,6 +38,7 @@ def _normalize_report_mode(mode: Optional[str]) -> str:
 def _normalize_report_type(report_type: Optional[str]) -> str:
     normalized = (report_type or "").strip().lower()
     allowed = {
+        "summary",
         "strategy_memo",
         "audience_analysis",
         "narrative_brief",
@@ -50,6 +51,25 @@ def _normalize_report_type(report_type: Optional[str]) -> str:
 
 def _report_type_instruction(report_type: str) -> str:
     normalized = _normalize_report_type(report_type)
+    if normalized == "summary":
+        return """REPORT TYPE: summary
+Purpose:
+- Produce a neutral analytical synthesis of campaign documents without memo framing.
+Prioritize:
+- Clear overview of the campaign narrative across materials.
+- Key recurring themes and evidence-backed patterns.
+- Contradictions, tensions, and points of narrative drift across sources.
+- Potential vulnerabilities that opponents could exploit.
+- Concrete evidence references for major claims.
+Constraints:
+- Do not use memo headers (no TO / FROM / SUBJECT).
+- Do not include strategic recommendations unless the user explicitly asks for them.
+Output structure:
+- Narrative Overview
+- Key Themes Across Documents
+- Contradictions and Tensions
+- Potential Opponent-Exploitable Vulnerabilities
+- Evidence References"""
     if normalized == "audience_analysis":
         return """REPORT TYPE: audience_analysis
 Purpose:
@@ -505,12 +525,36 @@ def _build_report_prompt(
     user_display_name: str,
 ) -> str:
     persona_context = get_persona_context()
-    report_type_block = _report_type_instruction(report_type)
+    normalized_report_type = _normalize_report_type(report_type)
+    report_type_block = _report_type_instruction(normalized_report_type)
     mode_instruction = (
         "Deep report mode: produce a thorough memo with synthesis across documents, "
         "contradictions, risks, strategic opportunities, and explicit recommendations."
         if mode == "deep"
         else "Normal report mode: produce a focused strategic brief with concise evidence and recommendations."
+    )
+    if normalized_report_type == "summary":
+        mode_instruction = (
+            "Deep report mode: produce a thorough neutral synthesis across documents with strong evidence grounding."
+            if mode == "deep"
+            else "Normal report mode: produce a focused neutral synthesis with concise evidence grounding."
+        )
+    output_format_block = (
+        """- Title
+- Narrative Overview
+- Key Themes Across Documents
+- Contradictions and Tensions
+- Potential Opponent-Exploitable Vulnerabilities
+- Evidence References
+- Clarifying Questions (if needed)"""
+        if normalized_report_type == "summary"
+        else """- Title
+- Executive Summary
+- Evidence from Sources
+- Strategic Analysis
+- Risks and Opportunities
+- Recommendations and Next Moves
+- Clarifying Questions (if needed)"""
     )
     return f"""You are Riley, a senior campaign strategist and decision partner at RALLY.
 
@@ -538,13 +582,7 @@ STRATEGIC PERSONA RECOGNITION:
 Refer to these Strategic Archetypes: {persona_context}
 
 OUTPUT FORMAT:
-- Title
-- Executive Summary
-- Evidence from Sources
-- Strategic Analysis
-- Risks and Opportunities
-- Recommendations and Next Moves
-- Clarifying Questions (if needed)
+{output_format_block}
 
 {report_type_block}
 
