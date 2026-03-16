@@ -18,6 +18,7 @@ from app.core.personas import get_persona_context
 from app.services.genai_client import get_genai_client
 from app.services.graph import GraphService
 from app.services.provider_fallback import (
+    classify_gemini_generation_failure,
     classify_openai_generation_failure,
     generate_text_with_gemini,
 )
@@ -1225,16 +1226,16 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
     report_type = _normalize_report_type(str(job.get("report_type") or "strategy_memo"))
     title = str(job.get("title") or "Riley Strategy Report").strip() or "Riley Strategy Report"
     mode = _normalize_report_mode(str(job.get("mode") or "deep"))
-    model_name = settings.RILEY_REPORT_DEEP_MODEL if mode == "deep" else settings.RILEY_REPORT_MODEL
-    fallback_model = settings.RILEY_GEMINI_FALLBACK_MODEL
-    generation_model_used = model_name
+    primary_model = settings.RILEY_GEMINI_MODEL
+    fallback_model = settings.RILEY_OPENAI_FALLBACK_MODEL
+    generation_model_used = primary_model
 
     logger.info(
         "report_job_worker_started report_job_id=%s tenant_id=%s report_type=%s model=%s deep_mode=%s",
         report_job_id,
         tenant_id,
         report_type,
-        model_name,
+        primary_model,
         mode == "deep",
     )
 
@@ -1263,7 +1264,7 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
         failure_stage=None,
         failure_code=None,
         failure_detail=None,
-        generation_model=model_name,
+        generation_model=primary_model,
     )
 
     stage = "retrieval"
@@ -1414,7 +1415,7 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                 report_job_id,
                 tenant_id,
                 report_type,
-                model_name,
+                primary_model,
                 mode == "deep",
                 attempt_idx + 1,
                 max_attempts,
@@ -1426,12 +1427,12 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                 used_fidelity_level,
             )
             try:
-                report_body = await _call_openai_report_model(
+                report_body = await generate_text_with_gemini(
                     prompt=prompt,
-                    model_name=model_name,
+                    model_name=primary_model,
                     timeout_seconds=timeout_seconds,
                 )
-                generation_model_used = model_name
+                generation_model_used = primary_model
                 logger.info(
                     "report_generation_completed report_job_id=%s tenant_id=%s attempt=%s/%s model=%s",
                     report_job_id,
@@ -1442,30 +1443,31 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                 )
                 break
             except Exception as exc:
-                failure = classify_openai_generation_failure(exc)
+                failure = classify_gemini_generation_failure(exc)
                 logger.warning(
-                    "openai_generation_failed subsystem=%s tenant_id=%s report_job_id=%s primary_provider=%s primary_model=%s error_type=%s http_status=%s provider_error_code=%s provider_error_type=%s fallback_eligible=%s response_body=%s",
+                    "gemini_generation_failed subsystem=%s tenant_id=%s report_job_id=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s error_type=%s http_status=%s provider_error_code=%s provider_error_type=%s fallback_eligible=%s",
                     "report",
                     tenant_id,
                     report_job_id,
+                    "gemini",
                     "openai",
-                    model_name,
+                    primary_model,
+                    fallback_model,
                     failure.error_type,
                     failure.http_status,
                     failure.provider_error_code,
                     failure.provider_error_type,
                     failure.fallback_eligible,
-                    failure.response_body_excerpt or "",
                 )
                 if failure.fallback_eligible:
                     logger.warning(
-                        "openai_generation_fallback_to_gemini subsystem=%s tenant_id=%s report_job_id=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s error_type=%s http_status=%s provider_error_code=%s provider_error_type=%s fallback_eligible=%s",
+                        "gemini_generation_fallback_to_openai subsystem=%s tenant_id=%s report_job_id=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s error_type=%s http_status=%s provider_error_code=%s provider_error_type=%s fallback_eligible=%s",
                         "report",
                         tenant_id,
                         report_job_id,
-                        "openai",
                         "gemini",
-                        model_name,
+                        "openai",
+                        primary_model,
                         fallback_model,
                         failure.error_type,
                         failure.http_status,
@@ -1474,7 +1476,7 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                         True,
                     )
                     try:
-                        report_body = await generate_text_with_gemini(
+                        report_body = await _call_openai_report_model(
                             prompt=prompt,
                             model_name=fallback_model,
                             timeout_seconds=timeout_seconds,
@@ -1485,9 +1487,9 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                             "report",
                             tenant_id,
                             report_job_id,
-                            "openai",
                             "gemini",
-                            model_name,
+                            "openai",
+                            primary_model,
                             fallback_model,
                         )
                         logger.info(
@@ -1500,16 +1502,20 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                         )
                         break
                     except Exception as fallback_exc:
+                        fallback_failure = classify_openai_generation_failure(fallback_exc)
                         logger.warning(
-                            "provider_fallback_failed subsystem=%s tenant_id=%s report_job_id=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s error_type=%s",
+                            "provider_fallback_failed subsystem=%s tenant_id=%s report_job_id=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s error_type=%s http_status=%s provider_error_code=%s provider_error_type=%s",
                             "report",
                             tenant_id,
                             report_job_id,
-                            "openai",
                             "gemini",
-                            model_name,
+                            "openai",
+                            primary_model,
                             fallback_model,
-                            type(fallback_exc).__name__,
+                            fallback_failure.error_type,
+                            fallback_failure.http_status,
+                            fallback_failure.provider_error_code,
+                            fallback_failure.provider_error_type,
                         )
                         exc = fallback_exc
                 last_exc = exc
