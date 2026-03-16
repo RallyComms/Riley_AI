@@ -99,7 +99,7 @@ type PersistedReportJob = {
   conversation_id?: string | null;
   report_type: string;
   title: string;
-  status: "queued" | "processing" | "complete" | "failed";
+  status: "queued" | "processing" | "cancelling" | "cancelled" | "complete" | "failed" | "deleted";
   created_at?: string | null;
   started_at?: string | null;
   completed_at?: string | null;
@@ -119,7 +119,7 @@ type ReportJob = {
   conversationId: string | null;
   reportType: string;
   title: string;
-  status: "queued" | "processing" | "complete" | "failed";
+  status: "queued" | "processing" | "cancelling" | "cancelled" | "complete" | "failed" | "deleted";
   createdAt: Date;
   startedAt?: Date;
   completedAt?: Date;
@@ -163,6 +163,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [openSourcesByMessageId, setOpenSourcesByMessageId] = useState<Record<string, boolean>>({});
   const [indexSummary, setIndexSummary] = useState<RileyIndexSummary | null>(null);
   const [reportJobs, setReportJobs] = useState<ReportJob[]>([]);
+  const [hiddenReportJobIds, setHiddenReportJobIds] = useState<Record<string, true>>({});
+  const [reportActionLoadingById, setReportActionLoadingById] = useState<Record<string, boolean>>({});
+  const [reportActionErrorById, setReportActionErrorById] = useState<Record<string, string>>({});
   const [isReportsLoading, setIsReportsLoading] = useState(false);
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [isSubmittingReport, setIsSubmittingReport] = useState(false);
@@ -170,7 +173,10 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [reportTitle, setReportTitle] = useState("");
   const [reportPrompt, setReportPrompt] = useState("");
   const [reportDeepMode, setReportDeepMode] = useState(true);
-  const knownReportStatusRef = useRef<Record<string, "queued" | "processing" | "complete" | "failed">>({});
+  const knownReportStatusRef = useRef<
+    Record<string, "queued" | "processing" | "cancelling" | "cancelled" | "complete" | "failed" | "deleted">
+  >({});
+  const hiddenReportJobIdsRef = useRef<Record<string, true>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
@@ -186,6 +192,10 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    hiddenReportJobIdsRef.current = hiddenReportJobIds;
+  }, [hiddenReportJobIds]);
 
   // Load persisted conversation list for this tenant/user scope.
   useEffect(() => {
@@ -413,16 +423,20 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         }
       );
       const mapped = (data.jobs || []).map(toReportJob);
+      const visibleMapped = mapped.filter((job) => !hiddenReportJobIdsRef.current[job.reportJobId]);
       const previousStatuses = { ...knownReportStatusRef.current };
-      const nextStatuses: Record<string, "queued" | "processing" | "complete" | "failed"> = {};
-      mapped.forEach((job) => {
+      const nextStatuses: Record<
+        string,
+        "queued" | "processing" | "cancelling" | "cancelled" | "complete" | "failed" | "deleted"
+      > = {};
+      visibleMapped.forEach((job) => {
         nextStatuses[job.reportJobId] = job.status;
       });
       knownReportStatusRef.current = nextStatuses;
-      setReportJobs(mapped);
+      setReportJobs(visibleMapped);
 
       // Add concise chat notifications for relevant status transitions.
-      for (const job of mapped) {
+      for (const job of visibleMapped) {
         const previous = previousStatuses[job.reportJobId];
         if (previous === undefined) continue;
         if (previous === job.status) continue;
@@ -1132,6 +1146,59 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     }
   };
 
+  const getReportActionKind = (status: ReportJob["status"]): "cancel" | "delete" =>
+    status === "queued" || status === "processing" || status === "cancelling" ? "cancel" : "delete";
+
+  const handleReportRowAction = async (job: ReportJob) => {
+    if (!tenantId || !authLoaded || !userLoaded || !user) return;
+    const actionKind = getReportActionKind(job.status);
+    setReportActionLoadingById((prev) => ({ ...prev, [job.reportJobId]: true }));
+    setReportActionErrorById((prev) => {
+      const next = { ...prev };
+      delete next[job.reportJobId];
+      return next;
+    });
+    try {
+      const token = await getToken();
+      if (!token) throw new Error("Authentication token unavailable");
+      const encodedTenantId = encodeURIComponent(tenantId);
+      const encodedReportJobId = encodeURIComponent(job.reportJobId);
+      const path =
+        actionKind === "cancel"
+          ? `/api/v1/riley/reports/${encodedReportJobId}/cancel?tenant_id=${encodedTenantId}`
+          : `/api/v1/riley/reports/${encodedReportJobId}?tenant_id=${encodedTenantId}`;
+      await apiFetch(path, {
+        token,
+        method: actionKind === "cancel" ? "POST" : "DELETE",
+      });
+      setHiddenReportJobIds((prev) => {
+        const next = { ...prev, [job.reportJobId]: true };
+        hiddenReportJobIdsRef.current = next;
+        return next;
+      });
+      setReportJobs((prev) => prev.filter((item) => item.reportJobId !== job.reportJobId));
+      setReportActionErrorById((prev) => {
+        const next = { ...prev };
+        delete next[job.reportJobId];
+        return next;
+      });
+      delete knownReportStatusRef.current[job.reportJobId];
+    } catch (error) {
+      const defaultMessage =
+        actionKind === "cancel"
+          ? "Could not cancel this report job. Please try again."
+          : "Could not delete this report job. Please try again.";
+      const message = error instanceof Error && error.message ? error.message : defaultMessage;
+      setReportActionErrorById((prev) => ({ ...prev, [job.reportJobId]: message }));
+    } finally {
+      setReportActionLoadingById((prev) => {
+        const next = { ...prev };
+        delete next[job.reportJobId];
+        return next;
+      });
+    }
+  };
+
   const formatTime = (date: Date) => {
     const now = new Date();
     const diff = now.getTime() - date.getTime();
@@ -1153,7 +1220,10 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
   const reportStatusBadgeClass = (status: ReportJob["status"]) => {
     if (status === "queued") return "border-amber-500/30 bg-amber-500/10 text-amber-300";
+    if (status === "cancelling") return "border-orange-500/30 bg-orange-500/10 text-orange-300";
     if (status === "processing") return "border-blue-500/30 bg-blue-500/10 text-blue-300";
+    if (status === "cancelled") return "border-zinc-500/30 bg-zinc-700/20 text-zinc-300";
+    if (status === "deleted") return "border-zinc-500/30 bg-zinc-700/20 text-zinc-300";
     if (status === "complete") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
     return "border-rose-500/30 bg-rose-500/10 text-rose-300";
   };
@@ -1664,6 +1734,31 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           <span>Open DOCX</span>
                         </a>
                       </div>
+                    )}
+                    <div className="mt-2 flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleReportRowAction(job)}
+                        disabled={Boolean(reportActionLoadingById[job.reportJobId])}
+                        className={cn(
+                          "inline-flex items-center rounded-md border px-2 py-1 text-xs transition-colors",
+                          getReportActionKind(job.status) === "cancel"
+                            ? "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                            : "border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20",
+                          reportActionLoadingById[job.reportJobId] && "cursor-not-allowed opacity-60"
+                        )}
+                      >
+                        {reportActionLoadingById[job.reportJobId]
+                          ? getReportActionKind(job.status) === "cancel"
+                            ? "Cancelling..."
+                            : "Deleting..."
+                          : getReportActionKind(job.status) === "cancel"
+                            ? "Cancel"
+                            : "Delete"}
+                      </button>
+                    </div>
+                    {reportActionErrorById[job.reportJobId] && (
+                      <div className="mt-1 text-[11px] text-rose-300">{reportActionErrorById[job.reportJobId]}</div>
                     )}
                   </div>
                 ))

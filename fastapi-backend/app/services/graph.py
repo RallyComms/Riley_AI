@@ -539,6 +539,10 @@ class GraphService:
                 created_at: datetime(),
                 started_at: null,
                 completed_at: null,
+                cancel_requested_at: null,
+                cancelled_at: null,
+                deleted_at: null,
+                cancellation_reason: null,
                 error_message: null,
                 output_file_id: null,
                 output_url: null,
@@ -569,6 +573,10 @@ class GraphService:
                 toString(r.created_at) as created_at,
                 toString(r.started_at) as started_at,
                 toString(r.completed_at) as completed_at,
+                toString(r.cancel_requested_at) as cancel_requested_at,
+                toString(r.cancelled_at) as cancelled_at,
+                toString(r.deleted_at) as deleted_at,
+                r.cancellation_reason as cancellation_reason,
                 r.error_message as error_message,
                 r.output_file_id as output_file_id,
                 r.output_url as output_url,
@@ -617,6 +625,7 @@ class GraphService:
         async with self._driver.session() as session:
             query = """
             MATCH (r:RileyReportJob {tenant_id: $tenant_id, user_id: $user_id})
+            WHERE r.deleted_at IS NULL AND coalesce(r.status, "") <> "deleted"
             RETURN properties(r) as props
             LIMIT $limit
             """
@@ -641,6 +650,10 @@ class GraphService:
                         "created_at": str(props.get("created_at")) if props.get("created_at") else None,
                         "started_at": str(props.get("started_at")) if props.get("started_at") else None,
                         "completed_at": str(props.get("completed_at")) if props.get("completed_at") else None,
+                        "cancel_requested_at": str(props.get("cancel_requested_at")) if props.get("cancel_requested_at") else None,
+                        "cancelled_at": str(props.get("cancelled_at")) if props.get("cancelled_at") else None,
+                        "deleted_at": str(props.get("deleted_at")) if props.get("deleted_at") else None,
+                        "cancellation_reason": props.get("cancellation_reason"),
                         "error_message": props.get("error_message"),
                         "output_file_id": props.get("output_file_id"),
                         "output_url": props.get("output_url"),
@@ -707,6 +720,10 @@ class GraphService:
                 "created_at": str(props.get("created_at")) if props.get("created_at") else None,
                 "started_at": str(props.get("started_at")) if props.get("started_at") else None,
                 "completed_at": str(props.get("completed_at")) if props.get("completed_at") else None,
+                "cancel_requested_at": str(props.get("cancel_requested_at")) if props.get("cancel_requested_at") else None,
+                "cancelled_at": str(props.get("cancelled_at")) if props.get("cancelled_at") else None,
+                "deleted_at": str(props.get("deleted_at")) if props.get("deleted_at") else None,
+                "cancellation_reason": props.get("cancellation_reason"),
                 "error_message": props.get("error_message"),
                 "output_file_id": props.get("output_file_id"),
                 "output_url": props.get("output_url"),
@@ -757,6 +774,10 @@ class GraphService:
                 "created_at": str(props.get("created_at")) if props.get("created_at") else None,
                 "started_at": str(props.get("started_at")) if props.get("started_at") else None,
                 "completed_at": str(props.get("completed_at")) if props.get("completed_at") else None,
+                "cancel_requested_at": str(props.get("cancel_requested_at")) if props.get("cancel_requested_at") else None,
+                "cancelled_at": str(props.get("cancelled_at")) if props.get("cancelled_at") else None,
+                "deleted_at": str(props.get("deleted_at")) if props.get("deleted_at") else None,
+                "cancellation_reason": props.get("cancellation_reason"),
                 "error_message": props.get("error_message"),
                 "output_file_id": props.get("output_file_id"),
                 "output_url": props.get("output_url"),
@@ -791,6 +812,10 @@ class GraphService:
         output_url: Optional[str] = None,
         summary_text: Optional[str] = None,
         report_body: Optional[str] = None,
+        cancel_requested_at: Optional[str] = None,
+        cancelled_at: Optional[str] = None,
+        deleted_at: Optional[str] = None,
+        cancellation_reason: Optional[str] = None,
         report_fidelity_level: Optional[str] = None,
         report_context_reduction_applied: Optional[bool] = None,
         report_context_strategy: Optional[str] = None,
@@ -820,6 +845,22 @@ class GraphService:
                 r.completed_at = CASE
                     WHEN $completed_at IS NULL THEN r.completed_at
                     ELSE datetime($completed_at)
+                END,
+                r.cancel_requested_at = CASE
+                    WHEN $cancel_requested_at IS NULL THEN r.cancel_requested_at
+                    ELSE datetime($cancel_requested_at)
+                END,
+                r.cancelled_at = CASE
+                    WHEN $cancelled_at IS NULL THEN r.cancelled_at
+                    ELSE datetime($cancelled_at)
+                END,
+                r.deleted_at = CASE
+                    WHEN $deleted_at IS NULL THEN r.deleted_at
+                    ELSE datetime($deleted_at)
+                END,
+                r.cancellation_reason = CASE
+                    WHEN $cancellation_reason IS NULL THEN r.cancellation_reason
+                    ELSE $cancellation_reason
                 END,
                 r.error_message = $error_message,
                 r.output_file_id = $output_file_id,
@@ -869,6 +910,10 @@ class GraphService:
                 output_url=output_url,
                 summary_text=summary_text,
                 report_body=report_body,
+                cancel_requested_at=cancel_requested_at,
+                cancelled_at=cancelled_at,
+                deleted_at=deleted_at,
+                cancellation_reason=cancellation_reason,
                 report_fidelity_level=report_fidelity_level,
                 report_context_reduction_applied=report_context_reduction_applied,
                 report_context_strategy=report_context_strategy,

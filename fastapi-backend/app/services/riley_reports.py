@@ -701,6 +701,7 @@ async def _persist_report_docx_artifact(
     query_text: str,
     report_body: str,
     sources_appendix: List[str],
+    graph: Optional[GraphService] = None,
 ) -> Tuple[str, str]:
     settings = get_settings()
     generated_at = datetime.now().isoformat()
@@ -734,6 +735,12 @@ async def _persist_report_docx_artifact(
         tenant_id,
         len(docx_bytes),
     )
+    if graph and await _check_report_job_cancellation(
+        report_job_id=report_job_id,
+        graph=graph,
+        checkpoint="before_upload",
+    ):
+        raise RuntimeError("Report cancelled before upload")
     logger.info(
         "report_upload_started report_job_id=%s tenant_id=%s object_name=%s",
         report_job_id,
@@ -1010,6 +1017,32 @@ def _sample_results_for_coverage(results: List[Dict[str, Any]], target: int) -> 
     return picks
 
 
+async def _check_report_job_cancellation(
+    *,
+    report_job_id: str,
+    graph: GraphService,
+    checkpoint: str,
+) -> bool:
+    job = await graph.get_riley_report_job_for_worker(report_job_id=report_job_id)
+    if not job:
+        logger.warning(
+            "report_job_cancelled report_job_id=%s checkpoint=%s status=missing",
+            report_job_id,
+            checkpoint,
+        )
+        return True
+    status = str(job.get("status") or "").lower()
+    if status in {"cancelled", "deleted"}:
+        logger.info(
+            "report_job_cancelled report_job_id=%s checkpoint=%s status=%s",
+            report_job_id,
+            checkpoint,
+            status,
+        )
+        return True
+    return False
+
+
 async def _retrieve_report_context(
     *,
     graph: Optional[GraphService],
@@ -1201,6 +1234,12 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
     context_reduction_applied = False
 
     try:
+        if await _check_report_job_cancellation(
+            report_job_id=report_job_id,
+            graph=graph,
+            checkpoint="before_retrieval",
+        ):
+            return
         logger.info(
             "report_retrieval_started report_job_id=%s tenant_id=%s report_type=%s deep_mode=%s",
             report_job_id,
@@ -1277,6 +1316,12 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
         selected_global_results: List[Dict[str, Any]] = global_results
 
         for attempt_idx in range(max_attempts):
+            if await _check_report_job_cancellation(
+                report_job_id=report_job_id,
+                graph=graph,
+                checkpoint="before_generation_attempt",
+            ):
+                return
             plan = attempt_plan[min(attempt_idx, len(attempt_plan) - 1)]
             context_scale = float(plan["context_scale"])
             context_max_chars = max(6000, int(round(base_context_chars * context_scale)))
@@ -1383,6 +1428,12 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
         summary_for_debug = summary_text
 
         stage = "docx_generation"
+        if await _check_report_job_cancellation(
+            report_job_id=report_job_id,
+            graph=graph,
+            checkpoint="before_docx_generation",
+        ):
+            return
         sources_appendix = _build_sources_appendix(selected_private_results, selected_global_results)
         output_file_id, output_url = await _persist_report_docx_artifact(
             report_job_id=report_job_id,
@@ -1393,9 +1444,16 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
             query_text=query_text,
             report_body=report_body,
             sources_appendix=sources_appendix,
+            graph=graph,
         )
 
         stage = "persistence"
+        if await _check_report_job_cancellation(
+            report_job_id=report_job_id,
+            graph=graph,
+            checkpoint="before_final_persistence",
+        ):
+            return
         logger.info(
             "report_persistence_started report_job_id=%s tenant_id=%s output_file_id=%s",
             report_job_id,
