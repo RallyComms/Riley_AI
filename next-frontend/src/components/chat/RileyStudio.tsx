@@ -806,6 +806,29 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     }
   };
 
+  const handleDeleteProject = async (projectId: string) => {
+    if (!window.confirm("Delete this project folder? Conversations will remain and be moved out of the folder.")) return;
+    try {
+      const token = await getToken();
+      if (!token) return;
+      await apiFetch(`/api/v1/riley/projects/${projectId}?tenant_id=${encodeURIComponent(tenantId)}`, {
+        token,
+        method: "DELETE",
+      });
+      setProjects((prev) => prev.filter((project) => project.id !== projectId));
+      setConversations((prev) =>
+        prev.map((conv) => (conv.projectId === projectId ? { ...conv, projectId: null } : conv))
+      );
+      setCollapsedProjectIds((prev) => {
+        const next = { ...prev };
+        delete next[projectId];
+        return next;
+      });
+    } catch (error) {
+      console.error("Failed to delete Riley project:", error);
+    }
+  };
+
   const handleDeleteConversation = async (conversationId: string) => {
     try {
       const token = await getToken();
@@ -1534,19 +1557,33 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     const isCollapsed = Boolean(collapsedProjectIds[project.id]);
                     return (
                       <div key={project.id} className="rounded-lg border border-zinc-800/80 bg-zinc-900/30 p-2">
-                        <button
-                          type="button"
-                          onClick={() => toggleProjectCollapsed(project.id)}
-                          className="flex w-full items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-zinc-800/40"
-                        >
-                          {isCollapsed ? (
-                            <ChevronRight className="h-3.5 w-3.5 text-zinc-500" />
-                          ) : (
-                            <ChevronDown className="h-3.5 w-3.5 text-zinc-500" />
-                          )}
-                          <Folder className="h-3.5 w-3.5 text-zinc-400" />
-                          <div className="truncate text-xs font-medium text-zinc-300">{project.name}</div>
-                        </button>
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => toggleProjectCollapsed(project.id)}
+                            className="flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left hover:bg-zinc-800/40"
+                          >
+                            {isCollapsed ? (
+                              <ChevronRight className="h-3.5 w-3.5 text-zinc-500" />
+                            ) : (
+                              <ChevronDown className="h-3.5 w-3.5 text-zinc-500" />
+                            )}
+                            <Folder className="h-3.5 w-3.5 text-zinc-400" />
+                            <div className="truncate text-xs font-medium text-zinc-300">{project.name}</div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleDeleteProject(project.id);
+                            }}
+                            className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-rose-300"
+                            title="Delete project"
+                            aria-label="Delete project"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
                         {!isCollapsed && (
                           <div className="space-y-1">
                             {projectConversations.length === 0 ? (

@@ -1221,7 +1221,10 @@ RESPONSE STYLE:
 
 RESPONSE STRUCTURE:
 - Start with a direct answer.
-- Then include clear sections:
+- Do NOT default to formal headers for simple or conversational asks.
+- Use structured sections only when the task explicitly calls for analytical structure
+  (for example: analysis, breakdown, report, memo, or brief).
+- If structured sections are warranted, use:
   - `### Evidence from Sources`
   - `### Synthesized Intelligence`
   - `### Strategic Recommendation`
