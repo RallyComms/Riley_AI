@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
-import { Send, Loader2, Sparkles, Zap, Brain, FileText, Check, X, Search, MessageSquare, BarChart3, ChevronLeft, Users, FolderPlus, Folder, MoreHorizontal, ChevronDown, ChevronRight, Copy, CheckCheck, Download, ClipboardList, AlertTriangle } from "lucide-react";
+import { Send, Loader2, Sparkles, Zap, Brain, FileText, Check, X, Search, MessageSquare, BarChart3, ChevronLeft, Users, FolderPlus, Folder, MoreHorizontal, ChevronDown, ChevronRight, Copy, CheckCheck, Download, ClipboardList, AlertTriangle, Pencil, RotateCcw, Trash2 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import { cn } from "@app/lib/utils";
@@ -1005,6 +1005,74 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     await executeSend(input.trim());
   };
 
+  const getPromptForMessage = (messageId: string, snapshot: Message[]): string | null => {
+    const idx = snapshot.findIndex((msg) => msg.id === messageId);
+    if (idx < 0) return null;
+    const target = snapshot[idx];
+    if (target.role === "user") {
+      const prompt = target.content.trim();
+      return prompt || null;
+    }
+    for (let i = idx - 1; i >= 0; i -= 1) {
+      if (snapshot[i].role === "user") {
+        const prompt = snapshot[i].content.trim();
+        return prompt || null;
+      }
+    }
+    return null;
+  };
+
+  const getDeleteIndicesForMessage = (messageId: string, snapshot: Message[]): number[] => {
+    const idx = snapshot.findIndex((msg) => msg.id === messageId);
+    if (idx < 0) return [];
+    const target = snapshot[idx];
+    const indices = new Set<number>();
+    indices.add(idx);
+
+    if (target.role === "user") {
+      for (let i = idx + 1; i < snapshot.length; i += 1) {
+        const next = snapshot[i];
+        if (next.role === "system") continue;
+        if (next.role === "assistant") indices.add(i);
+        break;
+      }
+    } else if (target.role === "assistant") {
+      for (let i = idx - 1; i >= 0; i -= 1) {
+        const prev = snapshot[i];
+        if (prev.role === "system") continue;
+        if (prev.role === "user") indices.add(i);
+        break;
+      }
+    }
+
+    return Array.from(indices).sort((a, b) => b - a);
+  };
+
+  const handleEditMessage = (messageId: string) => {
+    const prompt = getPromptForMessage(messageId, messages);
+    if (!prompt) return;
+    setInput(prompt);
+    inputRef.current?.focus();
+  };
+
+  const handleRerunMessage = async (messageId: string) => {
+    const prompt = getPromptForMessage(messageId, messages);
+    if (!prompt) return;
+    await executeSend(prompt, { bypassReportIntent: true });
+  };
+
+  const handleDeleteMessage = (messageId: string) => {
+    setMessages((prev) => {
+      const deleteIndices = getDeleteIndicesForMessage(messageId, prev);
+      if (deleteIndices.length === 0) return prev;
+      const next = [...prev];
+      for (const index of deleteIndices) {
+        if (index >= 0 && index < next.length) next.splice(index, 1);
+      }
+      return next;
+    });
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
@@ -1689,7 +1757,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     )}
                     <div
                       className={cn(
-                        "rounded-lg px-4 py-3 max-w-[85%]",
+                        "relative group/message rounded-lg px-4 py-3 max-w-[85%]",
+                        message.role !== "system" && message.status !== "thinking" && "pr-20",
                         message.role === "user"
                           ? "bg-amber-500/10 border border-amber-500/20 text-amber-100"
                           : message.role === "system"
@@ -1699,6 +1768,34 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           : "bg-zinc-900/50 border border-zinc-800/50 text-zinc-100"
                       )}
                     >
+                      {message.role !== "system" && message.status !== "thinking" && (
+                        <div className="absolute right-2 top-2 flex items-center gap-1 rounded-md border border-zinc-700/70 bg-zinc-900/85 p-1 opacity-0 transition-opacity group-hover/message:opacity-100">
+                          <button
+                            type="button"
+                            onClick={() => handleEditMessage(message.id)}
+                            className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                            title="Edit message"
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleRerunMessage(message.id)}
+                            className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                            title="Rerun message"
+                          >
+                            <RotateCcw className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteMessage(message.id)}
+                            className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-rose-300"
+                            title="Delete message pair"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      )}
                       {message.status === "thinking" ? (
                         // Thinking placeholder
                         <div className="flex items-center gap-2 text-sm text-zinc-400">

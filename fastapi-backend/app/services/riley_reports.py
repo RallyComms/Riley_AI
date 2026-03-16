@@ -3,7 +3,6 @@ import io
 import json
 import logging
 import re
-import traceback
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -21,6 +20,7 @@ from app.services.graph import GraphService
 from app.services.qdrant import vector_service
 from app.services.rerank import rerank_candidates
 from app.services.storage import StorageService
+from app.services.token_utils import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +206,8 @@ def _format_rag_context(
     global_results: List[Dict[str, Any]],
     graph_results: str,
     file_manifest: List[str],
+    *,
+    max_text_chars_per_result: int = 2200,
 ) -> str:
     settings = get_settings()
     parts: List[str] = []
@@ -223,6 +225,8 @@ def _format_rag_context(
             filename = payload.get("filename", "Unknown")
             location = payload.get("location_value") or payload.get("location") or "Unknown location"
             text = _get_text_for_rag(payload, settings)
+            if len(text) > max_text_chars_per_result:
+                text = f"{text[:max_text_chars_per_result].rstrip()}…"
             private_lines.append(
                 f"[Private {idx}] {filename} | {location}\n{text}"
             )
@@ -235,6 +239,8 @@ def _format_rag_context(
             filename = payload.get("filename", "Unknown")
             location = payload.get("location_value") or payload.get("location") or "Unknown location"
             text = _get_text_for_rag(payload, settings)
+            if len(text) > max_text_chars_per_result:
+                text = f"{text[:max_text_chars_per_result].rstrip()}…"
             global_lines.append(
                 f"[Global {idx}] {filename} | {location}\n{text}"
             )
@@ -705,6 +711,12 @@ async def _persist_report_docx_artifact(
     object_name = f"reports/{tenant_id}/{report_job_id}/{artifact_filename}"
     mime_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
+    logger.info(
+        "report_docx_generation_started report_job_id=%s tenant_id=%s report_type=%s",
+        report_job_id,
+        tenant_id,
+        report_type,
+    )
     docx_bytes = _generate_docx_bytes(
         report_job_id=report_job_id,
         tenant_id=tenant_id,
@@ -716,10 +728,28 @@ async def _persist_report_docx_artifact(
         generated_at_iso=generated_at,
         sources_appendix=sources_appendix,
     )
+    logger.info(
+        "report_docx_generation_completed report_job_id=%s tenant_id=%s bytes=%s",
+        report_job_id,
+        tenant_id,
+        len(docx_bytes),
+    )
+    logger.info(
+        "report_upload_started report_job_id=%s tenant_id=%s object_name=%s",
+        report_job_id,
+        tenant_id,
+        object_name,
+    )
     output_url = await StorageService.upload_bytes(
         object_name=object_name,
         data=docx_bytes,
         content_type=mime_type,
+    )
+    logger.info(
+        "report_upload_completed report_job_id=%s tenant_id=%s object_name=%s",
+        report_job_id,
+        tenant_id,
+        object_name,
     )
 
     output_file_id = str(uuid.uuid4())
@@ -774,6 +804,13 @@ async def _persist_report_docx_artifact(
         collection_name=target_collection,
         points=[PointStruct(id=output_file_id, vector=placeholder_vector, payload=payload)],
     )
+    logger.info(
+        "report_artifact_persisted report_job_id=%s tenant_id=%s output_file_id=%s collection=%s",
+        report_job_id,
+        tenant_id,
+        output_file_id,
+        target_collection,
+    )
     return output_file_id, output_url
 
 
@@ -791,6 +828,7 @@ async def _enqueue_report_cloud_task(report_job_id: str) -> None:
         )
 
     payload = _build_worker_payload(report_job_id)
+    logger.info("report_queue_dispatch_started report_job_id=%s queue=%s", report_job_id, settings.RILEY_REPORTS_TASKS_QUEUE)
 
     def _create_task_sync() -> None:
         client = tasks_v2.CloudTasksClient()
@@ -821,6 +859,7 @@ async def _enqueue_report_cloud_task(report_job_id: str) -> None:
             return
 
     await run_in_threadpool(_create_task_sync)
+    logger.info("report_queue_dispatch_completed report_job_id=%s queue=%s", report_job_id, settings.RILEY_REPORTS_TASKS_QUEUE)
 
 
 async def create_report_job(
@@ -848,12 +887,22 @@ async def create_report_job(
         query_text=query_text,
         mode=normalized_mode,
     )
+    logger.info(
+        "report_job_created report_job_id=%s tenant_id=%s user_id=%s report_type=%s deep_mode=%s",
+        report_job_id,
+        tenant_id,
+        user_id,
+        normalized_report_type,
+        normalized_mode == "deep",
+    )
     try:
         if settings.RILEY_REPORTS_USE_CLOUD_TASKS:
             await _enqueue_report_cloud_task(report_job_id)
         else:
             # Non-durable fallback for local/dev environments.
+            logger.info("report_inline_dispatch_started report_job_id=%s", report_job_id)
             asyncio.create_task(run_report_job(report_job_id=report_job_id, graph=graph))
+            logger.info("report_inline_dispatch_completed report_job_id=%s", report_job_id)
     except Exception as exc:
         await graph.update_riley_report_job(
             report_job_id=report_job_id,
@@ -862,6 +911,16 @@ async def create_report_job(
             status="failed",
             completed_at=datetime.now().isoformat(),
             error_message=f"Failed to enqueue report job: {type(exc).__name__}",
+            failure_stage="queue_dispatch",
+            failure_code=type(exc).__name__,
+            failure_detail=str(exc)[:500],
+        )
+        logger.error(
+            "report_job_dispatch_failed report_job_id=%s tenant_id=%s error_type=%s error_message=%s",
+            report_job_id,
+            tenant_id,
+            type(exc).__name__,
+            str(exc)[:280],
         )
         raise
     return job
@@ -912,6 +971,43 @@ async def _call_openai_report_model(*, prompt: str, model_name: str, timeout_sec
         if not text:
             raise RuntimeError("OpenAI report response did not contain text output")
         return text
+
+
+def _is_retryable_report_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    if "timeout" in name:
+        return True
+    if "ratelimit" in name or "toomanyrequests" in name:
+        return True
+    return (
+        "readtimeout" in message
+        or "timed out" in message
+        or "temporarily unavailable" in message
+        or "status code: 429" in message
+        or "status code: 500" in message
+        or "status code: 502" in message
+        or "status code: 503" in message
+        or "status code: 504" in message
+    )
+
+
+def _sample_results_for_coverage(results: List[Dict[str, Any]], target: int) -> List[Dict[str, Any]]:
+    if target <= 0 or not results:
+        return []
+    if target >= len(results):
+        return list(results)
+    if target == 1:
+        return [results[0]]
+    picks: List[Dict[str, Any]] = []
+    seen: set[int] = set()
+    for i in range(target):
+        idx = round(i * (len(results) - 1) / (target - 1))
+        if idx in seen:
+            continue
+        picks.append(results[idx])
+        seen.add(idx)
+    return picks
 
 
 async def _retrieve_report_context(
@@ -1054,6 +1150,17 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
     report_type = _normalize_report_type(str(job.get("report_type") or "strategy_memo"))
     title = str(job.get("title") or "Riley Strategy Report").strip() or "Riley Strategy Report"
     mode = _normalize_report_mode(str(job.get("mode") or "deep"))
+    model_name = settings.RILEY_DEEP_MODEL if mode == "deep" else settings.RILEY_MODEL
+
+    logger.info(
+        "report_job_worker_started report_job_id=%s tenant_id=%s report_type=%s model=%s deep_mode=%s",
+        report_job_id,
+        tenant_id,
+        report_type,
+        model_name,
+        mode == "deep",
+    )
+
     if not query_text:
         await graph.update_riley_report_job(
             report_job_id=report_job_id,
@@ -1062,6 +1169,9 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
             status="failed",
             completed_at=datetime.now().isoformat(),
             error_message="Report query text is empty",
+            failure_stage="validation",
+            failure_code="EMPTY_QUERY",
+            failure_detail="Report query text is empty",
         )
         return
 
@@ -1073,18 +1183,53 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
         status="processing",
         started_at=started_at,
         error_message=None,
+        failure_stage=None,
+        failure_code=None,
+        failure_detail=None,
+        generation_model=model_name,
     )
 
+    stage = "retrieval"
     report_body_for_debug: Optional[str] = None
     summary_for_debug: Optional[str] = None
+    retrieval_doc_count = 0
+    retrieval_chunk_count = 0
+    used_context_chars = 0
+    used_attempt_count = 0
+    used_fidelity_level = "full"
+    used_context_strategy = "full_context"
+    context_reduction_applied = False
+
     try:
+        logger.info(
+            "report_retrieval_started report_job_id=%s tenant_id=%s report_type=%s deep_mode=%s",
+            report_job_id,
+            tenant_id,
+            report_type,
+            mode == "deep",
+        )
         private_results, global_results, graph_results, file_manifest = await _retrieve_report_context(
             graph=graph,
             tenant_id=tenant_id,
             query_text=query_text,
         )
-        has_context = bool(private_results or global_results or graph_results or file_manifest)
-        context = _format_rag_context(private_results, global_results, graph_results, file_manifest)
+        retrieval_chunk_count = len(private_results) + len(global_results)
+        unique_docs = {
+            str((item.get("payload") or {}).get("parent_file_id") or item.get("id") or "")
+            for item in [*private_results, *global_results]
+            if str((item.get("payload") or {}).get("parent_file_id") or item.get("id") or "").strip()
+        }
+        retrieval_doc_count = len(unique_docs)
+        logger.info(
+            "report_retrieval_completed report_job_id=%s tenant_id=%s retrieval_doc_count=%s retrieval_chunk_count=%s graph_chars=%s",
+            report_job_id,
+            tenant_id,
+            retrieval_doc_count,
+            retrieval_chunk_count,
+            len(graph_results or ""),
+        )
+
+        intelligence_blocks: List[str] = []
         try:
             private_doc_intel = await _load_parent_document_intelligence(
                 collection_name=settings.QDRANT_COLLECTION_TIER_2,
@@ -1097,42 +1242,149 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
             campaign_snapshot = await graph.get_latest_riley_campaign_intelligence_snapshot(
                 tenant_id=tenant_id
             )
-            intelligence_blocks: List[str] = []
             doc_intel_block = _build_doc_intel_context_block([*private_doc_intel, *global_doc_intel])
             if doc_intel_block:
                 intelligence_blocks.append(doc_intel_block)
             campaign_block = _build_campaign_intel_context_block(campaign_snapshot)
             if campaign_block:
                 intelligence_blocks.append(campaign_block)
-            if intelligence_blocks:
-                context = f"{context}\n\n" + "\n\n".join(intelligence_blocks) if context else "\n\n".join(intelligence_blocks)
-                has_context = True
         except Exception as intelligence_exc:
             logger.warning(
-                "report_intelligence_context_unavailable report_job_id=%s tenant_id=%s error_type=%s",
+                "report_intelligence_context_unavailable report_job_id=%s tenant_id=%s error_type=%s error_message=%s",
                 report_job_id,
                 tenant_id,
                 type(intelligence_exc).__name__,
+                str(intelligence_exc)[:220],
             )
-        prompt = _build_report_prompt(
-            query=query_text,
-            context=context,
-            has_context=has_context,
-            mode=mode,
-            report_type=report_type,
-            user_display_name="there",
-        )
-        model_name = settings.RILEY_DEEP_MODEL if mode == "deep" else settings.RILEY_MODEL
-        report_body = await _call_openai_report_model(
-            prompt=prompt,
-            model_name=model_name,
-            timeout_seconds=max(30, int(settings.RILEY_REPORT_TIMEOUT_SECONDS)),
-        )
-        report_body = _validate_and_sanitize_quotes(report_body, private_results, global_results)
+
+        retry_attempts = max(0, int(settings.RILEY_REPORT_RETRY_ATTEMPTS))
+        max_attempts = retry_attempts + 1
+        backoff_seconds = max(0.25, float(settings.RILEY_REPORT_RETRY_BACKOFF_SECONDS))
+        base_timeout = max(45, int(settings.RILEY_REPORT_TIMEOUT_SECONDS))
+        max_timeout = max(base_timeout, int(settings.RILEY_REPORT_MAX_TIMEOUT_SECONDS))
+        base_context_chars = max(8000, int(settings.RILEY_REPORT_MAX_CONTEXT_CHARS))
+        attempt_plan = [
+            {"context_scale": 1.00, "timeout_scale": 1.00, "fidelity": "full", "strategy": "full_context"},
+            {"context_scale": 1.00, "timeout_scale": 1.35, "fidelity": "full", "strategy": "full_context_retry"},
+            {"context_scale": 0.95, "timeout_scale": 1.80, "fidelity": "lightly_reduced", "strategy": "coverage_preserving_95"},
+            {"context_scale": 0.90, "timeout_scale": 2.30, "fidelity": "lightly_reduced", "strategy": "coverage_preserving_90"},
+            {"context_scale": 0.85, "timeout_scale": 2.90, "fidelity": "moderately_reduced", "strategy": "coverage_preserving_85"},
+            {"context_scale": 0.80, "timeout_scale": 3.40, "fidelity": "heavily_reduced", "strategy": "coverage_preserving_80"},
+        ]
+
+        report_body: Optional[str] = None
+        last_exc: Optional[Exception] = None
+        selected_private_results: List[Dict[str, Any]] = private_results
+        selected_global_results: List[Dict[str, Any]] = global_results
+
+        for attempt_idx in range(max_attempts):
+            plan = attempt_plan[min(attempt_idx, len(attempt_plan) - 1)]
+            context_scale = float(plan["context_scale"])
+            context_max_chars = max(6000, int(round(base_context_chars * context_scale)))
+            per_result_chars = max(900, int(round(2200 * context_scale)))
+            p_target = max(6, int(round(len(private_results) * context_scale))) if private_results else 0
+            g_target = max(4, int(round(len(global_results) * context_scale))) if global_results else 0
+            selected_private_results = _sample_results_for_coverage(private_results, p_target)
+            selected_global_results = _sample_results_for_coverage(global_results, g_target)
+
+            context = _format_rag_context(
+                selected_private_results,
+                selected_global_results,
+                graph_results,
+                file_manifest,
+                max_text_chars_per_result=per_result_chars,
+            )
+            if intelligence_blocks:
+                intelligence_text = "\n\n".join(intelligence_blocks)
+                if len(intelligence_text) > max(3000, int(context_max_chars * 0.4)):
+                    intelligence_text = f"{intelligence_text[: max(3000, int(context_max_chars * 0.4))].rstrip()}…"
+                context = f"{context}\n\n{intelligence_text}" if context else intelligence_text
+            if len(context) > context_max_chars:
+                context = f"{context[:context_max_chars].rstrip()}…"
+                context_reduction_applied = True
+            used_context_chars = len(context)
+            has_context = bool(context.strip())
+            prompt = _build_report_prompt(
+                query=query_text,
+                context=context,
+                has_context=has_context,
+                mode=mode,
+                report_type=report_type,
+                user_display_name="there",
+            )
+            timeout_seconds = min(
+                max_timeout,
+                max(base_timeout, int(round(base_timeout * float(plan["timeout_scale"])))),
+            )
+            used_fidelity_level = str(plan["fidelity"])
+            used_context_strategy = str(plan["strategy"])
+            used_attempt_count = attempt_idx + 1
+
+            logger.info(
+                "report_generation_started report_job_id=%s tenant_id=%s report_type=%s model=%s deep_mode=%s "
+                "attempt=%s/%s timeout_s=%s retrieval_doc_count=%s context_chunks_included=%s context_chars=%s context_tokens_est=%s fidelity=%s",
+                report_job_id,
+                tenant_id,
+                report_type,
+                model_name,
+                mode == "deep",
+                attempt_idx + 1,
+                max_attempts,
+                timeout_seconds,
+                retrieval_doc_count,
+                len(selected_private_results) + len(selected_global_results),
+                used_context_chars,
+                estimate_tokens(context),
+                used_fidelity_level,
+            )
+            try:
+                report_body = await _call_openai_report_model(
+                    prompt=prompt,
+                    model_name=model_name,
+                    timeout_seconds=timeout_seconds,
+                )
+                logger.info(
+                    "report_generation_completed report_job_id=%s tenant_id=%s attempt=%s/%s model=%s",
+                    report_job_id,
+                    tenant_id,
+                    attempt_idx + 1,
+                    max_attempts,
+                    model_name,
+                )
+                break
+            except Exception as exc:
+                last_exc = exc
+                retryable = _is_retryable_report_error(exc) and attempt_idx < retry_attempts
+                logger.warning(
+                    "report_generation_attempt_failed report_job_id=%s tenant_id=%s attempt=%s/%s retryable=%s "
+                    "error_type=%s error_message=%s",
+                    report_job_id,
+                    tenant_id,
+                    attempt_idx + 1,
+                    max_attempts,
+                    retryable,
+                    type(exc).__name__,
+                    str(exc)[:260],
+                )
+                if not retryable:
+                    raise
+                await asyncio.sleep(backoff_seconds * (2 ** attempt_idx))
+
+        if report_body is None:
+            raise RuntimeError(
+                f"Report generation retries exhausted: {type(last_exc).__name__ if last_exc else 'UnknownError'}"
+            )
+
+        stage = "post_generation"
+        report_body = _validate_and_sanitize_quotes(report_body, selected_private_results, selected_global_results)
         summary_text = _build_summary_text(report_body)
+        if used_fidelity_level != "full":
+            summary_text = f"[Reduced coverage: {used_fidelity_level}] {summary_text}".strip()
         report_body_for_debug = report_body
         summary_for_debug = summary_text
-        sources_appendix = _build_sources_appendix(private_results, global_results)
+
+        stage = "docx_generation"
+        sources_appendix = _build_sources_appendix(selected_private_results, selected_global_results)
         output_file_id, output_url = await _persist_report_docx_artifact(
             report_job_id=report_job_id,
             tenant_id=tenant_id,
@@ -1142,6 +1394,14 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
             query_text=query_text,
             report_body=report_body,
             sources_appendix=sources_appendix,
+        )
+
+        stage = "persistence"
+        logger.info(
+            "report_persistence_started report_job_id=%s tenant_id=%s output_file_id=%s",
+            report_job_id,
+            tenant_id,
+            output_file_id,
         )
         await graph.update_riley_report_job(
             report_job_id=report_job_id,
@@ -1154,22 +1414,58 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
             output_url=output_url,
             summary_text=summary_text,
             report_body=report_body,
+            report_fidelity_level=used_fidelity_level,
+            report_context_reduction_applied=context_reduction_applied,
+            report_context_strategy=used_context_strategy,
+            retrieval_doc_count=retrieval_doc_count,
+            retrieval_chunk_count=len(selected_private_results) + len(selected_global_results),
+            context_chars_included=used_context_chars,
+            generation_model=model_name,
+            generation_attempts_used=used_attempt_count,
+            failure_stage=None,
+            failure_code=None,
+            failure_detail=None,
         )
-    except Exception as exc:
-        logger.error(
-            "riley_report_job_failed report_job_id=%s tenant_id=%s error_type=%s",
+        logger.info(
+            "report_persistence_completed report_job_id=%s tenant_id=%s final_status=complete fidelity=%s",
             report_job_id,
             tenant_id,
-            type(exc).__name__,
+            used_fidelity_level,
         )
-        logger.error("riley_report_job_trace report_job_id=%s trace=%s", report_job_id, traceback.format_exc())
+    except Exception as exc:
+        error_type = type(exc).__name__
+        error_message = str(exc)[:500]
+        human_error = f"{stage}: {error_type}: {error_message}"
+        logger.exception(
+            "riley_report_job_failed report_job_id=%s tenant_id=%s report_type=%s model=%s deep_mode=%s "
+            "stage=%s error_type=%s error_message=%s",
+            report_job_id,
+            tenant_id,
+            report_type,
+            model_name,
+            mode == "deep",
+            stage,
+            error_type,
+            error_message,
+        )
         await graph.update_riley_report_job(
             report_job_id=report_job_id,
             tenant_id=tenant_id,
             user_id=user_id,
             status="failed",
             completed_at=datetime.now().isoformat(),
-            error_message=str(exc)[:1500],
+            error_message=human_error[:1500],
             summary_text=summary_for_debug,
             report_body=report_body_for_debug,
+            report_fidelity_level=used_fidelity_level,
+            report_context_reduction_applied=context_reduction_applied,
+            report_context_strategy=used_context_strategy,
+            retrieval_doc_count=retrieval_doc_count or None,
+            retrieval_chunk_count=retrieval_chunk_count or None,
+            context_chars_included=used_context_chars or None,
+            generation_model=model_name,
+            generation_attempts_used=used_attempt_count or None,
+            failure_stage=stage,
+            failure_code=error_type,
+            failure_detail=error_message,
         )

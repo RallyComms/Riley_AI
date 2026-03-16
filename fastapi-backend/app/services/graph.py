@@ -543,6 +543,17 @@ class GraphService:
                 output_file_id: null,
                 output_url: null,
                 summary_text: null,
+                report_fidelity_level: null,
+                report_context_reduction_applied: false,
+                report_context_strategy: null,
+                retrieval_doc_count: null,
+                retrieval_chunk_count: null,
+                context_chars_included: null,
+                generation_model: null,
+                generation_attempts_used: null,
+                failure_stage: null,
+                failure_code: null,
+                failure_detail: null,
                 query_text: $query_text,
                 mode: $mode,
                 report_body: null
@@ -562,6 +573,17 @@ class GraphService:
                 r.output_file_id as output_file_id,
                 r.output_url as output_url,
                 r.summary_text as summary_text,
+                r.report_fidelity_level as report_fidelity_level,
+                r.report_context_reduction_applied as report_context_reduction_applied,
+                r.report_context_strategy as report_context_strategy,
+                r.retrieval_doc_count as retrieval_doc_count,
+                r.retrieval_chunk_count as retrieval_chunk_count,
+                r.context_chars_included as context_chars_included,
+                r.generation_model as generation_model,
+                r.generation_attempts_used as generation_attempts_used,
+                r.failure_stage as failure_stage,
+                r.failure_code as failure_code,
+                r.failure_detail as failure_detail,
                 r.query_text as query,
                 r.mode as mode
             """
@@ -623,6 +645,17 @@ class GraphService:
                         "output_file_id": props.get("output_file_id"),
                         "output_url": props.get("output_url"),
                         "summary_text": props.get("summary_text"),
+                        "report_fidelity_level": props.get("report_fidelity_level"),
+                        "report_context_reduction_applied": props.get("report_context_reduction_applied"),
+                        "report_context_strategy": props.get("report_context_strategy"),
+                        "retrieval_doc_count": props.get("retrieval_doc_count"),
+                        "retrieval_chunk_count": props.get("retrieval_chunk_count"),
+                        "context_chars_included": props.get("context_chars_included"),
+                        "generation_model": props.get("generation_model"),
+                        "generation_attempts_used": props.get("generation_attempts_used"),
+                        "failure_stage": props.get("failure_stage"),
+                        "failure_code": props.get("failure_code"),
+                        "failure_detail": props.get("failure_detail"),
                         "query": props.get("query_text"),
                         "mode": props.get("mode"),
                     }
@@ -678,6 +711,17 @@ class GraphService:
                 "output_file_id": props.get("output_file_id"),
                 "output_url": props.get("output_url"),
                 "summary_text": props.get("summary_text"),
+                "report_fidelity_level": props.get("report_fidelity_level"),
+                "report_context_reduction_applied": props.get("report_context_reduction_applied"),
+                "report_context_strategy": props.get("report_context_strategy"),
+                "retrieval_doc_count": props.get("retrieval_doc_count"),
+                "retrieval_chunk_count": props.get("retrieval_chunk_count"),
+                "context_chars_included": props.get("context_chars_included"),
+                "generation_model": props.get("generation_model"),
+                "generation_attempts_used": props.get("generation_attempts_used"),
+                "failure_stage": props.get("failure_stage"),
+                "failure_code": props.get("failure_code"),
+                "failure_detail": props.get("failure_detail"),
                 "query": props.get("query_text"),
                 "mode": props.get("mode"),
                 "report_body": props.get("report_body"),
@@ -717,6 +761,17 @@ class GraphService:
                 "output_file_id": props.get("output_file_id"),
                 "output_url": props.get("output_url"),
                 "summary_text": props.get("summary_text"),
+                "report_fidelity_level": props.get("report_fidelity_level"),
+                "report_context_reduction_applied": props.get("report_context_reduction_applied"),
+                "report_context_strategy": props.get("report_context_strategy"),
+                "retrieval_doc_count": props.get("retrieval_doc_count"),
+                "retrieval_chunk_count": props.get("retrieval_chunk_count"),
+                "context_chars_included": props.get("context_chars_included"),
+                "generation_model": props.get("generation_model"),
+                "generation_attempts_used": props.get("generation_attempts_used"),
+                "failure_stage": props.get("failure_stage"),
+                "failure_code": props.get("failure_code"),
+                "failure_detail": props.get("failure_detail"),
                 "query": props.get("query_text"),
                 "mode": props.get("mode"),
                 "report_body": props.get("report_body"),
@@ -736,6 +791,17 @@ class GraphService:
         output_url: Optional[str] = None,
         summary_text: Optional[str] = None,
         report_body: Optional[str] = None,
+        report_fidelity_level: Optional[str] = None,
+        report_context_reduction_applied: Optional[bool] = None,
+        report_context_strategy: Optional[str] = None,
+        retrieval_doc_count: Optional[int] = None,
+        retrieval_chunk_count: Optional[int] = None,
+        context_chars_included: Optional[int] = None,
+        generation_model: Optional[str] = None,
+        generation_attempts_used: Optional[int] = None,
+        failure_stage: Optional[str] = None,
+        failure_code: Optional[str] = None,
+        failure_detail: Optional[str] = None,
     ) -> None:
         """Update report job status and optional output fields."""
         async with self._driver.session() as session:
@@ -759,6 +825,32 @@ class GraphService:
                 r.output_file_id = $output_file_id,
                 r.output_url = $output_url,
                 r.summary_text = $summary_text,
+                r.report_fidelity_level = $report_fidelity_level,
+                r.report_context_reduction_applied = CASE
+                    WHEN $report_context_reduction_applied IS NULL THEN r.report_context_reduction_applied
+                    ELSE $report_context_reduction_applied
+                END,
+                r.report_context_strategy = $report_context_strategy,
+                r.retrieval_doc_count = CASE
+                    WHEN $retrieval_doc_count IS NULL THEN r.retrieval_doc_count
+                    ELSE $retrieval_doc_count
+                END,
+                r.retrieval_chunk_count = CASE
+                    WHEN $retrieval_chunk_count IS NULL THEN r.retrieval_chunk_count
+                    ELSE $retrieval_chunk_count
+                END,
+                r.context_chars_included = CASE
+                    WHEN $context_chars_included IS NULL THEN r.context_chars_included
+                    ELSE $context_chars_included
+                END,
+                r.generation_model = $generation_model,
+                r.generation_attempts_used = CASE
+                    WHEN $generation_attempts_used IS NULL THEN r.generation_attempts_used
+                    ELSE $generation_attempts_used
+                END,
+                r.failure_stage = $failure_stage,
+                r.failure_code = $failure_code,
+                r.failure_detail = $failure_detail,
                 r.report_body = CASE
                     WHEN $report_body IS NULL THEN r.report_body
                     ELSE $report_body
@@ -777,6 +869,17 @@ class GraphService:
                 output_url=output_url,
                 summary_text=summary_text,
                 report_body=report_body,
+                report_fidelity_level=report_fidelity_level,
+                report_context_reduction_applied=report_context_reduction_applied,
+                report_context_strategy=report_context_strategy,
+                retrieval_doc_count=retrieval_doc_count,
+                retrieval_chunk_count=retrieval_chunk_count,
+                context_chars_included=context_chars_included,
+                generation_model=generation_model,
+                generation_attempts_used=generation_attempts_used,
+                failure_stage=failure_stage,
+                failure_code=failure_code,
+                failure_detail=failure_detail,
             )
 
     async def upsert_riley_document_intelligence(

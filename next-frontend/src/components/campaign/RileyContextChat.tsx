@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useUser, useAuth } from "@clerk/nextjs";
-import { Send, Loader2, Trash2, FileText } from "lucide-react";
+import { Send, Loader2, Trash2, FileText, Pencil, RotateCcw } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { cn } from "@app/lib/utils";
 import { TypewriterMarkdown } from "@app/components/ui/TypewriterMarkdown";
@@ -287,9 +287,13 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
 
   async function handleSend() {
     if (!canSend || !sessionId) return;
+    await sendPrompt(input.trim(), { clearInput: true });
+  }
 
-    // Step 1: Capture user input immediately
-    const userInput = input.trim();
+  async function sendPrompt(userInputRaw: string, options?: { clearInput?: boolean }) {
+    if (!sessionId) return;
+    const userInput = userInputRaw.trim();
+    if (!userInput || isLoading || missingAuth || missingCampaignId) return;
     const userMessage: Message = {
       id: `user-${Date.now()}`,
       role: "user",
@@ -310,7 +314,9 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
     setMessages((prev) => [...prev, userMessage, thinkingMessage]);
     
     // Step 4: Clear input field immediately for better UX
-    setInput("");
+    if (options?.clearInput !== false) {
+      setInput("");
+    }
     
     // Step 5: Set loading state
     setIsLoading(true);
@@ -371,6 +377,65 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
       setIsLoading(false);
     }
   }
+
+  const getPromptForMessage = (messageId: string, snapshot: Message[]): string | null => {
+    const idx = snapshot.findIndex((msg) => msg.id === messageId);
+    if (idx < 0) return null;
+    const target = snapshot[idx];
+    if (target.role === "user") return target.content.trim() || null;
+    for (let i = idx - 1; i >= 0; i -= 1) {
+      if (snapshot[i].role === "user") return snapshot[i].content.trim() || null;
+    }
+    return null;
+  };
+
+  const getDeleteIndicesForMessage = (messageId: string, snapshot: Message[]): number[] => {
+    const idx = snapshot.findIndex((msg) => msg.id === messageId);
+    if (idx < 0) return [];
+    const target = snapshot[idx];
+    const indices = new Set<number>([idx]);
+    if (target.role === "user") {
+      for (let i = idx + 1; i < snapshot.length; i += 1) {
+        const next = snapshot[i];
+        if (next.role === "system") continue;
+        if (next.role === "assistant") indices.add(i);
+        break;
+      }
+    } else if (target.role === "assistant") {
+      for (let i = idx - 1; i >= 0; i -= 1) {
+        const prev = snapshot[i];
+        if (prev.role === "system") continue;
+        if (prev.role === "user") indices.add(i);
+        break;
+      }
+    }
+    return Array.from(indices).sort((a, b) => b - a);
+  };
+
+  const handleEditMessage = (messageId: string) => {
+    const prompt = getPromptForMessage(messageId, messages);
+    if (!prompt) return;
+    setInput(prompt);
+    inputRef.current?.focus();
+  };
+
+  const handleDeleteMessage = (messageId: string) => {
+    setMessages((prev) => {
+      const deleteIndices = getDeleteIndicesForMessage(messageId, prev);
+      if (deleteIndices.length === 0) return prev;
+      const next = [...prev];
+      for (const index of deleteIndices) {
+        if (index >= 0 && index < next.length) next.splice(index, 1);
+      }
+      return next;
+    });
+  };
+
+  const handleRerunMessage = async (messageId: string) => {
+    const prompt = getPromptForMessage(messageId, messages);
+    if (!prompt) return;
+    await sendPrompt(prompt, { clearInput: false });
+  };
 
   async function handleClearContext() {
     setIsClearing(true);
@@ -457,7 +522,8 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
             >
               <div
                 className={cn(
-                  "rounded-lg px-3 py-2 max-w-[85%] text-sm",
+                  "relative group/bubble rounded-lg px-3 py-2 max-w-[85%] text-sm",
+                  message.role !== "system" && message.status !== "thinking" && "pr-16",
                   message.role === "user"
                     ? "bg-amber-500/10 border border-amber-500/20 text-amber-100"
                     : message.role === "system"
@@ -465,6 +531,34 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
                     : "bg-zinc-900/50 border border-zinc-800/50 text-zinc-100"
                 )}
               >
+                {message.role !== "system" && message.status !== "thinking" && (
+                  <div className="absolute right-1.5 top-1.5 flex items-center gap-0.5 rounded-md border border-zinc-700/70 bg-zinc-900/85 p-0.5 opacity-0 transition-opacity group-hover/bubble:opacity-100">
+                    <button
+                      type="button"
+                      onClick={() => handleEditMessage(message.id)}
+                      className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                      title="Edit message"
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleRerunMessage(message.id)}
+                      className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                      title="Rerun message"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteMessage(message.id)}
+                      className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-rose-300"
+                      title="Delete message pair"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
+                )}
                 {message.status === "thinking" ? (
                   // Thinking placeholder
                   <div className="flex items-center gap-2 text-zinc-400">

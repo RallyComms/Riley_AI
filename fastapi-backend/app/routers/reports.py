@@ -36,6 +36,17 @@ class RileyReportJobResponse(BaseModel):
     output_file_id: Optional[str] = None
     output_url: Optional[str] = None
     summary_text: Optional[str] = None
+    report_fidelity_level: Optional[str] = None
+    report_context_reduction_applied: Optional[bool] = None
+    report_context_strategy: Optional[str] = None
+    retrieval_doc_count: Optional[int] = None
+    retrieval_chunk_count: Optional[int] = None
+    context_chars_included: Optional[int] = None
+    generation_model: Optional[str] = None
+    generation_attempts_used: Optional[int] = None
+    failure_stage: Optional[str] = None
+    failure_code: Optional[str] = None
+    failure_detail: Optional[str] = None
     query: str
     mode: Literal["normal", "deep"]
     report_body: Optional[str] = None

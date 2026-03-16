@@ -37,12 +37,15 @@ async def run_riley_report_worker(
 
     graph: GraphService = await get_graph(request)
     try:
+        logger.info("report_worker_execution_started report_job_id=%s", payload.report_job_id)
         await run_report_job(report_job_id=payload.report_job_id, graph=graph)
+        logger.info("report_worker_execution_completed report_job_id=%s", payload.report_job_id)
     except Exception as exc:
         logger.exception(
-            "riley_report_worker_request_failed report_job_id=%s error=%s",
+            "riley_report_worker_request_failed report_job_id=%s error_type=%s error_message=%s",
             payload.report_job_id,
-            exc,
+            type(exc).__name__,
+            str(exc)[:240],
         )
         raise
     return {"status": "ok"}
