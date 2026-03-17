@@ -1694,13 +1694,26 @@ class GraphService:
             query = """
             MATCH (ar:CampaignAccessRequest {campaign_id: $campaign_id})
             OPTIONAL MATCH (u:User {id: ar.user_id})
+            WITH
+                ar,
+                u,
+                CASE
+                    WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
+                    ELSE split(u.email, "@")[0]
+                END as email_prefix
             WHERE ($status = "" OR ar.status = $status)
             RETURN
                 ar.id as id,
                 ar.campaign_id as campaign_id,
                 ar.user_id as user_id,
                 coalesce(u.email, "") as user_email,
-                coalesce(u.display_name, u.name, u.first_name, u.email, ar.user_id) as user_name,
+                CASE
+                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
+                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
+                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
+                    WHEN ar.user_id IS NOT NULL AND trim(ar.user_id) <> "" THEN ar.user_id
+                    ELSE ar.user_id
+                END as user_name,
                 ar.message as message,
                 ar.status as status,
                 toString(ar.created_at) as created_at,
@@ -2890,19 +2903,19 @@ class GraphService:
             WITH
                 u,
                 r,
-                trim(coalesce(u.first_name, "") + " " + coalesce(u.last_name, "")) as full_name,
+                coalesce(u.email, "") as email_value,
                 CASE
-                    WHEN u.email IS NULL THEN NULL
+                    WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
                     ELSE split(u.email, "@")[0]
                 END as email_prefix
             RETURN
                 u.id as user_id,
                 CASE
                     WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                    WHEN u.name IS NOT NULL AND trim(u.name) <> "" THEN u.name
-                    WHEN full_name <> "" THEN full_name
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                    ELSE "Unknown User"
+                    WHEN email_value <> "" THEN email_value
+                    WHEN u.id IS NOT NULL AND trim(u.id) <> "" THEN u.id
+                    ELSE u.id
                 END as display_name,
                 u.avatar_url as avatar_url,
                 r.role as role,
@@ -2911,10 +2924,10 @@ class GraphService:
             ORDER BY toLower(
                 CASE
                     WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                    WHEN u.name IS NOT NULL AND trim(u.name) <> "" THEN u.name
-                    WHEN full_name <> "" THEN full_name
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                    ELSE "Unknown User"
+                    WHEN email_value <> "" THEN email_value
+                    WHEN u.id IS NOT NULL AND trim(u.id) <> "" THEN u.id
+                    ELSE u.id
                 END
             ) ASC
             """
@@ -2933,7 +2946,7 @@ class GraphService:
                     }
                 )
             # Defensive dedupe by user_id. Legacy duplicate User nodes can exist.
-            # Prefer richer identity rows over fallback "Unknown User" rows.
+            # Prefer richer identity rows over user_id fallback rows.
             by_user_id: Dict[str, Dict[str, Any]] = {}
             for member in members:
                 user_id = str(member.get("user_id") or "")
@@ -2947,9 +2960,9 @@ class GraphService:
                 candidate_name = str(member.get("display_name") or "").strip()
                 existing_score = 0
                 candidate_score = 0
-                if existing_name and existing_name != "Unknown User":
+                if existing_name and existing_name != user_id:
                     existing_score += 3
-                if candidate_name and candidate_name != "Unknown User":
+                if candidate_name and candidate_name != user_id:
                     candidate_score += 3
                 if existing.get("avatar_url"):
                     existing_score += 1
@@ -2963,7 +2976,11 @@ class GraphService:
                     by_user_id[user_id] = member
 
             deduped = list(by_user_id.values())
-            deduped.sort(key=lambda item: str(item.get("display_name") or "Unknown User").lower())
+            deduped.sort(
+                key=lambda item: str(
+                    item.get("display_name") or item.get("user_id") or ""
+                ).lower()
+            )
             return deduped
 
     async def get_user_status(self, user_id: str) -> Dict[str, Any]:
@@ -3018,6 +3035,78 @@ class GraphService:
                 raise Exception("Failed to update user status")
             return {
                 "status": record.get("status") or "active",
+                "updated_at": record.get("updated_at"),
+            }
+
+    async def get_user_profile(
+        self,
+        *,
+        user_id: str,
+        email_fallback: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get Riley-native user profile fields."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (u:User {id: $user_id})
+            RETURN
+                coalesce(u.email, $email_fallback) as email,
+                u.display_name as display_name,
+                toString(u.updated_at) as updated_at
+            """
+            result = await session.run(
+                query,
+                user_id=user_id,
+                email_fallback=email_fallback,
+            )
+            record = await result.single()
+            if not record:
+                return {
+                    "email": email_fallback or "",
+                    "display_name": None,
+                    "updated_at": None,
+                }
+            return {
+                "email": record.get("email") or (email_fallback or ""),
+                "display_name": record.get("display_name"),
+                "updated_at": record.get("updated_at"),
+            }
+
+    async def update_user_profile(
+        self,
+        *,
+        user_id: str,
+        email: Optional[str],
+        display_name: Optional[str],
+    ) -> Dict[str, Any]:
+        """Update Riley-native user profile fields."""
+        normalized_display_name = None
+        if isinstance(display_name, str):
+            normalized_display_name = display_name.strip() or None
+
+        async with self._driver.session() as session:
+            query = """
+            MERGE (u:User {id: $user_id})
+            SET
+                u.email = coalesce($email, u.email),
+                u.display_name = $display_name,
+                u.updated_at = datetime()
+            RETURN
+                coalesce(u.email, "") as email,
+                u.display_name as display_name,
+                toString(u.updated_at) as updated_at
+            """
+            result = await session.run(
+                query,
+                user_id=user_id,
+                email=email,
+                display_name=normalized_display_name,
+            )
+            record = await result.single()
+            if not record:
+                raise Exception("Failed to update user profile")
+            return {
+                "email": record.get("email") or "",
+                "display_name": record.get("display_name"),
                 "updated_at": record.get("updated_at"),
             }
 
@@ -3108,11 +3197,6 @@ class GraphService:
             SET u.email = $target_email
             SET u.first_name = coalesce($target_first_name, u.first_name)
             SET u.last_name = coalesce($target_last_name, u.last_name)
-            SET u.display_name = CASE
-                WHEN trim(coalesce($target_first_name, "") + " " + coalesce($target_last_name, "")) <> ""
-                    THEN trim(coalesce($target_first_name, "") + " " + coalesce($target_last_name, ""))
-                ELSE u.display_name
-            END
             MATCH (c:Campaign {id: $campaign_id})
             OPTIONAL MATCH (u)-[existing:MEMBER_OF]->(c)
             WITH u, c, existing

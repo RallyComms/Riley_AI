@@ -4,8 +4,9 @@ import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useClerk } from "@clerk/nextjs";
 import { useAuth } from "@clerk/nextjs";
+import { useUser } from "@clerk/nextjs";
 import { useTheme } from "next-themes";
-import { Menu, Bell, User, Sparkles, LogOut, X, Sun, Moon, LucideIcon } from "lucide-react";
+import { Menu, Bell, User, LogOut, X, Sun, Moon, LucideIcon } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 import { apiFetch } from "@app/lib/api";
@@ -24,9 +25,17 @@ export function GlobalMenu() {
   const [mounted, setMounted] = useState(false);
   const [status, setStatus] = useState<"active" | "away" | "in_meeting">("active");
   const [isStatusUpdating, setIsStatusUpdating] = useState(false);
+  const [isAccountSettingsOpen, setIsAccountSettingsOpen] = useState(false);
+  const [profileEmail, setProfileEmail] = useState("");
+  const [profileDisplayName, setProfileDisplayName] = useState("");
+  const [profileUpdatedAt, setProfileUpdatedAt] = useState<string | null>(null);
+  const [isProfileLoading, setIsProfileLoading] = useState(false);
+  const [isProfileSaving, setIsProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const { signOut } = useClerk();
   const { getToken, isLoaded } = useAuth();
+  const { user } = useUser();
   const router = useRouter();
   const { theme, setTheme } = useTheme();
 
@@ -74,6 +83,61 @@ export function GlobalMenu() {
     }
   };
 
+  const loadProfile = async () => {
+    if (!isLoaded) return;
+    try {
+      setIsProfileLoading(true);
+      setProfileError(null);
+      const token = await getToken();
+      if (!token) return;
+      const data = await apiFetch<{ email: string; display_name?: string | null; updated_at?: string | null }>(
+        "/api/v1/users/me/profile",
+        {
+          token,
+          method: "GET",
+        }
+      );
+      setProfileEmail(data.email || user?.primaryEmailAddress?.emailAddress || "");
+      setProfileDisplayName(data.display_name || "");
+      setProfileUpdatedAt(data.updated_at || null);
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : "Failed to load profile.");
+    } finally {
+      setIsProfileLoading(false);
+    }
+  };
+
+  const openAccountSettings = () => {
+    setIsOpen(false);
+    setIsAccountSettingsOpen(true);
+    void loadProfile();
+  };
+
+  const saveProfile = async () => {
+    try {
+      setIsProfileSaving(true);
+      setProfileError(null);
+      const token = await getToken();
+      if (!token) return;
+      const updated = await apiFetch<{ email: string; display_name?: string | null; updated_at?: string | null }>(
+        "/api/v1/users/me/profile",
+        {
+          token,
+          method: "PATCH",
+          body: { display_name: profileDisplayName },
+        }
+      );
+      setProfileEmail(updated.email || profileEmail);
+      setProfileDisplayName(updated.display_name || "");
+      setProfileUpdatedAt(updated.updated_at || null);
+      setIsAccountSettingsOpen(false);
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : "Failed to save profile.");
+    } finally {
+      setIsProfileSaving(false);
+    }
+  };
+
   // Close menu when clicking outside
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -100,10 +164,7 @@ export function GlobalMenu() {
     {
       icon: User,
       label: "Account Settings",
-      onClick: () => {
-        console.log("Account Settings clicked");
-        setIsOpen(false);
-      },
+      onClick: openAccountSettings,
     },
     {
       icon: mounted && theme === "light" ? Sun : Moon,
@@ -220,6 +281,100 @@ export function GlobalMenu() {
                   );
                 })}
               </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {isAccountSettingsOpen && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="fixed inset-0 z-40 bg-zinc-950/70 backdrop-blur-sm"
+              onClick={() => setIsAccountSettingsOpen(false)}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.98, y: -8 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.98, y: -8 }}
+              transition={{ duration: 0.2 }}
+              className="fixed right-6 top-20 z-50 w-[420px] max-w-[calc(100vw-2rem)] rounded-xl border border-zinc-800 bg-zinc-900/95 p-5 shadow-2xl"
+            >
+              <div className="mb-4 flex items-center justify-between">
+                <h2 className="text-base font-semibold text-zinc-100">Account Settings</h2>
+                <button
+                  type="button"
+                  onClick={() => setIsAccountSettingsOpen(false)}
+                  className="rounded p-1 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+                  aria-label="Close account settings"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+
+              {isProfileLoading ? (
+                <p className="text-sm text-zinc-400">Loading profile...</p>
+              ) : (
+                <div className="space-y-4">
+                  <div>
+                    <label className="mb-1 block text-xs uppercase tracking-wide text-zinc-500">Email</label>
+                    <input
+                      type="text"
+                      readOnly
+                      value={profileEmail || user?.primaryEmailAddress?.emailAddress || ""}
+                      className="w-full rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-zinc-400"
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="display-name" className="mb-1 block text-xs uppercase tracking-wide text-zinc-500">
+                      Username / Display Name
+                    </label>
+                    <input
+                      id="display-name"
+                      type="text"
+                      value={profileDisplayName}
+                      onChange={(event) => setProfileDisplayName(event.target.value)}
+                      maxLength={120}
+                      placeholder="How Riley should show your name"
+                      className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:border-amber-500 focus:outline-none"
+                    />
+                  </div>
+
+                  {profileUpdatedAt && (
+                    <p className="text-xs text-zinc-500">Last updated: {new Date(profileUpdatedAt).toLocaleString()}</p>
+                  )}
+
+                  {profileError && <p className="text-sm text-red-400">{profileError}</p>}
+
+                  <div className="flex justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setIsAccountSettingsOpen(false)}
+                      className="rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 transition-colors hover:bg-zinc-800"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={saveProfile}
+                      disabled={isProfileSaving}
+                      className={cn(
+                        "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+                        isProfileSaving
+                          ? "bg-zinc-700 text-zinc-300"
+                          : "bg-amber-500 text-zinc-900 hover:bg-amber-400"
+                      )}
+                    >
+                      {isProfileSaving ? "Saving..." : "Save"}
+                    </button>
+                  </div>
+                </div>
+              )}
             </motion.div>
           </>
         )}
