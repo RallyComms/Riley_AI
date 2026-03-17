@@ -1,42 +1,24 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Bot, Sparkles, X, AlertCircle, Calendar, FileText, Minus, MessageCircle } from "lucide-react";
+import { useAuth, useUser } from "@clerk/nextjs";
+import { Bot, Minus, AlertCircle, Calendar, FileText, MessageCircle, UserPlus } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { motion, AnimatePresence, useMotionValue } from "framer-motion";
+import { apiFetch } from "@app/lib/api";
 
-type Notification = {
+type FeedEvent = {
   id: string;
-  type: "slack" | "calendar" | "system" | "mention";
-  icon: React.ReactNode;
+  type: string;
   message: string;
-  isCritical?: boolean;
+  campaign_id: string;
+  campaign_name?: string | null;
+  created_at?: string | null;
+  user_id?: string | null;
+  actor_user_id?: string | null;
+  request_id?: string | null;
+  member_role?: string | null;
 };
-
-// Felix Scenario - High-Value Alerts
-const mockNotifications: Notification[] = [
-  {
-    id: "1",
-    type: "slack",
-    icon: <AlertCircle className="h-4 w-4" />,
-    message: "Felix (CEO) posted in #general: 'Q4 Strategy shift - all hands on deck.'",
-    isCritical: true,
-  },
-  {
-    id: "2",
-    type: "calendar",
-    icon: <Calendar className="h-4 w-4" />,
-    message: "Client Review: Clean Water Campaign starts in 15 mins.",
-    isCritical: false,
-  },
-  {
-    id: "3",
-    type: "system",
-    icon: <FileText className="h-4 w-4" />,
-    message: "3 New Documents uploaded to Housing Justice.",
-    isCritical: false,
-  },
-];
 
 interface SavedPosition {
   x: number;
@@ -47,8 +29,10 @@ const STORAGE_KEY = "riley_orb_pos";
 const DEFAULT_POSITION = { x: 0, y: 0 }; // Relative to bottom-right corner
 
 export function GlobalRileyOrb() {
+  const { user } = useUser();
+  const { getToken, isLoaded } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(true);
-  const [notifications, setNotifications] = useState<Notification[]>(mockNotifications);
+  const [notifications, setNotifications] = useState<FeedEvent[]>([]);
   const popoverRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   
@@ -82,6 +66,79 @@ export function GlobalRileyOrb() {
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    const fetchFeed = async () => {
+      if (!isLoaded || !user?.id) return;
+      try {
+        const token = await getToken();
+        if (!token) return;
+        const data = await apiFetch<{ events: FeedEvent[] }>(
+          "/api/v1/campaigns/events/feed?limit=40",
+          {
+            token,
+            method: "GET",
+          }
+        );
+        if (mounted) {
+          setNotifications(data.events || []);
+        }
+      } catch (err) {
+        console.error("Failed to load Riley intelligence feed:", err);
+        if (mounted) {
+          setNotifications([]);
+        }
+      }
+    };
+
+    fetchFeed();
+    const interval = setInterval(fetchFeed, 30000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
+  }, [getToken, isLoaded, user?.id]);
+
+  const getEventVisual = (eventType: string) => {
+    if (eventType === "access_request_created") {
+      return {
+        icon: <AlertCircle className="h-4 w-4" />,
+        iconClass: "bg-red-500/20 text-red-400",
+        critical: true,
+      };
+    }
+    if (eventType === "mention") {
+      return {
+        icon: <MessageCircle className="h-4 w-4" />,
+        iconClass: "bg-amber-500/20 text-amber-400",
+        critical: true,
+      };
+    }
+    if (eventType === "deadline_upcoming") {
+      return {
+        icon: <Calendar className="h-4 w-4" />,
+        iconClass: "bg-blue-500/20 text-blue-400",
+        critical: false,
+      };
+    }
+    if (
+      eventType === "campaign_member_added"
+      || eventType === "campaign_member_added_notification"
+      || eventType === "access_request_approved"
+    ) {
+      return {
+        icon: <UserPlus className="h-4 w-4" />,
+        iconClass: "bg-emerald-500/20 text-emerald-400",
+        critical: false,
+      };
+    }
+    return {
+      icon: <FileText className="h-4 w-4" />,
+      iconClass: "bg-zinc-600/20 text-zinc-300",
+      critical: false,
+    };
+  };
 
   // Calculate viewport constraints
   const getConstraints = () => {
@@ -135,33 +192,8 @@ export function GlobalRileyOrb() {
     };
   }, [isCollapsed]);
 
-  // Listen for riley-notification custom events
-  useEffect(() => {
-    function handleRileyNotification(event: CustomEvent) {
-      const { type, message, author } = event.detail;
-      
-      if (type === "mention") {
-        const newNotification: Notification = {
-          id: Date.now().toString(),
-          type: "mention",
-          icon: <MessageCircle className="h-4 w-4" />,
-          message: `${author} mentioned you: "${message}"`,
-          isCritical: true, // Mentions are critical alerts
-        };
-        
-        setNotifications((prev) => [newNotification, ...prev]);
-      }
-    }
-
-    window.addEventListener("riley-notification", handleRileyNotification as EventListener);
-
-    return () => {
-      window.removeEventListener("riley-notification", handleRileyNotification as EventListener);
-    };
-  }, []);
-
   const alertCount = notifications.length;
-  const hasNewAlerts = notifications.some((n) => n.isCritical);
+  const hasNewAlerts = notifications.some((n) => getEventVisual(n.type).critical);
   const constraints = getConstraints();
 
   return (
@@ -226,12 +258,14 @@ export function GlobalRileyOrb() {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {notifications.map((notification) => (
+                  {notifications.map((event) => {
+                    const visual = getEventVisual(event.type);
+                    return (
                     <div
-                      key={notification.id}
+                      key={event.id}
                       className={cn(
                         "rounded-lg border p-3 transition-all hover:border-zinc-700",
-                        notification.isCritical
+                        visual.critical
                           ? "border-red-500/50 bg-red-500/10 hover:bg-red-500/15"
                           : "border-zinc-800 bg-zinc-800/30 hover:bg-zinc-800/50"
                       )}
@@ -240,25 +274,22 @@ export function GlobalRileyOrb() {
                         <div
                           className={cn(
                             "mt-0.5 flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full",
-                            notification.type === "slack" && notification.isCritical
-                              ? "bg-red-500/20 text-red-400"
-                              : notification.type === "slack"
-                              ? "bg-amber-500/20 text-amber-400"
-                              : notification.type === "calendar"
-                              ? "bg-blue-500/20 text-blue-400"
-                              : notification.type === "mention"
-                              ? "bg-amber-500/20 text-amber-400"
-                              : "bg-emerald-500/20 text-emerald-400"
+                            visual.iconClass
                           )}
                         >
-                          {notification.icon}
+                          {visual.icon}
                         </div>
                         <div className="flex-1 min-w-0">
-                          <p className="text-sm text-zinc-300">{notification.message}</p>
+                          <p className="text-sm text-zinc-300">
+                            {event.campaign_name ? `${event.campaign_name}: ${event.message}` : event.message}
+                          </p>
+                          <p className="mt-1 text-[11px] text-zinc-500">
+                            {event.created_at ? new Date(event.created_at).toLocaleString() : ""}
+                          </p>
                         </div>
                       </div>
                     </div>
-                  ))}
+                  )})}
                 </div>
               )}
             </div>

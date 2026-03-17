@@ -9,7 +9,9 @@ from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 
 from app.core.config import get_settings
 from app.dependencies.auth import verify_clerk_token, verify_tenant_access, check_tenant_membership
+from app.dependencies.graph_dep import get_graph
 from app.services.ocr import run_ocr, is_image_ext
+from app.services.graph import GraphService
 from app.services.qdrant import vector_service
 from app.services.ingestion import process_upload, delete_file, untag_file, _generate_embedding
 from app.services.storage import StorageService
@@ -597,7 +599,8 @@ async def assign_file_endpoint(
     file_id: str,
     request: AssignRequest,
     tenant_id: str = Query(..., description="Tenant/client ID that owns this file"),
-    current_user: Dict = Depends(verify_tenant_access)
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
 ) -> DeleteResponse:
     """
     Assign a file to a reviewer and update its status.
@@ -632,6 +635,32 @@ async def assign_file_endpoint(
             payload=updated_payload,
             points=[file_id]
         )
+
+        # Best-effort campaign event for dashboard/feed realism.
+        try:
+            filename = str(current_payload.get("filename") or file_id)
+            status_value = str(request.status).strip().lower()
+            event_type = "document_assigned"
+            event_message = f"Document assigned for review: {filename}"
+            if status_value == "needs_review":
+                event_type = "document_moved_needs_review"
+                event_message = f"Document moved to Needs Review: {filename}"
+            elif status_value == "in_review":
+                event_type = "document_moved_in_review"
+                event_message = f"Document moved to In Review: {filename}"
+            await graph.create_campaign_event(
+                campaign_id=tenant_id,
+                event_type=event_type,
+                message=event_message,
+                actor_user_id=current_user.get("id", "unknown"),
+            )
+        except Exception as event_exc:
+            logger.warning(
+                "campaign_event_create_failed file_id=%s tenant_id=%s error=%s",
+                file_id,
+                tenant_id,
+                str(event_exc),
+            )
         
         return DeleteResponse(
             status="success",

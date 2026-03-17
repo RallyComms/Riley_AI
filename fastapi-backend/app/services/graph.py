@@ -1871,6 +1871,68 @@ class GraphService:
                 )
             return items
 
+    async def list_user_campaign_feed_events(
+        self,
+        *,
+        user_id: str,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List cross-campaign feed events relevant to a user."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (me:User {id: $user_id})-[membership:MEMBER_OF]->(c:Campaign)
+            MATCH (e:CampaignEvent {campaign_id: c.id})
+            WHERE
+                e.user_id = $user_id
+                OR e.actor_user_id = $user_id
+                OR e.type IN [
+                    "mention",
+                    "document_assigned",
+                    "document_moved_needs_review",
+                    "document_moved_in_review",
+                    "deadline_upcoming"
+                ]
+                OR (
+                    membership.role = "Lead"
+                    AND e.type IN [
+                        "access_request_created",
+                        "access_request_approved",
+                        "access_request_denied"
+                    ]
+                )
+            RETURN
+                e.id as id,
+                e.type as type,
+                e.message as message,
+                e.user_id as user_id,
+                e.actor_user_id as actor_user_id,
+                e.request_id as request_id,
+                e.campaign_id as campaign_id,
+                c.name as campaign_name,
+                membership.role as member_role,
+                toString(e.created_at) as created_at
+            ORDER BY e.created_at DESC
+            LIMIT $limit
+            """
+            result = await session.run(query, user_id=user_id, limit=limit)
+            items: List[Dict[str, Any]] = []
+            async for record in result:
+                items.append(
+                    {
+                        "id": record.get("id"),
+                        "type": record.get("type") or "",
+                        "message": record.get("message") or "",
+                        "user_id": record.get("user_id"),
+                        "actor_user_id": record.get("actor_user_id"),
+                        "request_id": record.get("request_id"),
+                        "campaign_id": record.get("campaign_id"),
+                        "campaign_name": record.get("campaign_name"),
+                        "member_role": record.get("member_role"),
+                        "created_at": record.get("created_at"),
+                    }
+                )
+            return items
+
     async def create_campaign_event(
         self,
         *,

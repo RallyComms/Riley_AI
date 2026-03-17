@@ -79,6 +79,23 @@ class CampaignEventsResponse(BaseModel):
     events: List[CampaignEventItem]
 
 
+class UserCampaignFeedEventItem(BaseModel):
+    id: str
+    type: str
+    message: str
+    campaign_id: str
+    campaign_name: Optional[str] = None
+    user_id: Optional[str] = None
+    actor_user_id: Optional[str] = None
+    request_id: Optional[str] = None
+    member_role: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class UserCampaignFeedResponse(BaseModel):
+    events: List[UserCampaignFeedEventItem]
+
+
 class DirectoryUserResult(BaseModel):
     id: str
     email: str
@@ -357,6 +374,20 @@ async def list_campaign_events(
     _ = current_user
     events = await graph.list_campaign_events(campaign_id=tenant_id, limit=limit)
     return CampaignEventsResponse(events=[CampaignEventItem(**item) for item in events])
+
+
+@router.get("/campaigns/events/feed", response_model=UserCampaignFeedResponse)
+async def list_user_campaign_feed(
+    limit: int = Query(50, ge=1, le=200),
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> UserCampaignFeedResponse:
+    """List cross-campaign Riley Bot feed events relevant to current user."""
+    user_id = current_user.get("id", "unknown")
+    events = await graph.list_user_campaign_feed_events(user_id=user_id, limit=limit)
+    return UserCampaignFeedResponse(
+        events=[UserCampaignFeedEventItem(**item) for item in events]
+    )
 
 
 @router.get("/campaigns/{tenant_id}/users/search", response_model=DirectoryUserSearchResponse)
