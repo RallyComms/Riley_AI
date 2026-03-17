@@ -97,6 +97,12 @@ class UserCampaignFeedResponse(BaseModel):
     events: List[UserCampaignFeedEventItem]
 
 
+class DismissFeedEventResponse(BaseModel):
+    ok: bool
+    event_id: str
+    dismissed_at: Optional[str] = None
+
+
 class DirectoryUserResult(BaseModel):
     id: str
     email: str
@@ -178,6 +184,8 @@ class MentionMemberResponse(BaseModel):
     display_name: str
     avatar_url: Optional[str] = None
     role: Optional[str] = None
+    status: Optional[Literal["active", "away", "in_meeting"]] = None
+    status_updated_at: Optional[str] = None
 
 
 class MentionMembersListResponse(BaseModel):
@@ -206,6 +214,15 @@ class CreateChatThreadRequest(BaseModel):
     name: Optional[str] = Field(None, max_length=120, description="Optional thread name")
 
 
+class UserStatusResponse(BaseModel):
+    status: Literal["active", "away", "in_meeting"]
+    updated_at: Optional[str] = None
+
+
+class UpdateUserStatusRequest(BaseModel):
+    status: Literal["active", "away", "in_meeting"]
+
+
 async def _require_lead_for_campaign(campaign_id: str, current_user: Dict, graph: GraphService) -> str:
     """Server-side Lead authorization helper for campaign-scoped management routes."""
     requester_id = current_user.get("id", "unknown")
@@ -216,6 +233,40 @@ async def _require_lead_for_campaign(campaign_id: str, current_user: Dict, graph
             detail="Only Lead members can perform this action",
         )
     return requester_id
+
+
+@router.get("/users/me/status", response_model=UserStatusResponse)
+async def get_current_user_status(
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> UserStatusResponse:
+    """Get current user's global manual status."""
+    user_id = current_user.get("id", "unknown")
+    status_payload = await graph.get_user_status(user_id)
+    return UserStatusResponse(**status_payload)
+
+
+@router.patch("/users/me/status", response_model=UserStatusResponse)
+async def update_current_user_status(
+    request: UpdateUserStatusRequest,
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> UserStatusResponse:
+    """Update current user's global manual status."""
+    user_id = current_user.get("id", "unknown")
+    email = current_user.get("email")
+    try:
+        updated = await graph.update_user_status(
+            user_id=user_id,
+            status_value=request.status,
+            email=email,
+        )
+        return UserStatusResponse(**updated)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
 
 @router.post("/campaigns", response_model=CampaignResponse)
@@ -413,6 +464,28 @@ async def list_user_campaign_feed(
     return UserCampaignFeedResponse(
         events=[UserCampaignFeedEventItem(**item) for item in events]
     )
+
+
+@router.post("/campaigns/events/feed/{event_id}/dismiss", response_model=DismissFeedEventResponse)
+async def dismiss_user_campaign_feed_event(
+    event_id: str,
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
+) -> DismissFeedEventResponse:
+    """Dismiss a feed event for current user only."""
+    user_id = current_user.get("id", "unknown")
+    try:
+        result = await graph.dismiss_user_feed_event(user_id=user_id, event_id=event_id)
+        return DismissFeedEventResponse(
+            ok=True,
+            event_id=result.get("event_id") or event_id,
+            dismissed_at=result.get("dismissed_at"),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
 
 
 @router.post("/campaigns/{tenant_id}/deadlines", response_model=CampaignDeadlineItem)

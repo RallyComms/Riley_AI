@@ -1882,7 +1882,11 @@ class GraphService:
             query = """
             MATCH (me:User {id: $user_id})-[membership:MEMBER_OF]->(c:Campaign)
             MATCH (e:CampaignEvent {campaign_id: c.id})
+            OPTIONAL MATCH (me)-[dismissed:DISMISSED_FEED_EVENT]->(e)
             WHERE
+                dismissed IS NULL
+                AND
+                (
                 e.user_id = $user_id
                 OR e.actor_user_id = $user_id
                 OR e.type IN [
@@ -1900,6 +1904,7 @@ class GraphService:
                         "access_request_approved",
                         "access_request_denied"
                     ]
+                )
                 )
             RETURN
                 e.id as id,
@@ -1933,6 +1938,26 @@ class GraphService:
                     }
                 )
             return items
+
+    async def dismiss_user_feed_event(self, *, user_id: str, event_id: str) -> Dict[str, Any]:
+        """Mark a campaign event dismissed for a specific user feed."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (me:User {id: $user_id})-[:MEMBER_OF]->(c:Campaign)
+            MATCH (e:CampaignEvent {id: $event_id, campaign_id: c.id})
+            MERGE (me)-[d:DISMISSED_FEED_EVENT]->(e)
+            ON CREATE SET d.dismissed_at = datetime()
+            ON MATCH SET d.dismissed_at = datetime()
+            RETURN e.id as event_id, toString(d.dismissed_at) as dismissed_at
+            """
+            result = await session.run(query, user_id=user_id, event_id=event_id)
+            record = await result.single()
+            if not record:
+                raise ValueError("Feed event not found or not visible to current user")
+            return {
+                "event_id": record.get("event_id"),
+                "dismissed_at": record.get("dismissed_at"),
+            }
 
     async def create_campaign_event(
         self,
@@ -2813,7 +2838,9 @@ class GraphService:
                     ELSE "Unknown User"
                 END as display_name,
                 u.avatar_url as avatar_url,
-                r.role as role
+                r.role as role,
+                coalesce(u.status, "active") as status,
+                toString(u.status_updated_at) as status_updated_at
             ORDER BY toLower(
                 CASE
                     WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
@@ -2834,10 +2861,67 @@ class GraphService:
                         "display_name": record["display_name"],
                         "avatar_url": record.get("avatar_url"),
                         "role": record.get("role"),
+                        "status": record.get("status") or "active",
+                        "status_updated_at": record.get("status_updated_at"),
                     }
                 )
 
             return members
+
+    async def get_user_status(self, user_id: str) -> Dict[str, Any]:
+        """Get global manual status for a user."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (u:User {id: $user_id})
+            RETURN
+                coalesce(u.status, "active") as status,
+                toString(u.status_updated_at) as updated_at
+            """
+            result = await session.run(query, user_id=user_id)
+            record = await result.single()
+            if not record:
+                return {"status": "active", "updated_at": None}
+            return {
+                "status": record.get("status") or "active",
+                "updated_at": record.get("updated_at"),
+            }
+
+    async def update_user_status(
+        self,
+        *,
+        user_id: str,
+        status_value: str,
+        email: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Set global manual status for a user."""
+        normalized_status = (status_value or "").strip().lower()
+        if normalized_status not in {"active", "away", "in_meeting"}:
+            raise ValueError("status must be active, away, or in_meeting")
+
+        async with self._driver.session() as session:
+            query = """
+            MERGE (u:User {id: $user_id})
+            SET
+                u.email = coalesce($email, u.email),
+                u.status = $status_value,
+                u.status_updated_at = datetime()
+            RETURN
+                u.status as status,
+                toString(u.status_updated_at) as updated_at
+            """
+            result = await session.run(
+                query,
+                user_id=user_id,
+                email=email,
+                status_value=normalized_status,
+            )
+            record = await result.single()
+            if not record:
+                raise Exception("Failed to update user status")
+            return {
+                "status": record.get("status") or "active",
+                "updated_at": record.get("updated_at"),
+            }
 
     async def get_campaign_member_ids(self, campaign_id: str) -> List[str]:
         """Return all user IDs that are members of a campaign."""

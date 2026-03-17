@@ -3,10 +3,12 @@
 import { useState, useRef, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useClerk } from "@clerk/nextjs";
+import { useAuth } from "@clerk/nextjs";
 import { useTheme } from "next-themes";
 import { Menu, Bell, User, Sparkles, LogOut, X, Sun, Moon, LucideIcon } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
+import { apiFetch } from "@app/lib/api";
 
 interface MenuItem {
   icon: LucideIcon;
@@ -20,8 +22,11 @@ interface MenuItem {
 export function GlobalMenu() {
   const [isOpen, setIsOpen] = useState(false);
   const [mounted, setMounted] = useState(false);
+  const [status, setStatus] = useState<"active" | "away" | "in_meeting">("active");
+  const [isStatusUpdating, setIsStatusUpdating] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const { signOut } = useClerk();
+  const { getToken, isLoaded } = useAuth();
   const router = useRouter();
   const { theme, setTheme } = useTheme();
 
@@ -29,6 +34,45 @@ export function GlobalMenu() {
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  useEffect(() => {
+    const loadStatus = async () => {
+      if (!isLoaded) return;
+      try {
+        const token = await getToken();
+        if (!token) return;
+        const data = await apiFetch<{ status: "active" | "away" | "in_meeting" }>(
+          "/api/v1/users/me/status",
+          {
+            token,
+            method: "GET",
+          }
+        );
+        if (data?.status) {
+          setStatus(data.status);
+        }
+      } catch {
+        // Keep default silently.
+      }
+    };
+    loadStatus();
+  }, [getToken, isLoaded]);
+
+  const handleSetStatus = async (nextStatus: "active" | "away" | "in_meeting") => {
+    try {
+      setIsStatusUpdating(true);
+      const token = await getToken();
+      if (!token) return;
+      await apiFetch("/api/v1/users/me/status", {
+        token,
+        method: "PATCH",
+        body: { status: nextStatus },
+      });
+      setStatus(nextStatus);
+    } finally {
+      setIsStatusUpdating(false);
+    }
+  };
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -124,6 +168,31 @@ export function GlobalMenu() {
               transition={{ duration: 0.2 }}
               className="absolute right-0 mt-2 w-56 rounded-lg border border-zinc-800 bg-zinc-900/90 backdrop-blur-xl shadow-2xl overflow-hidden"
             >
+              <div className="border-b border-zinc-800 px-3 py-2">
+                <p className="mb-1 text-[11px] uppercase tracking-wide text-zinc-500">Status</p>
+                <div className="grid grid-cols-3 gap-1">
+                  {([
+                    ["active", "Active"],
+                    ["away", "Away"],
+                    ["in_meeting", "Meeting"],
+                  ] as const).map(([value, label]) => (
+                    <button
+                      key={value}
+                      type="button"
+                      onClick={() => handleSetStatus(value)}
+                      disabled={isStatusUpdating}
+                      className={cn(
+                        "rounded px-2 py-1 text-[11px] transition-colors",
+                        status === value
+                          ? "bg-amber-500 text-zinc-900"
+                          : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="py-1">
                 {menuItems.map((item) => {
                   const Icon = item.icon;

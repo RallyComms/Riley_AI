@@ -181,6 +181,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [reportPrompt, setReportPrompt] = useState("");
   const [reportDeepMode, setReportDeepMode] = useState(true);
   const [animatingAssistantMessageId, setAnimatingAssistantMessageId] = useState<string | null>(null);
+  const [isCampaignStatusCollapsed, setIsCampaignStatusCollapsed] = useState(false);
   const knownReportStatusRef = useRef<
     Record<string, "queued" | "processing" | "cancelling" | "cancelled" | "complete" | "failed" | "deleted">
   >({});
@@ -196,6 +197,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     tenantId && user?.id ? `rileySelectedConversation:${tenantId}:${user.id}` : null;
   const collapsedProjectsStorageKey =
     tenantId && user?.id ? `rileyCollapsedProjects:${tenantId}:${user.id}` : null;
+  const campaignStatusCollapsedStorageKey =
+    tenantId && user?.id ? `rileyCampaignStatusCollapsed:${tenantId}:${user.id}` : null;
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -320,6 +323,25 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     if (!collapsedProjectsStorageKey) return;
     localStorage.setItem(collapsedProjectsStorageKey, JSON.stringify(collapsedProjectIds));
   }, [collapsedProjectsStorageKey, collapsedProjectIds]);
+
+  useEffect(() => {
+    if (!campaignStatusCollapsedStorageKey) return;
+    try {
+      const raw = localStorage.getItem(campaignStatusCollapsedStorageKey);
+      if (!raw) return;
+      setIsCampaignStatusCollapsed(raw === "true");
+    } catch {
+      setIsCampaignStatusCollapsed(false);
+    }
+  }, [campaignStatusCollapsedStorageKey]);
+
+  useEffect(() => {
+    if (!campaignStatusCollapsedStorageKey) return;
+    localStorage.setItem(
+      campaignStatusCollapsedStorageKey,
+      isCampaignStatusCollapsed ? "true" : "false"
+    );
+  }, [campaignStatusCollapsedStorageKey, isCampaignStatusCollapsed]);
 
   useEffect(() => {
     if (!openConversationMenuId) return;
@@ -1684,146 +1706,184 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           </div>
         </header>
 
-        {!isGlobal && indexSummary && (
-          <div className="border-b border-zinc-800 bg-zinc-900/40 px-6 py-3">
-            <div className="flex flex-wrap items-center gap-3 text-xs">
-              <span className="rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-zinc-200">
-                Documents indexed: {indexSummary.indexed_count} / {indexSummary.total_documents}
-              </span>
-              <span className="rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-1 text-blue-300">
-                Processing: {indexSummary.processing_count}
-              </span>
-              <span className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-rose-300">
-                Failed: {indexSummary.failed_count + indexSummary.low_text_count}
-              </span>
-              <span className="rounded-md border border-purple-500/30 bg-purple-500/10 px-2 py-1 text-purple-300">
-                OCR needed: {indexSummary.ocr_needed_count}
-              </span>
-              <span className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-cyan-300">
-                OCR processed: {indexSummary.ocr_processed_count ?? 0}
-              </span>
-              <span className="rounded-md border border-fuchsia-500/30 bg-fuchsia-500/10 px-2 py-1 text-fuchsia-300">
-                Visual analyzed: {indexSummary.vision_processed_count ?? 0}
-              </span>
-              <span className="rounded-md border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-orange-300">
-                Partial: {indexSummary.partial_count ?? 0}
-              </span>
-              <a
-                href={`/campaign/${tenantId}/assets`}
-                className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-300 hover:bg-amber-500/20"
-              >
-                View documents
-              </a>
-            </div>
-            <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-zinc-400">
-              {Object.entries(indexSummary.counts_by_file_type || {})
-                .sort((a, b) => b[1] - a[1])
-                .slice(0, 8)
-                .map(([fileType, count]) => (
-                  <span
-                    key={fileType}
-                    className="rounded-full border border-zinc-700 bg-zinc-800/40 px-2 py-0.5"
-                  >
-                    {fileType}: {count}
-                  </span>
-                ))}
-            </div>
-            {(indexSummary.failed_count > 0 ||
-              indexSummary.low_text_count > 0 ||
-              indexSummary.ocr_needed_count > 0 ||
-              (indexSummary.partial_count ?? 0) > 0) && (
-              <div className="mt-2 text-[11px] text-amber-300">
-                Some documents are not fully indexable yet, so Riley results may be incomplete.
-              </div>
-            )}
-          </div>
-        )}
-
         {!isGlobal && (
-          <div className="border-b border-zinc-800 bg-zinc-900/30 px-6 py-3">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2 text-sm text-zinc-200">
-                <ClipboardList className="h-4 w-4 text-amber-400" />
-                <span>Report Jobs</span>
+          <div className="border-b border-zinc-800 bg-zinc-900/35 px-6 py-2.5">
+            <button
+              type="button"
+              onClick={() => setIsCampaignStatusCollapsed((prev) => !prev)}
+              className="flex w-full items-center justify-between rounded-md px-1 py-1 text-left hover:bg-zinc-800/40"
+              aria-label={isCampaignStatusCollapsed ? "Expand campaign status panel" : "Collapse campaign status panel"}
+            >
+              <div className="flex items-center gap-2">
+                {isCampaignStatusCollapsed ? (
+                  <ChevronRight className="h-4 w-4 text-zinc-400" />
+                ) : (
+                  <ChevronDown className="h-4 w-4 text-zinc-400" />
+                )}
+                <span className="text-sm font-medium text-zinc-200">Campaign status</span>
               </div>
-              <button
-                type="button"
-                onClick={() => void loadReportJobs()}
-                className="rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
-              >
-                Refresh
-              </button>
-            </div>
-            <div className="mt-2 space-y-2">
-              {isReportsLoading && reportJobs.length === 0 ? (
-                <div className="text-xs text-zinc-500">Loading report jobs...</div>
-              ) : reportJobs.length === 0 ? (
-                <div className="text-xs text-zinc-500">No report jobs yet. Use Generate Report to start one.</div>
-              ) : (
-                reportJobs.slice(0, 6).map((job) => (
-                  <div key={job.reportJobId} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm text-zinc-100">{job.title}</div>
-                        <div className="mt-1 text-[11px] text-zinc-500">
-                          {formatReportDate(job.createdAt)}
-                        </div>
-                      </div>
-                      <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", reportStatusBadgeClass(job.status))}>
-                        {job.status}
+              {isCampaignStatusCollapsed && (
+                <div className="flex flex-wrap items-center justify-end gap-2 text-[11px]">
+                  <span className="rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-0.5 text-zinc-200">
+                    Docs {indexSummary ? `${indexSummary.indexed_count}/${indexSummary.total_documents}` : "--"}
+                  </span>
+                  <span className="rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-blue-300">
+                    Processing {indexSummary?.processing_count ?? 0}
+                  </span>
+                  <span className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-rose-300">
+                    Failed {indexSummary ? indexSummary.failed_count + indexSummary.low_text_count : 0}
+                  </span>
+                  <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-amber-300">
+                    Reports {reportJobs.length}
+                  </span>
+                </div>
+              )}
+            </button>
+
+            {!isCampaignStatusCollapsed && (
+              <div className="pb-1 pt-2">
+                {indexSummary && (
+                  <div>
+                    <div className="flex flex-wrap items-center gap-3 text-xs">
+                      <span className="rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-zinc-200">
+                        Documents indexed: {indexSummary.indexed_count} / {indexSummary.total_documents}
                       </span>
-                    </div>
-                    {job.summaryText && (
-                      <div className="mt-1 text-xs text-zinc-400 line-clamp-2">{job.summaryText}</div>
-                    )}
-                    {job.status === "failed" && job.errorMessage && (
-                      <div className="mt-1 inline-flex items-center gap-1 text-xs text-rose-300">
-                        <AlertTriangle className="h-3 w-3" />
-                        <span className="line-clamp-1">{job.errorMessage}</span>
-                      </div>
-                    )}
-                    {job.status === "complete" && job.outputUrl && (
-                      <div className="mt-2">
-                        <a
-                          href={job.outputUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20"
-                        >
-                          <Download className="h-3.5 w-3.5" />
-                          <span>Open DOCX</span>
-                        </a>
-                      </div>
-                    )}
-                    <div className="mt-2 flex items-center justify-end gap-2">
-                      <button
-                        type="button"
-                        onClick={() => void handleReportRowAction(job)}
-                        disabled={Boolean(reportActionLoadingById[job.reportJobId])}
-                        className={cn(
-                          "inline-flex items-center rounded-md border px-2 py-1 text-xs transition-colors",
-                          getReportActionKind(job.status) === "cancel"
-                            ? "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
-                            : "border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20",
-                          reportActionLoadingById[job.reportJobId] && "cursor-not-allowed opacity-60"
-                        )}
+                      <span className="rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-1 text-blue-300">
+                        Processing: {indexSummary.processing_count}
+                      </span>
+                      <span className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-rose-300">
+                        Failed: {indexSummary.failed_count + indexSummary.low_text_count}
+                      </span>
+                      <span className="rounded-md border border-purple-500/30 bg-purple-500/10 px-2 py-1 text-purple-300">
+                        OCR needed: {indexSummary.ocr_needed_count}
+                      </span>
+                      <span className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-cyan-300">
+                        OCR processed: {indexSummary.ocr_processed_count ?? 0}
+                      </span>
+                      <span className="rounded-md border border-fuchsia-500/30 bg-fuchsia-500/10 px-2 py-1 text-fuchsia-300">
+                        Visual analyzed: {indexSummary.vision_processed_count ?? 0}
+                      </span>
+                      <span className="rounded-md border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-orange-300">
+                        Partial: {indexSummary.partial_count ?? 0}
+                      </span>
+                      <a
+                        href={`/campaign/${tenantId}/assets`}
+                        className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-300 hover:bg-amber-500/20"
                       >
-                        {reportActionLoadingById[job.reportJobId]
-                          ? getReportActionKind(job.status) === "cancel"
-                            ? "Cancelling..."
-                            : "Deleting..."
-                          : getReportActionKind(job.status) === "cancel"
-                            ? "Cancel"
-                            : "Delete"}
-                      </button>
+                        View documents
+                      </a>
                     </div>
-                    {reportActionErrorById[job.reportJobId] && (
-                      <div className="mt-1 text-[11px] text-rose-300">{reportActionErrorById[job.reportJobId]}</div>
+                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-zinc-400">
+                      {Object.entries(indexSummary.counts_by_file_type || {})
+                        .sort((a, b) => b[1] - a[1])
+                        .slice(0, 8)
+                        .map(([fileType, count]) => (
+                          <span
+                            key={fileType}
+                            className="rounded-full border border-zinc-700 bg-zinc-800/40 px-2 py-0.5"
+                          >
+                            {fileType}: {count}
+                          </span>
+                        ))}
+                    </div>
+                    {(indexSummary.failed_count > 0 ||
+                      indexSummary.low_text_count > 0 ||
+                      indexSummary.ocr_needed_count > 0 ||
+                      (indexSummary.partial_count ?? 0) > 0) && (
+                      <div className="mt-2 text-[11px] text-amber-300">
+                        Some documents are not fully indexable yet, so Riley results may be incomplete.
+                      </div>
                     )}
                   </div>
-                ))
-              )}
-            </div>
+                )}
+
+                <div className={cn("mt-3", indexSummary && "border-t border-zinc-800 pt-3")}>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-2 text-sm text-zinc-200">
+                      <ClipboardList className="h-4 w-4 text-amber-400" />
+                      <span>Report Jobs</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void loadReportJobs()}
+                      className="rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                    >
+                      Refresh
+                    </button>
+                  </div>
+                  <div className="mt-2 space-y-2">
+                    {isReportsLoading && reportJobs.length === 0 ? (
+                      <div className="text-xs text-zinc-500">Loading report jobs...</div>
+                    ) : reportJobs.length === 0 ? (
+                      <div className="text-xs text-zinc-500">No report jobs yet. Use Generate Report to start one.</div>
+                    ) : (
+                      reportJobs.slice(0, 6).map((job) => (
+                        <div key={job.reportJobId} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <div className="truncate text-sm text-zinc-100">{job.title}</div>
+                              <div className="mt-1 text-[11px] text-zinc-500">
+                                {formatReportDate(job.createdAt)}
+                              </div>
+                            </div>
+                            <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", reportStatusBadgeClass(job.status))}>
+                              {job.status}
+                            </span>
+                          </div>
+                          {job.summaryText && (
+                            <div className="mt-1 text-xs text-zinc-400 line-clamp-2">{job.summaryText}</div>
+                          )}
+                          {job.status === "failed" && job.errorMessage && (
+                            <div className="mt-1 inline-flex items-center gap-1 text-xs text-rose-300">
+                              <AlertTriangle className="h-3 w-3" />
+                              <span className="line-clamp-1">{job.errorMessage}</span>
+                            </div>
+                          )}
+                          {job.status === "complete" && job.outputUrl && (
+                            <div className="mt-2">
+                              <a
+                                href={job.outputUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20"
+                              >
+                                <Download className="h-3.5 w-3.5" />
+                                <span>Open DOCX</span>
+                              </a>
+                            </div>
+                          )}
+                          <div className="mt-2 flex items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void handleReportRowAction(job)}
+                              disabled={Boolean(reportActionLoadingById[job.reportJobId])}
+                              className={cn(
+                                "inline-flex items-center rounded-md border px-2 py-1 text-xs transition-colors",
+                                getReportActionKind(job.status) === "cancel"
+                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                                  : "border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20",
+                                reportActionLoadingById[job.reportJobId] && "cursor-not-allowed opacity-60"
+                              )}
+                            >
+                              {reportActionLoadingById[job.reportJobId]
+                                ? getReportActionKind(job.status) === "cancel"
+                                  ? "Cancelling..."
+                                  : "Deleting..."
+                                : getReportActionKind(job.status) === "cancel"
+                                  ? "Cancel"
+                                  : "Delete"}
+                            </button>
+                          </div>
+                          {reportActionErrorById[job.reportJobId] && (
+                            <div className="mt-1 text-[11px] text-rose-300">{reportActionErrorById[job.reportJobId]}</div>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 

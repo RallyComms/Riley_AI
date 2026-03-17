@@ -33,6 +33,8 @@ export function GlobalRileyOrb() {
   const { getToken, isLoaded } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(true);
   const [notifications, setNotifications] = useState<FeedEvent[]>([]);
+  const [dismissLoadingEventId, setDismissLoadingEventId] = useState<string | null>(null);
+  const [requestActionLoadingEventId, setRequestActionLoadingEventId] = useState<string | null>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   
@@ -138,6 +140,48 @@ export function GlobalRileyOrb() {
       iconClass: "bg-zinc-600/20 text-zinc-300",
       critical: false,
     };
+  };
+
+  const handleDismiss = async (eventId: string) => {
+    try {
+      setDismissLoadingEventId(eventId);
+      const token = await getToken();
+      if (!token) return;
+      await apiFetch(`/api/v1/campaigns/events/feed/${encodeURIComponent(eventId)}/dismiss`, {
+        token,
+        method: "POST",
+      });
+      setNotifications((prev) => prev.filter((event) => event.id !== eventId));
+    } catch (err) {
+      console.error("Failed to dismiss feed event:", err);
+    } finally {
+      setDismissLoadingEventId(null);
+    }
+  };
+
+  const handleAccessDecision = async (
+    event: FeedEvent,
+    action: "approve" | "deny"
+  ) => {
+    if (!event.request_id) return;
+    try {
+      setRequestActionLoadingEventId(event.id);
+      const token = await getToken();
+      if (!token) return;
+      await apiFetch(
+        `/api/v1/campaigns/${encodeURIComponent(event.campaign_id)}/access-requests/${encodeURIComponent(event.request_id)}/decision`,
+        {
+          token,
+          method: "POST",
+          body: { action },
+        }
+      );
+      setNotifications((prev) => prev.filter((item) => item.id !== event.id));
+    } catch (err) {
+      console.error("Failed to resolve access request from feed:", err);
+    } finally {
+      setRequestActionLoadingEventId(null);
+    }
   };
 
   // Calculate viewport constraints
@@ -286,7 +330,37 @@ export function GlobalRileyOrb() {
                           <p className="mt-1 text-[11px] text-zinc-500">
                             {event.created_at ? new Date(event.created_at).toLocaleString() : ""}
                           </p>
+                          {event.type === "access_request_created" &&
+                          event.request_id &&
+                          event.member_role === "Lead" ? (
+                            <div className="mt-2 flex gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleAccessDecision(event, "approve")}
+                                disabled={requestActionLoadingEventId === event.id}
+                                className="rounded border border-emerald-600/40 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+                              >
+                                Accept
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleAccessDecision(event, "deny")}
+                                disabled={requestActionLoadingEventId === event.id}
+                                className="rounded border border-red-600/40 bg-red-500/10 px-2 py-1 text-[10px] text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                              >
+                                Deny
+                              </button>
+                            </div>
+                          ) : null}
                         </div>
+                        <button
+                          type="button"
+                          onClick={() => handleDismiss(event.id)}
+                          disabled={dismissLoadingEventId === event.id}
+                          className="ml-2 rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 hover:bg-zinc-700/50 hover:text-zinc-200 disabled:opacity-50"
+                        >
+                          Done
+                        </button>
                       </div>
                     </div>
                   )})}

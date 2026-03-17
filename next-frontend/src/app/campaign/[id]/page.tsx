@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
-import { useAuth } from "@clerk/nextjs";
+import { useAuth, useUser } from "@clerk/nextjs";
 import { Users, FileText, Calendar } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { useCampaignName } from "@app/lib/useCampaignName";
@@ -12,6 +12,8 @@ interface CampaignEventItem {
   id: string;
   type: string;
   message: string;
+  request_id?: string | null;
+  campaign_id?: string | null;
   user_id?: string | null;
   actor_user_id?: string | null;
   created_at?: string | null;
@@ -29,20 +31,24 @@ interface CampaignDeadlineItem {
   created_at?: string | null;
 }
 
-const teamStatus = [
-  { name: "Sarah Chen", role: "Lead Strategist", status: "online" },
-  { name: "John Martinez", role: "Media Expert", status: "online" },
-  { name: "Alex Rivera", role: "Research Lead", status: "away" },
-  { name: "Emma Wilson", role: "Policy Analyst", status: "offline" },
-];
+interface TeamMemberStatusItem {
+  user_id: string;
+  display_name: string;
+  avatar_url?: string | null;
+  role?: string | null;
+  status?: "active" | "away" | "in_meeting" | null;
+  status_updated_at?: string | null;
+}
 
 export default function CampaignOverviewPage() {
   const params = useParams();
   const campaignId = params.id as string;
+  const { user } = useUser();
   const { getToken, isLoaded } = useAuth();
   const { name: campaignName } = useCampaignName(campaignId);
   const [events, setEvents] = useState<CampaignEventItem[]>([]);
   const [deadlines, setDeadlines] = useState<CampaignDeadlineItem[]>([]);
+  const [teamMembers, setTeamMembers] = useState<TeamMemberStatusItem[]>([]);
   const [isDeadlineFormOpen, setIsDeadlineFormOpen] = useState(false);
   const [deadlineTitle, setDeadlineTitle] = useState("");
   const [deadlineDescription, setDeadlineDescription] = useState("");
@@ -51,10 +57,29 @@ export default function CampaignOverviewPage() {
   const [deadlineVisibility, setDeadlineVisibility] = useState<"team" | "personal">("team");
   const [isCreatingDeadline, setIsCreatingDeadline] = useState(false);
   const [deadlineError, setDeadlineError] = useState<string | null>(null);
+  const [requestActionLoadingId, setRequestActionLoadingId] = useState<string | null>(null);
   const headerTitle = campaignName?.trim()
     ? `${campaignName} Dashboard`
     : "Campaign Dashboard";
   const recentActivity = useMemo(() => events.slice(0, 8), [events]);
+
+  const sortedTeamMembers = useMemo(() => {
+    const rank = (s?: string | null) => {
+      if (s === "active") return 0;
+      if (s === "away") return 1;
+      if (s === "in_meeting") return 2;
+      return 3;
+    };
+    return [...teamMembers].sort((a, b) => {
+      const r = rank(a.status) - rank(b.status);
+      if (r !== 0) return r;
+      return (a.display_name || "").localeCompare(b.display_name || "");
+    });
+  }, [teamMembers]);
+  const isLead = useMemo(
+    () => teamMembers.some((m) => m.user_id === user?.id && m.role === "Lead"),
+    [teamMembers, user?.id]
+  );
 
   const sortedDeadlines = useMemo(
     () =>
@@ -100,6 +125,28 @@ export default function CampaignOverviewPage() {
       }
     };
     fetchEvents();
+  }, [campaignId, getToken, isLoaded]);
+
+  useEffect(() => {
+    const fetchTeamMembers = async () => {
+      if (!isLoaded || !campaignId) return;
+      try {
+        const token = await getToken();
+        if (!token) return;
+        const data = await apiFetch<{ members: TeamMemberStatusItem[] }>(
+          `/api/v1/campaigns/${campaignId}/members?mentions_only=true`,
+          {
+            token,
+            method: "GET",
+          }
+        );
+        setTeamMembers(data.members || []);
+      } catch (err) {
+        console.error("Failed to load campaign team status:", err);
+        setTeamMembers([]);
+      }
+    };
+    fetchTeamMembers();
   }, [campaignId, getToken, isLoaded]);
 
   useEffect(() => {
@@ -175,6 +222,31 @@ export default function CampaignOverviewPage() {
     }
   };
 
+  const handleAccessRequestDecision = async (
+    event: CampaignEventItem,
+    action: "approve" | "deny"
+  ) => {
+    if (!event.request_id) return;
+    try {
+      setRequestActionLoadingId(event.id);
+      const token = await getToken();
+      if (!token) return;
+      await apiFetch(
+        `/api/v1/campaigns/${campaignId}/access-requests/${event.request_id}/decision`,
+        {
+          token,
+          method: "POST",
+          body: { action },
+        }
+      );
+      setEvents((prev) => prev.filter((e) => e.id !== event.id));
+    } catch (err) {
+      console.error("Failed to resolve access request from activity:", err);
+    } finally {
+      setRequestActionLoadingId(null);
+    }
+  };
+
   return (
     <div className="min-h-full p-6 bg-transparent">
       {/* Header */}
@@ -212,6 +284,28 @@ export default function CampaignOverviewPage() {
                         ? new Date(activity.created_at).toLocaleString()
                         : "Just now"}
                     </p>
+                    {isLead &&
+                    activity.type === "access_request_created" &&
+                    activity.request_id ? (
+                      <div className="mt-2 flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleAccessRequestDecision(activity, "approve")}
+                          disabled={requestActionLoadingId === activity.id}
+                          className="rounded border border-emerald-600/40 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+                        >
+                          Accept
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleAccessRequestDecision(activity, "deny")}
+                          disabled={requestActionLoadingId === activity.id}
+                          className="rounded border border-red-600/40 bg-red-500/10 px-2 py-1 text-[10px] text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                        >
+                          Deny
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
                 </div>
               ))
@@ -226,32 +320,48 @@ export default function CampaignOverviewPage() {
             <h2 className="text-lg font-semibold text-zinc-100">Team Status</h2>
           </div>
           <div className="space-y-3">
-            {teamStatus.map((member, index) => (
-              <div
-                key={index}
-                className="flex items-center gap-3 p-3 rounded-lg bg-zinc-800/30 hover:bg-zinc-800/50 transition-colors"
-              >
-                <div className="relative">
-                  <div className="h-10 w-10 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-medium text-zinc-100">
-                    {member.name.split(" ").map((n) => n[0]).join("")}
+            {sortedTeamMembers.length === 0 ? (
+              <p className="text-sm text-zinc-500">No campaign members found.</p>
+            ) : (
+              sortedTeamMembers.map((member) => (
+                <div
+                  key={member.user_id}
+                  className="flex items-center gap-3 p-3 rounded-lg bg-zinc-800/30 hover:bg-zinc-800/50 transition-colors"
+                >
+                  <div className="relative">
+                    <div className="h-10 w-10 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-medium text-zinc-100">
+                      {member.display_name
+                        .split(" ")
+                        .map((n) => n[0])
+                        .join("")
+                        .slice(0, 2)
+                        .toUpperCase()}
+                    </div>
+                    <div
+                      className={cn(
+                        "absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-zinc-900",
+                        member.status === "active"
+                          ? "bg-emerald-500"
+                          : member.status === "away"
+                          ? "bg-amber-500"
+                          : "bg-sky-500"
+                      )}
+                    />
                   </div>
-                  <div
-                    className={cn(
-                      "absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-zinc-900",
-                      member.status === "online"
-                        ? "bg-emerald-500"
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-zinc-100 truncate">{member.display_name}</p>
+                    <p className="text-xs text-zinc-500 truncate">
+                      {member.role || "Member"} •{" "}
+                      {member.status === "in_meeting"
+                        ? "In a meeting"
                         : member.status === "away"
-                        ? "bg-amber-500"
-                        : "bg-zinc-600"
-                    )}
-                  />
+                        ? "Away"
+                        : "Active"}
+                    </p>
+                  </div>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-zinc-100 truncate">{member.name}</p>
-                  <p className="text-xs text-zinc-500 truncate">{member.role}</p>
-                </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
 
