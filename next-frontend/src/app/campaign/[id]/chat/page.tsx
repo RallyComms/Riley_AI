@@ -68,6 +68,32 @@ interface ChatThread {
   unread_count?: number;
 }
 
+interface AccessRequestItem {
+  id: string;
+  campaign_id: string;
+  user_id: string;
+  user_email: string;
+  user_name: string;
+  message?: string | null;
+  status: "pending" | "approved" | "denied";
+  created_at?: string | null;
+}
+
+interface CampaignEventItem {
+  id: string;
+  type: string;
+  message: string;
+  user_id?: string | null;
+  actor_user_id?: string | null;
+  created_at?: string | null;
+}
+
+interface DirectoryUserResult {
+  id: string;
+  email: string;
+  display_name: string;
+}
+
 interface MentionContext {
   start: number;
   end: number;
@@ -298,6 +324,13 @@ export default function TeamChatPage() {
   const [mentionContext, setMentionContext] = useState<MentionContext | null>(null);
   const [isMentionOpen, setIsMentionOpen] = useState(false);
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
+  const [pendingAccessRequests, setPendingAccessRequests] = useState<AccessRequestItem[]>([]);
+  const [feedEvents, setFeedEvents] = useState<CampaignEventItem[]>([]);
+  const [requestActionLoadingId, setRequestActionLoadingId] = useState<string | null>(null);
+  const [memberSearchQuery, setMemberSearchQuery] = useState("");
+  const [memberSearchResults, setMemberSearchResults] = useState<DirectoryUserResult[]>([]);
+  const [isSearchingMembers, setIsSearchingMembers] = useState(false);
+  const [addingMemberUserId, setAddingMemberUserId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -307,6 +340,10 @@ export default function TeamChatPage() {
   // Fetch campaign name using shared hook
   const { displayName } = useCampaignName(campaignId);
   const storageScope = campaignId && user?.id ? `${campaignId}:${user.id}` : null;
+  const isLead = useMemo(
+    () => campaignMembers.some((member) => member.user_id === user?.id && member.role === "Lead"),
+    [campaignMembers, user?.id]
+  );
 
   const getStorageKey = (
     key: "lastActiveThread" | "teamChatLeftPanelOpen" | "teamChatMembersPanelOpen"
@@ -434,6 +471,44 @@ export default function TeamChatPage() {
     } catch (err) {
       console.error("Error fetching campaign members for mentions:", err);
       setCampaignMembers([]);
+    }
+  };
+
+  const fetchPendingAccessRequests = async () => {
+    if (!isLoaded || !campaignId || !isLead) return;
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const data = await apiFetch<{ requests: AccessRequestItem[] }>(
+        `/api/v1/campaigns/${campaignId}/access-requests?status=pending`,
+        {
+          token,
+          method: "GET",
+        }
+      );
+      setPendingAccessRequests(data.requests || []);
+    } catch (err) {
+      console.error("Error fetching pending access requests:", err);
+      setPendingAccessRequests([]);
+    }
+  };
+
+  const fetchCampaignFeedEvents = async () => {
+    if (!isLoaded || !campaignId) return;
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const data = await apiFetch<{ events: CampaignEventItem[] }>(
+        `/api/v1/campaigns/${campaignId}/events?limit=20`,
+        {
+          token,
+          method: "GET",
+        }
+      );
+      setFeedEvents(data.events || []);
+    } catch (err) {
+      console.error("Error fetching campaign feed events:", err);
+      setFeedEvents([]);
     }
   };
 
@@ -590,9 +665,16 @@ export default function TeamChatPage() {
     if (isLoaded && campaignId) {
       fetchCampaignMembers();
       fetchThreads();
+      fetchCampaignFeedEvents();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoaded, campaignId, user?.id]);
+
+  useEffect(() => {
+    if (!isMembersPanelOpen || !isLead) return;
+    fetchPendingAccessRequests();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isMembersPanelOpen, isLead, campaignId, isLoaded]);
 
   // Fetch message history for active thread.
   useEffect(() => {
@@ -621,6 +703,12 @@ export default function TeamChatPage() {
         fetchMessages(null, currentThreadId);
       }
       fetchThreads();
+      if (isMembersPanelOpen) {
+        fetchCampaignFeedEvents();
+        if (isLead) {
+          fetchPendingAccessRequests();
+        }
+      }
     }, 12000); // 12 seconds
 
     return () => {
@@ -629,7 +717,7 @@ export default function TeamChatPage() {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLoaded, campaignId, lastTimestamp, isLoading, error, user?.id, currentThreadId]);
+  }, [isLoaded, campaignId, lastTimestamp, isLoading, error, user?.id, currentThreadId, isMembersPanelOpen, isLead]);
 
   // Auto-scroll to bottom when new messages arrive
   useEffect(() => {
@@ -967,6 +1055,95 @@ export default function TeamChatPage() {
       );
     } finally {
       setIsCreatingThread(false);
+    }
+  };
+
+  const handleAccessRequestDecision = async (
+    requestId: string,
+    action: "approve" | "deny"
+  ) => {
+    if (!isLead) return;
+    try {
+      setRequestActionLoadingId(requestId);
+      setError(null);
+      const token = await getToken();
+      if (!token) {
+        throw new Error("No authentication token available");
+      }
+      await apiFetch(
+        `/api/v1/campaigns/${campaignId}/access-requests/${requestId}/decision`,
+        {
+          token,
+          method: "POST",
+          body: { action },
+        }
+      );
+      await Promise.all([
+        fetchPendingAccessRequests(),
+        fetchCampaignMembers(),
+        fetchCampaignFeedEvents(),
+      ]);
+    } catch (err) {
+      console.error("Error deciding access request:", err);
+      setError(err instanceof Error ? err.message : "Failed to update access request.");
+    } finally {
+      setRequestActionLoadingId(null);
+    }
+  };
+
+  const handleSearchMembers = async () => {
+    if (!isLead) return;
+    const query = memberSearchQuery.trim();
+    if (query.length < 2) {
+      setMemberSearchResults([]);
+      return;
+    }
+    try {
+      setIsSearchingMembers(true);
+      setError(null);
+      const token = await getToken();
+      if (!token) {
+        throw new Error("No authentication token available");
+      }
+      const data = await apiFetch<{ users: DirectoryUserResult[] }>(
+        `/api/v1/campaigns/${campaignId}/users/search?query=${encodeURIComponent(query)}&limit=8`,
+        {
+          token,
+          method: "GET",
+        }
+      );
+      const memberIds = new Set(campaignMembers.map((m) => m.user_id));
+      setMemberSearchResults((data.users || []).filter((u) => !memberIds.has(u.id)));
+    } catch (err) {
+      console.error("Error searching users:", err);
+      setMemberSearchResults([]);
+      setError(err instanceof Error ? err.message : "Failed to search users.");
+    } finally {
+      setIsSearchingMembers(false);
+    }
+  };
+
+  const handleAddMemberDirect = async (candidate: DirectoryUserResult) => {
+    if (!isLead) return;
+    try {
+      setAddingMemberUserId(candidate.id);
+      setError(null);
+      const token = await getToken();
+      if (!token) {
+        throw new Error("No authentication token available");
+      }
+      await apiFetch(`/api/v1/campaigns/${campaignId}/members`, {
+        token,
+        method: "POST",
+        body: { email: candidate.email, role: "Member" },
+      });
+      setMemberSearchResults((prev) => prev.filter((u) => u.id !== candidate.id));
+      await Promise.all([fetchCampaignMembers(), fetchCampaignFeedEvents()]);
+    } catch (err) {
+      console.error("Error adding campaign member:", err);
+      setError(err instanceof Error ? err.message : "Failed to add member.");
+    } finally {
+      setAddingMemberUserId(null);
     }
   };
 
@@ -1310,6 +1487,100 @@ export default function TeamChatPage() {
                   </li>
                 ))}
               </ul>
+            )}
+            {isLead && (
+              <div className="border-t border-white/5 px-4 py-3 space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">
+                  Add Users
+                </p>
+                <div className="flex gap-2">
+                  <input
+                    value={memberSearchQuery}
+                    onChange={(e) => setMemberSearchQuery(e.target.value)}
+                    placeholder="Search name or email"
+                    className="flex-1 rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-100"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleSearchMembers}
+                    disabled={isSearchingMembers}
+                    className="rounded-md border border-zinc-700 px-2 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800/60 disabled:opacity-50"
+                  >
+                    {isSearchingMembers ? "..." : "Search"}
+                  </button>
+                </div>
+                {memberSearchResults.length > 0 && (
+                  <div className="max-h-36 overflow-y-auto rounded-md border border-zinc-700 bg-zinc-950/70">
+                    {memberSearchResults.map((candidate) => (
+                      <div key={candidate.id} className="flex items-center justify-between px-2 py-1.5 text-xs">
+                        <div className="min-w-0">
+                          <p className="truncate text-zinc-200">{candidate.display_name}</p>
+                          <p className="truncate text-zinc-500">{candidate.email}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleAddMemberDirect(candidate)}
+                          disabled={addingMemberUserId === candidate.id}
+                          className="ml-2 rounded border border-emerald-600/40 bg-emerald-500/10 px-2 py-1 text-[10px] font-medium text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+                        >
+                          {addingMemberUserId === candidate.id ? "Adding..." : "Add"}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="border-t border-white/5 px-4 py-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Riley Bot Feed</p>
+              {feedEvents.length === 0 ? (
+                <p className="mt-2 text-xs text-zinc-500">No recent feed events.</p>
+              ) : (
+                <div className="mt-2 space-y-2">
+                  {feedEvents.slice(0, 8).map((event) => (
+                    <div key={event.id} className="rounded-md border border-zinc-700/60 bg-zinc-900/50 px-2 py-1.5">
+                      <p className="text-xs text-zinc-200">{event.message}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            {isLead && (
+              <div className="border-t border-white/5 px-4 py-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-400">Pending Access Requests</p>
+                {pendingAccessRequests.length === 0 ? (
+                  <p className="mt-2 text-xs text-zinc-500">No pending requests.</p>
+                ) : (
+                  <div className="mt-2 space-y-2">
+                    {pendingAccessRequests.map((request) => (
+                      <div key={request.id} className="rounded-md border border-zinc-700 bg-zinc-900/60 p-2">
+                        <p className="text-xs text-zinc-200 truncate">{request.user_name || request.user_email}</p>
+                        {request.message ? (
+                          <p className="mt-1 text-[11px] text-zinc-400 line-clamp-2">{request.message}</p>
+                        ) : null}
+                        <div className="mt-2 flex gap-1.5">
+                          <button
+                            type="button"
+                            disabled={requestActionLoadingId === request.id}
+                            onClick={() => handleAccessRequestDecision(request.id, "approve")}
+                            className="rounded border border-emerald-600/40 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+                          >
+                            Accept
+                          </button>
+                          <button
+                            type="button"
+                            disabled={requestActionLoadingId === request.id}
+                            onClick={() => handleAccessRequestDecision(request.id, "deny")}
+                            className="rounded border border-red-600/40 bg-red-500/10 px-2 py-1 text-[10px] text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                          >
+                            Deny
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </aside>

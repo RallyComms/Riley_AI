@@ -1634,7 +1634,7 @@ class GraphService:
 
     async def create_access_request(
         self, tenant_id: str, requester_user_id: str, message: Optional[str] = None
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Create or update a pending access request for a campaign."""
         request_id = str(uuid.uuid4())
         normalized_message = message.strip() if isinstance(message, str) else None
@@ -1645,9 +1645,9 @@ class GraphService:
             query = """
             MATCH (c:Campaign {id: $tenant_id})
             MERGE (u:User {id: $requester_user_id})
-            MERGE (ar:AccessRequest {
-                tenant_id: $tenant_id,
-                requester_user_id: $requester_user_id,
+            MERGE (ar:CampaignAccessRequest {
+                campaign_id: $tenant_id,
+                user_id: $requester_user_id,
                 status: "pending"
             })
             ON CREATE SET
@@ -1658,7 +1658,16 @@ class GraphService:
                 ar.message = coalesce($message, ar.message)
             MERGE (u)-[:REQUESTED_ACCESS]->(ar)
             MERGE (ar)-[:FOR_CAMPAIGN]->(c)
-            RETURN ar.id as id
+            CREATE (evt:CampaignEvent {
+                id: $event_id,
+                campaign_id: $tenant_id,
+                type: "access_request_created",
+                message: "Access request submitted",
+                user_id: $requester_user_id,
+                request_id: ar.id,
+                created_at: datetime()
+            })
+            RETURN ar.id as id, toString(ar.created_at) as created_at, ar.status as status
             """
             result = await session.run(
                 query,
@@ -1666,10 +1675,236 @@ class GraphService:
                 requester_user_id=requester_user_id,
                 request_id=request_id,
                 message=normalized_message,
+                event_id=str(uuid.uuid4()),
             )
             record = await result.single()
             if not record:
                 raise ValueError(f"Campaign {tenant_id} not found")
+            return {
+                "id": record.get("id"),
+                "status": record.get("status") or "pending",
+                "created_at": record.get("created_at"),
+            }
+
+    async def list_campaign_access_requests(
+        self, campaign_id: str, status: str = "pending", limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """List campaign access requests by status."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (ar:CampaignAccessRequest {campaign_id: $campaign_id})
+            OPTIONAL MATCH (u:User {id: ar.user_id})
+            WHERE ($status = "" OR ar.status = $status)
+            RETURN
+                ar.id as id,
+                ar.campaign_id as campaign_id,
+                ar.user_id as user_id,
+                coalesce(u.email, "") as user_email,
+                coalesce(u.display_name, u.name, u.first_name, u.email, ar.user_id) as user_name,
+                ar.message as message,
+                ar.status as status,
+                toString(ar.created_at) as created_at,
+                toString(ar.decided_at) as decided_at,
+                ar.decided_by as decided_by
+            ORDER BY ar.created_at DESC
+            LIMIT $limit
+            """
+            result = await session.run(
+                query,
+                campaign_id=campaign_id,
+                status=(status or "").strip(),
+                limit=limit,
+            )
+            requests: List[Dict[str, Any]] = []
+            async for record in result:
+                requests.append(
+                    {
+                        "id": record.get("id"),
+                        "campaign_id": record.get("campaign_id"),
+                        "user_id": record.get("user_id"),
+                        "user_email": record.get("user_email") or "",
+                        "user_name": record.get("user_name") or "",
+                        "message": record.get("message"),
+                        "status": record.get("status") or "pending",
+                        "created_at": record.get("created_at"),
+                        "decided_at": record.get("decided_at"),
+                        "decided_by": record.get("decided_by"),
+                    }
+                )
+            return requests
+
+    async def decide_campaign_access_request(
+        self, campaign_id: str, request_id: str, actor_user_id: str, decision: str
+    ) -> Dict[str, Any]:
+        """Approve or deny a pending campaign access request."""
+        normalized_decision = (decision or "").strip().lower()
+        if normalized_decision not in {"approved", "denied"}:
+            raise ValueError("decision must be 'approved' or 'denied'")
+
+        async with self._driver.session() as session:
+            existing_result = await session.run(
+                """
+                MATCH (ar:CampaignAccessRequest {id: $request_id, campaign_id: $campaign_id})
+                RETURN
+                    ar.id as id,
+                    ar.user_id as user_id,
+                    ar.status as status,
+                    toString(ar.created_at) as created_at,
+                    toString(ar.decided_at) as decided_at,
+                    ar.decided_by as decided_by
+                """,
+                request_id=request_id,
+                campaign_id=campaign_id,
+            )
+            existing_record = await existing_result.single()
+            if not existing_record:
+                raise ValueError("Access request not found")
+
+            existing_status = (existing_record.get("status") or "").strip().lower()
+            if existing_status in {"approved", "denied"}:
+                if existing_status != normalized_decision:
+                    raise RuntimeError(
+                        f"Access request already decided as '{existing_status}'"
+                    )
+                return {
+                    "id": existing_record.get("id"),
+                    "user_id": existing_record.get("user_id"),
+                    "status": existing_record.get("status"),
+                    "created_at": existing_record.get("created_at"),
+                    "decided_at": existing_record.get("decided_at"),
+                    "decided_by": existing_record.get("decided_by"),
+                }
+
+            query = """
+            MATCH (ar:CampaignAccessRequest {id: $request_id, campaign_id: $campaign_id})
+            WHERE ar.status = "pending"
+            MATCH (c:Campaign {id: $campaign_id})
+            MERGE (u:User {id: ar.user_id})
+            SET
+                ar.status = $decision,
+                ar.decided_at = datetime(),
+                ar.decided_by = $actor_user_id
+            FOREACH (_ IN CASE WHEN $decision = "approved" THEN [1] ELSE [] END |
+                MERGE (u)-[m:MEMBER_OF]->(c)
+                SET m.role = coalesce(m.role, "Member"), m.added_at = datetime()
+            )
+            CREATE (evt:CampaignEvent {
+                id: $event_id,
+                campaign_id: $campaign_id,
+                type: CASE WHEN $decision = "approved" THEN "access_request_approved" ELSE "access_request_denied" END,
+                message: CASE WHEN $decision = "approved" THEN "Access request approved" ELSE "Access request denied" END,
+                user_id: ar.user_id,
+                actor_user_id: $actor_user_id,
+                request_id: ar.id,
+                created_at: datetime()
+            })
+            FOREACH (_ IN CASE WHEN $decision = "approved" THEN [1] ELSE [] END |
+                CREATE (:CampaignEvent {
+                    id: $user_event_id,
+                    campaign_id: $campaign_id,
+                    type: "campaign_member_added_notification",
+                    message: "You were added to Campaign " + coalesce(c.name, $campaign_id),
+                    user_id: ar.user_id,
+                    actor_user_id: $actor_user_id,
+                    request_id: ar.id,
+                    created_at: datetime()
+                })
+            )
+            RETURN
+                ar.id as id,
+                ar.user_id as user_id,
+                ar.status as status,
+                toString(ar.created_at) as created_at,
+                toString(ar.decided_at) as decided_at,
+                ar.decided_by as decided_by
+            """
+            result = await session.run(
+                query,
+                request_id=request_id,
+                campaign_id=campaign_id,
+                actor_user_id=actor_user_id,
+                decision=normalized_decision,
+                event_id=str(uuid.uuid4()),
+                user_event_id=str(uuid.uuid4()),
+            )
+            record = await result.single()
+            if not record:
+                raise ValueError("Pending access request not found")
+            return {
+                "id": record.get("id"),
+                "user_id": record.get("user_id"),
+                "status": record.get("status"),
+                "created_at": record.get("created_at"),
+                "decided_at": record.get("decided_at"),
+                "decided_by": record.get("decided_by"),
+            }
+
+    async def list_campaign_events(self, campaign_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """List recent campaign events for activity/feed surfaces."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (e:CampaignEvent {campaign_id: $campaign_id})
+            RETURN
+                e.id as id,
+                e.type as type,
+                e.message as message,
+                e.user_id as user_id,
+                e.actor_user_id as actor_user_id,
+                e.request_id as request_id,
+                toString(e.created_at) as created_at
+            ORDER BY e.created_at DESC
+            LIMIT $limit
+            """
+            result = await session.run(query, campaign_id=campaign_id, limit=limit)
+            items: List[Dict[str, Any]] = []
+            async for record in result:
+                items.append(
+                    {
+                        "id": record.get("id"),
+                        "type": record.get("type") or "",
+                        "message": record.get("message") or "",
+                        "user_id": record.get("user_id"),
+                        "actor_user_id": record.get("actor_user_id"),
+                        "request_id": record.get("request_id"),
+                        "created_at": record.get("created_at"),
+                    }
+                )
+            return items
+
+    async def create_campaign_event(
+        self,
+        *,
+        campaign_id: str,
+        event_type: str,
+        message: str,
+        user_id: Optional[str] = None,
+        actor_user_id: Optional[str] = None,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """Create a campaign-scoped activity event."""
+        async with self._driver.session() as session:
+            query = """
+            CREATE (e:CampaignEvent {
+                id: $event_id,
+                campaign_id: $campaign_id,
+                type: $event_type,
+                message: $message,
+                user_id: $user_id,
+                actor_user_id: $actor_user_id,
+                request_id: $request_id,
+                created_at: datetime()
+            })
+            """
+            await session.run(
+                query,
+                event_id=str(uuid.uuid4()),
+                campaign_id=campaign_id,
+                event_type=event_type,
+                message=message,
+                user_id=user_id,
+                actor_user_id=actor_user_id,
+                request_id=request_id,
+            )
 
     async def check_membership(self, user_id: str, tenant_id: str) -> bool:
         """Check if a user is a member of a campaign (tenant).
@@ -2419,7 +2654,7 @@ class GraphService:
 
     async def add_campaign_member(
         self, campaign_id: str, target_user_id: str, target_email: str, role: str
-    ) -> None:
+    ) -> Dict[str, Any]:
         """Add a user as a member to a campaign.
         
         Creates or updates the User node and creates/updates the MEMBER_OF relationship.
@@ -2430,6 +2665,9 @@ class GraphService:
             target_email: Email of the user to add
             role: Role to assign ("Lead" or "Member")
             
+        Returns:
+            Dictionary with membership state: {campaign_id, user_id, role, already_member, campaign_name}
+
         Raises:
             ValueError: If campaign doesn't exist
         """
@@ -2443,22 +2681,41 @@ class GraphService:
             if not await check_result.single():
                 raise ValueError(f"Campaign {campaign_id} not found")
             
-            # Add or update member
+            # Add or update member (idempotent MERGE, no duplicate relationships)
             query = """
             MERGE (u:User {id: $target_user_id})
             SET u.email = $target_email
             MATCH (c:Campaign {id: $campaign_id})
+            OPTIONAL MATCH (u)-[existing:MEMBER_OF]->(c)
+            WITH u, c, existing
             MERGE (u)-[r:MEMBER_OF]->(c)
-            SET r.role = $role, r.added_at = datetime()
+            ON CREATE SET r.role = $role, r.added_at = datetime()
+            ON MATCH SET r.role = coalesce(r.role, $role)
+            RETURN
+                c.id as campaign_id,
+                c.name as campaign_name,
+                u.id as user_id,
+                r.role as role,
+                (existing IS NOT NULL) as already_member
             """
-            
-            await session.run(
+
+            result = await session.run(
                 query,
                 campaign_id=campaign_id,
                 target_user_id=target_user_id,
                 target_email=target_email,
                 role=role
             )
+            record = await result.single()
+            if not record:
+                raise Exception("Failed to add or load campaign membership")
+            return {
+                "campaign_id": record.get("campaign_id"),
+                "campaign_name": record.get("campaign_name"),
+                "user_id": record.get("user_id"),
+                "role": record.get("role"),
+                "already_member": bool(record.get("already_member")),
+            }
 
     async def remove_campaign_member(self, campaign_id: str, target_user_id: str) -> None:
         """Remove a user from a campaign.

@@ -1,16 +1,21 @@
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
+import { useAuth } from "@clerk/nextjs";
 import { Users, FileText, Calendar } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { useCampaignName } from "@app/lib/useCampaignName";
+import { apiFetch } from "@app/lib/api";
 
-// Mock data
-const recentActivity = [
-  { id: "1", type: "upload", file: "Q3_Polling_Data.pdf", user: "Sarah Chen", time: "2 hours ago" },
-  { id: "2", type: "upload", file: "Candidate_Bio_Draft.docx", user: "John Martinez", time: "5 hours ago" },
-  { id: "3", type: "upload", file: "Strategic_Plan_Q1.xlsx", user: "Alex Rivera", time: "1 day ago" },
-];
+interface CampaignEventItem {
+  id: string;
+  type: string;
+  message: string;
+  user_id?: string | null;
+  actor_user_id?: string | null;
+  created_at?: string | null;
+}
 
 const teamStatus = [
   { name: "Sarah Chen", role: "Lead Strategist", status: "online" },
@@ -28,10 +33,35 @@ const upcomingDeadlines = [
 export default function CampaignOverviewPage() {
   const params = useParams();
   const campaignId = params.id as string;
+  const { getToken, isLoaded } = useAuth();
   const { name: campaignName } = useCampaignName(campaignId);
+  const [events, setEvents] = useState<CampaignEventItem[]>([]);
   const headerTitle = campaignName?.trim()
     ? `${campaignName} Dashboard`
     : "Campaign Dashboard";
+  const recentActivity = useMemo(() => events.slice(0, 8), [events]);
+
+  useEffect(() => {
+    const fetchEvents = async () => {
+      if (!isLoaded || !campaignId) return;
+      try {
+        const token = await getToken();
+        if (!token) return;
+        const data = await apiFetch<{ events: CampaignEventItem[] }>(
+          `/api/v1/campaigns/${campaignId}/events?limit=20`,
+          {
+            token,
+            method: "GET",
+          }
+        );
+        setEvents(data.events || []);
+      } catch (err) {
+        console.error("Failed to load campaign activity events:", err);
+        setEvents([]);
+      }
+    };
+    fetchEvents();
+  }, [campaignId, getToken, isLoaded]);
 
   return (
     <div className="min-h-full p-6 bg-transparent">
@@ -52,22 +82,28 @@ export default function CampaignOverviewPage() {
             <h2 className="text-lg font-semibold text-zinc-100">Recent Activity</h2>
           </div>
           <div className="space-y-3">
-            {recentActivity.map((activity) => (
-              <div
-                key={activity.id}
-                className="flex items-start gap-3 p-3 rounded-lg bg-zinc-800/30 hover:bg-zinc-800/50 transition-colors"
-              >
-                <div className="flex-shrink-0 mt-0.5">
-                  <div className="h-2 w-2 rounded-full bg-emerald-500" />
+            {recentActivity.length === 0 ? (
+              <p className="text-sm text-zinc-500">No recent campaign activity yet.</p>
+            ) : (
+              recentActivity.map((activity) => (
+                <div
+                  key={activity.id}
+                  className="flex items-start gap-3 p-3 rounded-lg bg-zinc-800/30 hover:bg-zinc-800/50 transition-colors"
+                >
+                  <div className="flex-shrink-0 mt-0.5">
+                    <div className="h-2 w-2 rounded-full bg-emerald-500" />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm text-zinc-100">{activity.message}</p>
+                    <p className="text-xs text-zinc-500 mt-0.5">
+                      {activity.created_at
+                        ? new Date(activity.created_at).toLocaleString()
+                        : "Just now"}
+                    </p>
+                  </div>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm text-zinc-100 truncate">{activity.file}</p>
-                  <p className="text-xs text-zinc-500 mt-0.5">
-                    {activity.user} • {activity.time}
-                  </p>
-                </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </div>
 

@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 from fastapi import APIRouter, HTTPException, Depends, Query, status
 from pydantic import BaseModel, Field
 
@@ -7,7 +7,7 @@ from app.dependencies.graph_dep import get_graph
 from app.services.graph import GraphService
 from app.services.qdrant import vector_service
 from app.services.storage import StorageService
-from app.services.clerk_directory import find_user_by_email
+from app.services.clerk_directory import find_user_by_email, search_users
 
 
 router = APIRouter()
@@ -39,6 +39,54 @@ class CreateAccessRequest(BaseModel):
 
 class AccessRequestResponse(BaseModel):
     ok: bool
+    request_id: Optional[str] = None
+    status: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class CampaignAccessRequestItem(BaseModel):
+    id: str
+    campaign_id: str
+    user_id: str
+    user_email: str
+    user_name: str
+    message: Optional[str] = None
+    status: Literal["pending", "approved", "denied"]
+    created_at: Optional[str] = None
+    decided_at: Optional[str] = None
+    decided_by: Optional[str] = None
+
+
+class CampaignAccessRequestsResponse(BaseModel):
+    requests: List[CampaignAccessRequestItem]
+
+
+class AccessRequestDecisionRequest(BaseModel):
+    action: Literal["approve", "deny"]
+
+
+class CampaignEventItem(BaseModel):
+    id: str
+    type: str
+    message: str
+    user_id: Optional[str] = None
+    actor_user_id: Optional[str] = None
+    request_id: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class CampaignEventsResponse(BaseModel):
+    events: List[CampaignEventItem]
+
+
+class DirectoryUserResult(BaseModel):
+    id: str
+    email: str
+    display_name: str
+
+
+class DirectoryUserSearchResponse(BaseModel):
+    users: List[DirectoryUserResult]
 
 
 class TerminationResponse(BaseModel):
@@ -116,6 +164,18 @@ class CreateChatThreadRequest(BaseModel):
     name: Optional[str] = Field(None, max_length=120, description="Optional thread name")
 
 
+async def _require_lead_for_campaign(campaign_id: str, current_user: Dict, graph: GraphService) -> str:
+    """Server-side Lead authorization helper for campaign-scoped management routes."""
+    requester_id = current_user.get("id", "unknown")
+    requester_role = await graph.get_member_role(requester_id, campaign_id)
+    if requester_role != "Lead":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only Lead members can perform this action",
+        )
+    return requester_id
+
+
 @router.post("/campaigns", response_model=CampaignResponse)
 async def create_campaign(
     request: CreateCampaignRequest,
@@ -188,12 +248,17 @@ async def request_campaign_access(
     """
     user_id = current_user.get("id", "unknown")
     try:
-        await graph.create_access_request(
+        created = await graph.create_access_request(
             tenant_id=tenant_id,
             requester_user_id=user_id,
             message=request.message,
         )
-        return AccessRequestResponse(ok=True)
+        return AccessRequestResponse(
+            ok=True,
+            request_id=created.get("id"),
+            status=created.get("status"),
+            created_at=created.get("created_at"),
+        )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -204,6 +269,108 @@ async def request_campaign_access(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create access request: {exc}",
         ) from exc
+
+
+@router.get(
+    "/campaigns/{tenant_id}/access-requests",
+    response_model=CampaignAccessRequestsResponse,
+)
+async def list_campaign_access_requests(
+    tenant_id: str,
+    status_filter: Literal["pending", "approved", "denied", "all"] = Query("pending", alias="status"),
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> CampaignAccessRequestsResponse:
+    """List campaign access requests for leads."""
+    await _require_lead_for_campaign(tenant_id, current_user, graph)
+    status_value = "" if status_filter == "all" else status_filter
+    items = await graph.list_campaign_access_requests(
+        campaign_id=tenant_id,
+        status=status_value,
+        limit=100,
+    )
+    return CampaignAccessRequestsResponse(
+        requests=[CampaignAccessRequestItem(**item) for item in items]
+    )
+
+
+@router.post(
+    "/campaigns/{tenant_id}/access-requests/{request_id}/decision",
+    response_model=CampaignAccessRequestItem,
+)
+async def decide_campaign_access_request(
+    tenant_id: str,
+    request_id: str,
+    request: AccessRequestDecisionRequest,
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> CampaignAccessRequestItem:
+    """Approve/deny campaign access requests for leads."""
+    requester_id = await _require_lead_for_campaign(tenant_id, current_user, graph)
+    decision = "approved" if request.action == "approve" else "denied"
+    try:
+        decided = await graph.decide_campaign_access_request(
+            campaign_id=tenant_id,
+            request_id=request_id,
+            actor_user_id=requester_id,
+            decision=decision,
+        )
+        latest_items = await graph.list_campaign_access_requests(
+            campaign_id=tenant_id,
+            status="",
+            limit=100,
+        )
+        by_id = {item.get("id"): item for item in latest_items}
+        enriched = by_id.get(request_id) or {
+            "id": decided.get("id"),
+            "campaign_id": tenant_id,
+            "user_id": decided.get("user_id"),
+            "user_email": "",
+            "user_name": decided.get("user_id") or "",
+            "message": None,
+            "status": decided.get("status") or decision,
+            "created_at": decided.get("created_at"),
+            "decided_at": decided.get("decided_at"),
+            "decided_by": decided.get("decided_by"),
+        }
+        return CampaignAccessRequestItem(**enriched)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/campaigns/{tenant_id}/events", response_model=CampaignEventsResponse)
+async def list_campaign_events(
+    tenant_id: str,
+    limit: int = Query(50, ge=1, le=200),
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> CampaignEventsResponse:
+    """List recent campaign events for activity/feed surfaces."""
+    _ = current_user
+    events = await graph.list_campaign_events(campaign_id=tenant_id, limit=limit)
+    return CampaignEventsResponse(events=[CampaignEventItem(**item) for item in events])
+
+
+@router.get("/campaigns/{tenant_id}/users/search", response_model=DirectoryUserSearchResponse)
+async def search_campaign_users(
+    tenant_id: str,
+    query: str = Query(..., min_length=2, max_length=120),
+    limit: int = Query(8, ge=1, le=20),
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> DirectoryUserSearchResponse:
+    """Search Clerk users for direct campaign member add (Lead only)."""
+    await _require_lead_for_campaign(tenant_id, current_user, graph)
+    users = search_users(query=query, limit=limit)
+    return DirectoryUserSearchResponse(users=[DirectoryUserResult(**u) for u in users])
 
 
 @router.delete("/campaign/{tenant_id}", response_model=TerminationResponse)
@@ -627,12 +794,7 @@ async def add_campaign_member(
     
     # Check if requester is Lead
     try:
-        requester_role = await graph.get_member_role(user_id, id)
-        if requester_role != "Lead":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only Lead members can add members to a campaign"
-            )
+        user_id = await _require_lead_for_campaign(id, current_user, graph)
     except HTTPException:
         raise
     except Exception as exc:
@@ -659,12 +821,21 @@ async def add_campaign_member(
     
     # Add member to campaign
     try:
-        await graph.add_campaign_member(
+        added = await graph.add_campaign_member(
             campaign_id=id,
             target_user_id=clerk_user["id"],
             target_email=clerk_user["email"],
             role=request.role
         )
+        if not bool(added.get("already_member")):
+            campaign_name = (added.get("campaign_name") or "").strip() or id
+            await graph.create_campaign_event(
+                campaign_id=id,
+                event_type="campaign_member_added",
+                message=f"You were added to Campaign {campaign_name}",
+                user_id=clerk_user["id"],
+                actor_user_id=user_id,
+            )
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
