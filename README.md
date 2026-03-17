@@ -1,120 +1,175 @@
 # 🧠 Riley Platform | RALLY
 
-**Riley** is RALLY’s internal AI Operating System. It is a secure, collaborative intelligence platform designed to streamline campaign strategy through two distinct modes:
+**Riley** is an internal AI operating system designed for high-stakes campaign strategy, enabling teams to transform fragmented documents, research, and communications into structured, actionable intelligence.
 
-1.  **Global Riley:** Access to firm-wide knowledge and "Golden Standard" archival documents.
-2.  **Campaign Riley:** Tenant-isolated workspaces where teams upload assets, view documents, and collaborate within a secure silo.
+It combines **document intelligence, semantic retrieval, and collaborative workflows** into a unified platform purpose-built for strategic teams.
 
----
+Riley operates across two layers:
 
-## 🏗️ Architecture Stack
-
-*   **Frontend:** Next.js 14 (App Router) + Tailwind + Framer Motion.
-*   **Backend:** FastAPI (Python 3.11) running on **Google Cloud Run**.
-*   **Auth:** Clerk (JWT Verification).
-*   **Graph DB:** Neo4j (Campaign Registry + Chat Memory).
-*   **Vector DB:** Qdrant Cloud (Semantic Search).
-*   **Storage:** Google Cloud Storage (Asset Vault).
+* **Global Intelligence Layer** — firm-wide knowledge, archival strategy, and institutional memory
+* **Campaign Intelligence Layer** — isolated, secure workspaces for active campaign execution
 
 ---
 
-## ⚡ Core Capabilities
+## ⚙️ System Architecture
 
-### 1. Campaign Workspaces (The Silo)
-*   **Source of Truth:** Campaigns and Memberships are managed in **Neo4j**.
-*   **Isolation:** Strict RLS (Row Level Security) enforcement.
-    *   Campaign Riley sees **Tier 2** (Client Assets) + **Tier 1** (Global).
-    *   Global Riley sees **Tier 1** ONLY.
+Riley is built as a modern, cloud-native AI system optimized for performance, isolation, and extensibility.
 
-### 2. Document Intelligence
-*   **Ingestion:** Supports PDF, DOCX, PPTX, XLSX, HTML, and Images.
-*   **Previews:** Automatic PDF preview generation for Office files using headless LibreOffice.
-*   **OCR:** On-demand text extraction for image-heavy assets.
+**Frontend**
 
-### 3. Persistent Memory
-*   **Chat History:** Tenant-scoped session history stored in Neo4j.
-*   **Context:** Hybrid RAG approach combining **Graph relationships** (Who is the client?) with **Vector search** (What is in the docs?).
+* Next.js (App Router)
+* Tailwind CSS + Framer Motion
+* Real-time UX patterns with streaming and event-driven updates
 
----
+**Backend**
 
-## 🛠️ Configuration & Environment
+* FastAPI (Python 3.11)
+* Deployed on Google Cloud Run (autoscaling, stateless execution)
 
-### Frontend Variables
-Create `.env.local` in `next-frontend/`:
+**Authentication**
 
-```bash
-# Production API URL
-NEXT_PUBLIC_API_URL=https://riley-api-786327046070.us-east4.run.app
+* Clerk (JWT-based identity and session management)
 
-# Clerk Auth
-NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_...
-CLERK_SECRET_KEY=sk_test_...
-```
+**Data Layer**
 
-### Backend Variables
-Set these in **Google Cloud Run** (Variables & Secrets):
-
-```bash
-# Infrastructure
-GOOGLE_API_KEY=...             # Gemini Models
-QDRANT_URL=...                 # Vector DB Endpoint
-QDRANT_API_KEY=...             # Vector DB Key
-GCS_BUCKET_NAME=...            # Asset Storage Bucket
-
-# Vector Collections
-QDRANT_COLLECTION_TIER_1=riley_production_v1  # Firm Archive
-QDRANT_COLLECTION_TIER_2=riley_campaigns      # Campaign Assets
-
-# Security
-ALLOWED_ORIGINS=https://riley-platform.vercel.app,http://localhost:3000
-```
+* **Neo4j** — campaign graph, user relationships, access control, and event system
+* **Qdrant** — vector search for semantic retrieval across campaign and global corpora
+* **Google Cloud Storage** — asset vault for documents and generated outputs
 
 ---
 
-## 🚀 Running Locally
+## 🧠 Core System Capabilities
 
-### 1. Start the Backend (Brain)
-```bash
-cd fastapi-backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+### 1. Campaign Workspaces (Secure Collaboration Layer)
 
-# Run server with hot-reload
-uvicorn app.main:app --reload --port 8000
-```
-
-### 2. Start the Frontend (Body)
-```bash
-cd next-frontend
-npm install
-npm run dev
-```
-*Access the platform at `http://localhost:3000`*
+* Campaigns function as **isolated intelligence environments**
+* Membership and permissions enforced through graph relationships
+* Shared asset layer prevents duplication while maintaining workspace integrity
 
 ---
 
-## 📦 Deployment Strategy
+### 2. Document Intelligence Pipeline
 
-### Backend (Google Cloud Run)
-*   **Container:** Dockerfile builds Python env + LibreOffice (for previews).
-*   **Scaling:** Set `min-instances=1` during high-traffic windows to prevent cold starts.
+* Multi-format ingestion: PDF, DOCX, PPTX, XLSX, HTML, images
+* Hybrid extraction:
 
-### Frontend (Vercel)
-*   Deploys from `next-frontend/`.
-*   Must have `NEXT_PUBLIC_API_URL` pointing to the Cloud Run service.
-
----
-
-## 🗺️ Engineering Roadmap
-
-*   [ ] **Async Ingestion:** Move heavy OCR/Embedding tasks to Cloud Tasks to prevent HTTP timeouts.
-*   [ ] **Real-Time Team Chat:** Move from polling to WebSockets or robust Neo4j persistence.
-*   [ ] **Mission Control:** Director-level dashboard for Token Usage, Latency, and Adoption metrics.
+  * native parsing
+  * OCR for image-heavy documents
+  * vision-assisted understanding
+* Outputs structured intelligence artifacts used downstream in strategy and retrieval
 
 ---
 
-## 👨‍💻 Maintainers
+### 3. Hybrid Retrieval (Graph + Vector)
+
+Riley combines:
+
+* **Graph retrieval**
+
+  * relationships (campaign → documents → users → decisions)
+* **Vector retrieval**
+
+  * semantic similarity across documents
+
+This enables:
+
+* context-aware search
+* cross-document synthesis
+* strategic pattern detection
+
+---
+
+### 4. Multipass Intelligence Engine
+
+Large documents are analyzed using a multi-stage pipeline:
+
+* segmentation into structured bands
+* per-band analysis
+* cross-band contradiction detection
+* full-document synthesis
+
+This allows Riley to reason over **complex, multi-source campaign materials**, not just summarize them.
+
+---
+
+### 5. Adaptive Generation Layer
+
+Riley uses a **multi-provider LLM architecture**:
+
+* **Primary:** Gemini (fast, stable generation)
+* **Fallback:** OpenAI (resilience layer)
+
+Features:
+
+* provider-level failover
+* context-aware prompt construction
+* structured vs conversational response control
+* strict grounding in source documents
+
+---
+
+### 6. Event-Driven Collaboration System
+
+Riley includes a unified event model powering:
+
+* campaign activity feeds
+* cross-campaign intelligence feed (“Riley Bot”)
+* access requests and approvals
+* document workflow (review / assignment)
+* deadline tracking
+
+All activity is:
+
+* persisted
+* scoped by campaign and user
+* queryable in real time
+
+---
+
+### 7. User Identity & Presence Layer
+
+* Riley-native user profiles (independent of auth provider)
+* global status system:
+
+  * Active
+  * Away
+  * In Meeting
+* consistent identity across campaigns and collaboration surfaces
+
+---
+
+## 🧩 Product Features
+
+* Campaign dashboards with real-time activity and team visibility
+* AI-assisted strategic analysis across campaign assets
+* Structured reporting (strategy memos, summaries, audience analysis)
+* Cross-campaign intelligence feed with actionable notifications
+* Access control and onboarding flows for secure collaboration
+* Document tagging and workflow routing (e.g., Needs Review → In Review)
+
+---
+
+## 🚀 System Characteristics
+
+* **Tenant-isolated architecture** for campaign security
+* **Event-driven design** for real-time collaboration surfaces
+* **Hybrid retrieval system** combining graph and vector reasoning
+* **Provider-agnostic LLM layer** with failover resilience
+* **Cloud-native scaling** via serverless infrastructure
+
+---
+
+## 🗺️ Engineering Direction
+
+* Deeper real-time collaboration (event streaming / presence signals)
+* Advanced intelligence synthesis across campaigns
+* Mission Control layer for system-wide observability
+* Adaptive retrieval + reranking optimization
+
+---
+
+## 👨‍💻 Built By
 
 **RALLY AI Engineering**
-*   **Lead Engineer:** Anova Youngers
+Lead Engineer: **Anova Youngers**
+
