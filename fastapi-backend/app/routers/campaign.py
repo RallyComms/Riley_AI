@@ -8,7 +8,7 @@ from app.dependencies.graph_dep import get_graph
 from app.services.graph import GraphService
 from app.services.qdrant import vector_service
 from app.services.storage import StorageService
-from app.services.clerk_directory import find_user_by_email, search_users
+from app.services.clerk_directory import find_user_by_email, find_user_by_id, search_users
 
 
 router = APIRouter()
@@ -340,7 +340,23 @@ async def request_campaign_access(
     - Does not grant access to campaign contents
     """
     user_id = current_user.get("id", "unknown")
+    raw_claims = current_user.get("raw") if isinstance(current_user, dict) else {}
+    first_name = None
+    last_name = None
+    if isinstance(raw_claims, dict):
+        first_name = raw_claims.get("first_name")
+        last_name = raw_claims.get("last_name")
+    display_name = " ".join(
+        [part for part in [str(first_name or "").strip(), str(last_name or "").strip()] if part]
+    ).strip() or None
     try:
+        await graph.upsert_user_identity(
+            user_id=user_id,
+            email=current_user.get("email"),
+            first_name=first_name,
+            last_name=last_name,
+            display_name=display_name,
+        )
         created = await graph.create_access_request(
             tenant_id=tenant_id,
             requester_user_id=user_id,
@@ -447,8 +463,12 @@ async def list_campaign_events(
     graph: GraphService = Depends(get_graph),
 ) -> CampaignEventsResponse:
     """List recent campaign events for activity/feed surfaces."""
-    _ = current_user
-    events = await graph.list_campaign_events(campaign_id=tenant_id, limit=limit)
+    viewer_user_id = current_user.get("id", "unknown")
+    events = await graph.list_campaign_events(
+        campaign_id=tenant_id,
+        limit=limit,
+        viewer_user_id=viewer_user_id,
+    )
     return CampaignEventsResponse(events=[CampaignEventItem(**item) for item in events])
 
 
@@ -464,6 +484,33 @@ async def list_user_campaign_feed(
     return UserCampaignFeedResponse(
         events=[UserCampaignFeedEventItem(**item) for item in events]
     )
+
+
+@router.post("/campaigns/{tenant_id}/events/{event_id}/dismiss", response_model=DismissFeedEventResponse)
+async def dismiss_campaign_event_for_user(
+    tenant_id: str,
+    event_id: str,
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> DismissFeedEventResponse:
+    """Dismiss a campaign activity event for current user only."""
+    user_id = current_user.get("id", "unknown")
+    try:
+        result = await graph.dismiss_user_feed_event(
+            user_id=user_id,
+            event_id=event_id,
+            campaign_id=tenant_id,
+        )
+        return DismissFeedEventResponse(
+            ok=True,
+            event_id=result.get("event_id") or event_id,
+            dismissed_at=result.get("dismissed_at"),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
 
 
 @router.post("/campaigns/events/feed/{event_id}/dismiss", response_model=DismissFeedEventResponse)
@@ -948,6 +995,34 @@ async def get_campaign_members(
     try:
         if mentions_only:
             members = await graph.list_campaign_members_for_mentions(campaign_id=id)
+            for member in members:
+                if (member.get("display_name") or "").strip() != "Unknown User":
+                    continue
+                user_id = member.get("user_id")
+                if not user_id:
+                    continue
+                try:
+                    clerk_user = find_user_by_id(str(user_id))
+                except Exception:
+                    clerk_user = None
+                if not clerk_user:
+                    continue
+                resolved_name = (
+                    str(clerk_user.get("display_name") or "").strip()
+                    or str(clerk_user.get("email") or "").strip()
+                    or str(user_id)
+                )
+                member["display_name"] = resolved_name
+                member["avatar_url"] = clerk_user.get("avatar_url") or member.get("avatar_url")
+                # Persist identity to reduce repeat Clerk lookups.
+                await graph.upsert_user_identity(
+                    user_id=str(user_id),
+                    email=clerk_user.get("email"),
+                    first_name=clerk_user.get("first_name"),
+                    last_name=clerk_user.get("last_name"),
+                    display_name=resolved_name,
+                    avatar_url=clerk_user.get("avatar_url"),
+                )
             return MentionMembersListResponse(
                 members=[MentionMemberResponse(**member) for member in members]
             )
@@ -1028,7 +1103,9 @@ async def add_campaign_member(
             campaign_id=id,
             target_user_id=clerk_user["id"],
             target_email=clerk_user["email"],
-            role=request.role
+            role=request.role,
+            target_first_name=clerk_user.get("first_name"),
+            target_last_name=clerk_user.get("last_name"),
         )
         if not bool(added.get("already_member")):
             campaign_name = (added.get("campaign_name") or "").strip() or id

@@ -58,6 +58,7 @@ export default function CampaignOverviewPage() {
   const [isCreatingDeadline, setIsCreatingDeadline] = useState(false);
   const [deadlineError, setDeadlineError] = useState<string | null>(null);
   const [requestActionLoadingId, setRequestActionLoadingId] = useState<string | null>(null);
+  const [activityDismissLoadingId, setActivityDismissLoadingId] = useState<string | null>(null);
   const headerTitle = campaignName?.trim()
     ? `${campaignName} Dashboard`
     : "Campaign Dashboard";
@@ -247,6 +248,26 @@ export default function CampaignOverviewPage() {
     }
   };
 
+  const handleDismissActivityEvent = async (eventId: string) => {
+    try {
+      setActivityDismissLoadingId(eventId);
+      const token = await getToken();
+      if (!token) return;
+      await apiFetch(
+        `/api/v1/campaigns/${campaignId}/events/${encodeURIComponent(eventId)}/dismiss`,
+        {
+          token,
+          method: "POST",
+        }
+      );
+      setEvents((prev) => prev.filter((event) => event.id !== eventId));
+    } catch (err) {
+      console.error("Failed to dismiss activity event:", err);
+    } finally {
+      setActivityDismissLoadingId(null);
+    }
+  };
+
   return (
     <div className="min-h-full p-6 bg-transparent">
       {/* Header */}
@@ -306,6 +327,16 @@ export default function CampaignOverviewPage() {
                         </button>
                       </div>
                     ) : null}
+                    <div className="mt-2 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => handleDismissActivityEvent(activity.id)}
+                        disabled={activityDismissLoadingId === activity.id}
+                        className="rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-400 hover:bg-zinc-700/50 hover:text-zinc-200 disabled:opacity-50"
+                      >
+                        Done
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))

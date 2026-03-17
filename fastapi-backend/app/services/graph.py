@@ -1839,11 +1839,27 @@ class GraphService:
                 "decided_by": record.get("decided_by"),
             }
 
-    async def list_campaign_events(self, campaign_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+    async def list_campaign_events(
+        self,
+        campaign_id: str,
+        limit: int = 50,
+        viewer_user_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """List recent campaign events for activity/feed surfaces."""
         async with self._driver.session() as session:
             query = """
             MATCH (e:CampaignEvent {campaign_id: $campaign_id})
+            OPTIONAL MATCH (ar:CampaignAccessRequest {id: e.request_id, campaign_id: $campaign_id})
+            OPTIONAL MATCH (viewer:User {id: $viewer_user_id})-[dismissed:DISMISSED_FEED_EVENT]->(e)
+            WHERE
+                ($viewer_user_id IS NULL OR dismissed IS NULL)
+                AND (
+                    e.type <> "access_request_created"
+                    OR (
+                        ar IS NOT NULL
+                        AND ar.status = "pending"
+                    )
+                )
             RETURN
                 e.id as id,
                 e.type as type,
@@ -1855,7 +1871,12 @@ class GraphService:
             ORDER BY e.created_at DESC
             LIMIT $limit
             """
-            result = await session.run(query, campaign_id=campaign_id, limit=limit)
+            result = await session.run(
+                query,
+                campaign_id=campaign_id,
+                limit=limit,
+                viewer_user_id=viewer_user_id,
+            )
             items: List[Dict[str, Any]] = []
             async for record in result:
                 items.append(
@@ -1882,9 +1903,18 @@ class GraphService:
             query = """
             MATCH (me:User {id: $user_id})-[membership:MEMBER_OF]->(c:Campaign)
             MATCH (e:CampaignEvent {campaign_id: c.id})
+            OPTIONAL MATCH (ar:CampaignAccessRequest {id: e.request_id, campaign_id: c.id})
             OPTIONAL MATCH (me)-[dismissed:DISMISSED_FEED_EVENT]->(e)
             WHERE
                 dismissed IS NULL
+                AND
+                (
+                    e.type <> "access_request_created"
+                    OR (
+                        ar IS NOT NULL
+                        AND ar.status = "pending"
+                    )
+                )
                 AND
                 (
                 e.user_id = $user_id
@@ -1939,18 +1969,30 @@ class GraphService:
                 )
             return items
 
-    async def dismiss_user_feed_event(self, *, user_id: str, event_id: str) -> Dict[str, Any]:
+    async def dismiss_user_feed_event(
+        self,
+        *,
+        user_id: str,
+        event_id: str,
+        campaign_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Mark a campaign event dismissed for a specific user feed."""
         async with self._driver.session() as session:
             query = """
             MATCH (me:User {id: $user_id})-[:MEMBER_OF]->(c:Campaign)
             MATCH (e:CampaignEvent {id: $event_id, campaign_id: c.id})
+            WHERE ($campaign_id IS NULL OR e.campaign_id = $campaign_id)
             MERGE (me)-[d:DISMISSED_FEED_EVENT]->(e)
             ON CREATE SET d.dismissed_at = datetime()
             ON MATCH SET d.dismissed_at = datetime()
             RETURN e.id as event_id, toString(d.dismissed_at) as dismissed_at
             """
-            result = await session.run(query, user_id=user_id, event_id=event_id)
+            result = await session.run(
+                query,
+                user_id=user_id,
+                event_id=event_id,
+                campaign_id=campaign_id,
+            )
             record = await result.single()
             if not record:
                 raise ValueError("Feed event not found or not visible to current user")
@@ -2923,6 +2965,37 @@ class GraphService:
                 "updated_at": record.get("updated_at"),
             }
 
+    async def upsert_user_identity(
+        self,
+        *,
+        user_id: str,
+        email: Optional[str] = None,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+        display_name: Optional[str] = None,
+        avatar_url: Optional[str] = None,
+    ) -> None:
+        """Best-effort identity enrichment for User nodes."""
+        async with self._driver.session() as session:
+            query = """
+            MERGE (u:User {id: $user_id})
+            SET
+                u.email = coalesce($email, u.email),
+                u.first_name = coalesce($first_name, u.first_name),
+                u.last_name = coalesce($last_name, u.last_name),
+                u.display_name = coalesce($display_name, u.display_name),
+                u.avatar_url = coalesce($avatar_url, u.avatar_url)
+            """
+            await session.run(
+                query,
+                user_id=user_id,
+                email=email,
+                first_name=first_name,
+                last_name=last_name,
+                display_name=display_name,
+                avatar_url=avatar_url,
+            )
+
     async def get_campaign_member_ids(self, campaign_id: str) -> List[str]:
         """Return all user IDs that are members of a campaign."""
         async with self._driver.session() as session:
@@ -2939,7 +3012,13 @@ class GraphService:
             return ids
 
     async def add_campaign_member(
-        self, campaign_id: str, target_user_id: str, target_email: str, role: str
+        self,
+        campaign_id: str,
+        target_user_id: str,
+        target_email: str,
+        role: str,
+        target_first_name: Optional[str] = None,
+        target_last_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Add a user as a member to a campaign.
         
@@ -2971,6 +3050,13 @@ class GraphService:
             query = """
             MERGE (u:User {id: $target_user_id})
             SET u.email = $target_email
+            SET u.first_name = coalesce($target_first_name, u.first_name)
+            SET u.last_name = coalesce($target_last_name, u.last_name)
+            SET u.display_name = CASE
+                WHEN trim(coalesce($target_first_name, "") + " " + coalesce($target_last_name, "")) <> ""
+                    THEN trim(coalesce($target_first_name, "") + " " + coalesce($target_last_name, ""))
+                ELSE u.display_name
+            END
             MATCH (c:Campaign {id: $campaign_id})
             OPTIONAL MATCH (u)-[existing:MEMBER_OF]->(c)
             WITH u, c, existing
@@ -2990,7 +3076,9 @@ class GraphService:
                 campaign_id=campaign_id,
                 target_user_id=target_user_id,
                 target_email=target_email,
-                role=role
+                role=role,
+                target_first_name=target_first_name,
+                target_last_name=target_last_name,
             )
             record = await result.single()
             if not record:
