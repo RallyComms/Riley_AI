@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional, Union
 from fastapi import APIRouter, HTTPException, Depends, Query, status
 from pydantic import BaseModel, Field
@@ -104,6 +105,30 @@ class DirectoryUserResult(BaseModel):
 
 class DirectoryUserSearchResponse(BaseModel):
     users: List[DirectoryUserResult]
+
+
+class CreateCampaignDeadlineRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=2000)
+    due_at: str = Field(..., description="ISO datetime")
+    visibility: Literal["team", "personal"] = "team"
+    assigned_user_id: Optional[str] = None
+
+
+class CampaignDeadlineItem(BaseModel):
+    id: str
+    campaign_id: str
+    created_by: str
+    title: str
+    description: Optional[str] = None
+    due_at: str
+    visibility: Literal["team", "personal"]
+    assigned_user_id: Optional[str] = None
+    created_at: Optional[str] = None
+
+
+class CampaignDeadlinesResponse(BaseModel):
+    deadlines: List[CampaignDeadlineItem]
 
 
 class TerminationResponse(BaseModel):
@@ -387,6 +412,80 @@ async def list_user_campaign_feed(
     events = await graph.list_user_campaign_feed_events(user_id=user_id, limit=limit)
     return UserCampaignFeedResponse(
         events=[UserCampaignFeedEventItem(**item) for item in events]
+    )
+
+
+@router.post("/campaigns/{tenant_id}/deadlines", response_model=CampaignDeadlineItem)
+async def create_campaign_deadline(
+    tenant_id: str,
+    request: CreateCampaignDeadlineRequest,
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> CampaignDeadlineItem:
+    """Create a manual campaign deadline (team or personal)."""
+    user_id = current_user.get("id", "unknown")
+    try:
+        due_at_value = request.due_at.strip()
+        parsed = datetime.fromisoformat(due_at_value.replace("Z", "+00:00"))
+        due_at_iso = parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid due_at datetime: {exc}",
+        ) from exc
+
+    try:
+        created = await graph.create_campaign_deadline(
+            campaign_id=tenant_id,
+            created_by=user_id,
+            title=request.title,
+            description=request.description,
+            due_at=due_at_iso,
+            visibility=request.visibility,
+            assigned_user_id=request.assigned_user_id,
+        )
+        campaign_name = tenant_id
+        try:
+            campaigns = await graph.get_user_campaigns(user_id)
+            for camp in campaigns:
+                if camp.get("id") == tenant_id:
+                    campaign_name = camp.get("name") or tenant_id
+                    break
+        except Exception:
+            pass
+        await graph.create_campaign_event(
+            campaign_id=tenant_id,
+            event_type="deadline_created",
+            message=f"Deadline created: {created.get('title')} ({campaign_name})",
+            user_id=created.get("assigned_user_id") if created.get("visibility") == "personal" else None,
+            actor_user_id=user_id,
+        )
+        return CampaignDeadlineItem(**created)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.get("/campaigns/{tenant_id}/deadlines", response_model=CampaignDeadlinesResponse)
+async def list_campaign_deadlines(
+    tenant_id: str,
+    include_past: bool = Query(False, description="Include past deadlines"),
+    limit: int = Query(100, ge=1, le=300),
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> CampaignDeadlinesResponse:
+    """List visible deadlines for a campaign, nearest due first."""
+    user_id = current_user.get("id", "unknown")
+    deadlines = await graph.list_campaign_deadlines(
+        campaign_id=tenant_id,
+        viewer_user_id=user_id,
+        limit=limit,
+        include_past=include_past,
+    )
+    return CampaignDeadlinesResponse(
+        deadlines=[CampaignDeadlineItem(**item) for item in deadlines]
     )
 
 

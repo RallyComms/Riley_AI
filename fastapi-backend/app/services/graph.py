@@ -1890,6 +1890,7 @@ class GraphService:
                     "document_assigned",
                     "document_moved_needs_review",
                     "document_moved_in_review",
+                    "deadline_created",
                     "deadline_upcoming"
                 ]
                 OR (
@@ -1967,6 +1968,145 @@ class GraphService:
                 actor_user_id=actor_user_id,
                 request_id=request_id,
             )
+
+    async def create_campaign_deadline(
+        self,
+        *,
+        campaign_id: str,
+        created_by: str,
+        title: str,
+        description: Optional[str],
+        due_at: str,
+        visibility: str,
+        assigned_user_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a campaign deadline with team/personal visibility."""
+        normalized_title = (title or "").strip()
+        if not normalized_title:
+            raise ValueError("title is required")
+        normalized_visibility = (visibility or "").strip().lower()
+        if normalized_visibility not in {"team", "personal"}:
+            raise ValueError("visibility must be 'team' or 'personal'")
+        normalized_description = description.strip() if isinstance(description, str) else None
+        if normalized_description == "":
+            normalized_description = None
+
+        effective_assigned_user_id: Optional[str] = None
+        if normalized_visibility == "personal":
+            effective_assigned_user_id = (assigned_user_id or "").strip() or created_by
+            is_member = await self.check_membership(effective_assigned_user_id, campaign_id)
+            if not is_member:
+                raise ValueError("assigned_user_id must be a campaign member")
+
+        deadline_id = str(uuid.uuid4())
+        async with self._driver.session() as session:
+            query = """
+            MATCH (c:Campaign {id: $campaign_id})
+            CREATE (d:CampaignDeadline {
+                id: $deadline_id,
+                campaign_id: $campaign_id,
+                created_by: $created_by,
+                title: $title,
+                description: $description,
+                due_at: datetime($due_at),
+                visibility: $visibility,
+                assigned_user_id: $assigned_user_id,
+                created_at: datetime()
+            })
+            RETURN
+                d.id as id,
+                d.campaign_id as campaign_id,
+                d.created_by as created_by,
+                d.title as title,
+                d.description as description,
+                toString(d.due_at) as due_at,
+                d.visibility as visibility,
+                d.assigned_user_id as assigned_user_id,
+                toString(d.created_at) as created_at
+            """
+            result = await session.run(
+                query,
+                deadline_id=deadline_id,
+                campaign_id=campaign_id,
+                created_by=created_by,
+                title=normalized_title,
+                description=normalized_description,
+                due_at=due_at,
+                visibility=normalized_visibility,
+                assigned_user_id=effective_assigned_user_id,
+            )
+            record = await result.single()
+            if not record:
+                raise ValueError(f"Campaign {campaign_id} not found")
+            return {
+                "id": record.get("id"),
+                "campaign_id": record.get("campaign_id"),
+                "created_by": record.get("created_by"),
+                "title": record.get("title"),
+                "description": record.get("description"),
+                "due_at": record.get("due_at"),
+                "visibility": record.get("visibility"),
+                "assigned_user_id": record.get("assigned_user_id"),
+                "created_at": record.get("created_at"),
+            }
+
+    async def list_campaign_deadlines(
+        self,
+        *,
+        campaign_id: str,
+        viewer_user_id: str,
+        limit: int = 100,
+        include_past: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """List campaign deadlines visible to a specific user."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (d:CampaignDeadline {campaign_id: $campaign_id})
+            WHERE
+                (
+                    d.visibility = "team"
+                    OR (
+                        d.visibility = "personal"
+                        AND coalesce(d.assigned_user_id, d.created_by) = $viewer_user_id
+                    )
+                )
+                AND ($include_past OR d.due_at >= datetime())
+            RETURN
+                d.id as id,
+                d.campaign_id as campaign_id,
+                d.created_by as created_by,
+                d.title as title,
+                d.description as description,
+                toString(d.due_at) as due_at,
+                d.visibility as visibility,
+                d.assigned_user_id as assigned_user_id,
+                toString(d.created_at) as created_at
+            ORDER BY d.due_at ASC
+            LIMIT $limit
+            """
+            result = await session.run(
+                query,
+                campaign_id=campaign_id,
+                viewer_user_id=viewer_user_id,
+                include_past=include_past,
+                limit=limit,
+            )
+            items: List[Dict[str, Any]] = []
+            async for record in result:
+                items.append(
+                    {
+                        "id": record.get("id"),
+                        "campaign_id": record.get("campaign_id"),
+                        "created_by": record.get("created_by"),
+                        "title": record.get("title"),
+                        "description": record.get("description"),
+                        "due_at": record.get("due_at"),
+                        "visibility": record.get("visibility"),
+                        "assigned_user_id": record.get("assigned_user_id"),
+                        "created_at": record.get("created_at"),
+                    }
+                )
+            return items
 
     async def check_membership(self, user_id: str, tenant_id: str) -> bool:
         """Check if a user is a member of a campaign (tenant).

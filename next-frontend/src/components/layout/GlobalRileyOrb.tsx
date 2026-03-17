@@ -115,7 +115,7 @@ export function GlobalRileyOrb() {
         critical: true,
       };
     }
-    if (eventType === "deadline_upcoming") {
+    if (eventType === "deadline_created" || eventType === "deadline_upcoming") {
       return {
         icon: <Calendar className="h-4 w-4" />,
         iconClass: "bg-blue-500/20 text-blue-400",
