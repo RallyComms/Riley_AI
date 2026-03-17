@@ -1849,15 +1849,23 @@ class GraphService:
         async with self._driver.session() as session:
             query = """
             MATCH (e:CampaignEvent {campaign_id: $campaign_id})
-            OPTIONAL MATCH (ar:CampaignAccessRequest {id: e.request_id, campaign_id: $campaign_id})
-            OPTIONAL MATCH (viewer:User {id: $viewer_user_id})-[dismissed:DISMISSED_FEED_EVENT]->(e)
             WHERE
-                ($viewer_user_id IS NULL OR dismissed IS NULL)
+                (
+                    $viewer_user_id IS NULL
+                    OR NOT EXISTS {
+                        MATCH (:User {id: $viewer_user_id})-[:DISMISSED_FEED_EVENT]->(e)
+                    }
+                )
                 AND (
                     e.type <> "access_request_created"
                     OR (
-                        ar IS NOT NULL
-                        AND ar.status = "pending"
+                        EXISTS {
+                            MATCH (ar:CampaignAccessRequest {
+                                id: e.request_id,
+                                campaign_id: $campaign_id
+                            })
+                            WHERE ar.status = "pending"
+                        }
                     )
                 )
             RETURN
@@ -1901,18 +1909,26 @@ class GraphService:
         """List cross-campaign feed events relevant to a user."""
         async with self._driver.session() as session:
             query = """
-            MATCH (me:User {id: $user_id})-[membership:MEMBER_OF]->(c:Campaign)
+            MATCH (c:Campaign)
+            WHERE EXISTS {
+                MATCH (:User {id: $user_id})-[:MEMBER_OF]->(c)
+            }
             MATCH (e:CampaignEvent {campaign_id: c.id})
-            OPTIONAL MATCH (ar:CampaignAccessRequest {id: e.request_id, campaign_id: c.id})
-            OPTIONAL MATCH (me)-[dismissed:DISMISSED_FEED_EVENT]->(e)
             WHERE
-                dismissed IS NULL
+                NOT EXISTS {
+                    MATCH (:User {id: $user_id})-[:DISMISSED_FEED_EVENT]->(e)
+                }
                 AND
                 (
                     e.type <> "access_request_created"
                     OR (
-                        ar IS NOT NULL
-                        AND ar.status = "pending"
+                        EXISTS {
+                            MATCH (ar:CampaignAccessRequest {
+                                id: e.request_id,
+                                campaign_id: c.id
+                            })
+                            WHERE ar.status = "pending"
+                        }
                     )
                 )
                 AND
@@ -1928,7 +1944,10 @@ class GraphService:
                     "deadline_upcoming"
                 ]
                 OR (
-                    membership.role = "Lead"
+                    EXISTS {
+                        MATCH (:User {id: $user_id})-[m:MEMBER_OF]->(c)
+                        WHERE m.role = "Lead"
+                    }
                     AND e.type IN [
                         "access_request_created",
                         "access_request_approved",
@@ -1945,7 +1964,13 @@ class GraphService:
                 e.request_id as request_id,
                 e.campaign_id as campaign_id,
                 c.name as campaign_name,
-                membership.role as member_role,
+                CASE
+                    WHEN EXISTS {
+                        MATCH (:User {id: $user_id})-[m:MEMBER_OF]->(c)
+                        WHERE m.role = "Lead"
+                    } THEN "Lead"
+                    ELSE "Member"
+                END as member_role,
                 toString(e.created_at) as created_at
             ORDER BY e.created_at DESC
             LIMIT $limit
@@ -2907,8 +2932,39 @@ class GraphService:
                         "status_updated_at": record.get("status_updated_at"),
                     }
                 )
+            # Defensive dedupe by user_id. Legacy duplicate User nodes can exist.
+            # Prefer richer identity rows over fallback "Unknown User" rows.
+            by_user_id: Dict[str, Dict[str, Any]] = {}
+            for member in members:
+                user_id = str(member.get("user_id") or "")
+                if not user_id:
+                    continue
+                existing = by_user_id.get(user_id)
+                if existing is None:
+                    by_user_id[user_id] = member
+                    continue
+                existing_name = str(existing.get("display_name") or "").strip()
+                candidate_name = str(member.get("display_name") or "").strip()
+                existing_score = 0
+                candidate_score = 0
+                if existing_name and existing_name != "Unknown User":
+                    existing_score += 3
+                if candidate_name and candidate_name != "Unknown User":
+                    candidate_score += 3
+                if existing.get("avatar_url"):
+                    existing_score += 1
+                if member.get("avatar_url"):
+                    candidate_score += 1
+                if existing.get("role") == "Lead":
+                    existing_score += 1
+                if member.get("role") == "Lead":
+                    candidate_score += 1
+                if candidate_score > existing_score:
+                    by_user_id[user_id] = member
 
-            return members
+            deduped = list(by_user_id.values())
+            deduped.sort(key=lambda item: str(item.get("display_name") or "Unknown User").lower())
+            return deduped
 
     async def get_user_status(self, user_id: str) -> Dict[str, Any]:
         """Get global manual status for a user."""
