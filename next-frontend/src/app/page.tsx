@@ -17,6 +17,8 @@ interface BackendCampaign {
   description: string | null;
   role?: "Lead" | "Member";
   access: "member" | "requestable";
+  status?: "active" | "archived";
+  archived_at?: string | null;
   created_at?: string | null;
   owner_id?: string | null;
   owner_name?: string | null;
@@ -114,6 +116,9 @@ export default function Dashboard() {
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isDirectoryOpen, setIsDirectoryOpen] = useState(false);
   const [terminatingCampaignId, setTerminatingCampaignId] = useState<string | null>(null);
+  const [archiveTarget, setArchiveTarget] = useState<{ id: string; name: string } | null>(null);
+  const [isArchiving, setIsArchiving] = useState(false);
+  const [campaignsVersion, setCampaignsVersion] = useState(0);
 
   // Fetch campaigns from API
   useEffect(() => {
@@ -245,9 +250,55 @@ export default function Dashboard() {
   };
 
   const handleArchive = (campaignId: string) => {
-    // Archive functionality removed - campaigns are managed by backend
-    console.log("Archive not implemented - campaigns are managed by backend");
+    console.log("archive_parent_handler_called", { campaignId });
+    const campaign = directoryCampaigns.find((c) => c.campaignId === campaignId);
+    console.log("archive_modal_state_set", { campaignId });
+    setArchiveTarget({
+      id: campaignId,
+      name: campaign?.name || "this campaign",
+    });
   };
+
+  const handleConfirmArchive = async () => {
+    if (!archiveTarget) return;
+    console.log("archive_confirm_clicked", { campaignId: archiveTarget.id });
+    setIsArchiving(true);
+    try {
+      const token = await getToken();
+      if (!token) {
+        throw new Error("No authentication token available");
+      }
+      const response = await apiFetch(`/api/v1/campaigns/${encodeURIComponent(archiveTarget.id)}/archive`, {
+        token,
+        method: "PATCH",
+      });
+      console.log("archive_confirm_patch_result", {
+        campaignId: archiveTarget.id,
+        ok: true,
+        response,
+      });
+      setCampaigns((prev) => prev.filter((c) => c.campaignId !== archiveTarget.id));
+      setDirectoryCampaigns((prev) => prev.filter((c) => c.campaignId !== archiveTarget.id));
+      setCampaignsVersion((prev) => prev + 1);
+      setArchiveTarget(null);
+    } catch (err) {
+      console.log("archive_confirm_patch_result", {
+        campaignId: archiveTarget.id,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      console.error("Archive campaign error:", err);
+      alert(`Failed to archive campaign: ${err instanceof Error ? err.message : "Unknown error"}`);
+    } finally {
+      setIsArchiving(false);
+    }
+  };
+
+  useEffect(() => {
+    if (archiveTarget) {
+      console.log("archive_modal_rendered", { campaignId: archiveTarget.id });
+    }
+  }, [archiveTarget]);
 
   const handleRestore = (campaignId: string) => {
     // Restore functionality removed - campaigns are managed by backend
@@ -399,10 +450,48 @@ export default function Dashboard() {
         archivedCampaigns={[]}
         onEnterCampaign={handleEnterCampaign}
         onRequestAccess={handleRequestAccess}
+        onArchive={handleArchive}
         onRestore={handleRestore}
         onTerminate={handleTerminate}
         terminatingCampaignId={terminatingCampaignId}
+        campaignsVersion={campaignsVersion}
       />
+
+      {archiveTarget && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <button
+            type="button"
+            aria-label="Close archive confirmation"
+            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+            onClick={() => (isArchiving ? undefined : setArchiveTarget(null))}
+          />
+          <div className="relative z-10 w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-900 p-6 shadow-2xl">
+            <h2 className="text-lg font-semibold text-zinc-100">Archive Campaign</h2>
+            <p className="mt-2 text-sm text-zinc-300">
+              Are you sure you want to archive this campaign?
+            </p>
+            <p className="mt-1 text-xs text-zinc-500">{archiveTarget.name}</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setArchiveTarget(null)}
+                disabled={isArchiving}
+                className="rounded-md border border-zinc-700 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmArchive}
+                disabled={isArchiving}
+                className="rounded-md bg-amber-400 px-3 py-1.5 text-sm font-semibold text-zinc-900 hover:bg-amber-500 disabled:opacity-60"
+              >
+                {isArchiving ? "Archiving..." : "Archive"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

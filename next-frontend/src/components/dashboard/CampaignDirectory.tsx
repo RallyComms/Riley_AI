@@ -19,6 +19,8 @@ interface BackendCampaign {
   description: string | null;
   role?: "Lead" | "Member";
   access: "member" | "requestable";
+  status?: "active" | "archived";
+  archived_at?: string | null;
   created_at?: string | null;
   owner_id?: string | null;
   owner_name?: string | null;
@@ -86,9 +88,11 @@ interface CampaignDirectoryProps {
   archivedCampaigns?: UserCampaign[];
   onEnterCampaign?: (campaignId: string) => void;
   onRequestAccess?: (campaignId: string, message?: string) => Promise<void>;
+  onArchive?: (campaignId: string) => void;
   onRestore?: (campaignId: string) => void;
   onTerminate?: (campaignId: string) => Promise<void>;
   terminatingCampaignId?: string | null;
+  campaignsVersion?: number;
   onViewDocument?: (file: Asset) => void;
 }
 
@@ -99,9 +103,11 @@ export function CampaignDirectory({
   archivedCampaigns = [],
   onEnterCampaign,
   onRequestAccess,
+  onArchive,
   onRestore,
   onTerminate,
   terminatingCampaignId = null,
+  campaignsVersion = 0,
   onViewDocument,
 }: CampaignDirectoryProps) {
   const { user } = useUser();
@@ -141,10 +147,14 @@ export function CampaignDirectory({
           throw new Error("No authentication token available");
         }
 
-        const data: CampaignsResponse = await apiFetch(`/api/v1/campaigns?scope=${campaignScope}`, {
+        const effectiveStatus = activeTab === "archive" ? "archived" : "active";
+        const data: CampaignsResponse = await apiFetch(
+          `/api/v1/campaigns?scope=${campaignScope}&status=${effectiveStatus}`,
+          {
           token,
           method: "GET",
-        });
+          }
+        );
         
         const mappedCampaigns = data.campaigns.map((campaign, index) =>
           mapBackendToFrontend(campaign, index)
@@ -163,7 +173,7 @@ export function CampaignDirectory({
     }
 
     fetchCampaigns();
-  }, [isOpen, isLoaded, user?.id, getToken, campaignScope]);
+  }, [isOpen, isLoaded, user?.id, getToken, campaignScope, activeTab, campaignsVersion]);
 
   // Filter campaigns by search query
   const filteredCampaigns = useMemo(() => {
@@ -188,6 +198,13 @@ export function CampaignDirectory({
     await onRequestAccess(requestingCampaign.campaignId, message);
     setRequestedCampaignIds((prev) => new Set(prev).add(requestingCampaign.campaignId));
     setRequestingCampaign(null);
+  };
+
+  const handleArchiveCampaign = (campaignId: string) => {
+    console.log("archive_parent_handler_called", { campaignId, source: "CampaignDirectory" });
+    if (onArchive) {
+      onArchive(campaignId);
+    }
   };
 
   if (!isOpen) return null;
@@ -228,7 +245,7 @@ export function CampaignDirectory({
                       ? "Error loading campaigns"
                       : `${filteredCampaigns.length} campaign${filteredCampaigns.length !== 1 ? "s" : ""} available`
                     : activeTab === "archive"
-                    ? `${archivedCampaigns.length} archived campaign${archivedCampaigns.length !== 1 ? "s" : ""}`
+                    ? `${filteredCampaigns.length} archived campaign${filteredCampaigns.length !== 1 ? "s" : ""}`
                     : "Global firm archive"}
                 </p>
               </div>
@@ -377,7 +394,7 @@ export function CampaignDirectory({
                               ? () => handleEnterCampaign(campaign.campaignId)
                               : () => {}
                           }
-                          onArchive={undefined}
+                          onArchive={campaign.access === "member" ? handleArchiveCampaign : undefined}
                           onRestore={undefined}
                           onTerminate={onTerminate}
                           isTerminating={terminatingCampaignId === campaign.campaignId}
@@ -421,7 +438,7 @@ export function CampaignDirectory({
 
               {/* Archived Campaigns Grid */}
               <div className="flex-1 overflow-y-auto p-6">
-                {archivedCampaigns.length === 0 ? (
+                {filteredCampaigns.length === 0 ? (
                   <div className="flex flex-col items-center justify-center py-12 text-center">
                     <p className="text-sm text-zinc-400">
                       {searchQuery ? "No archived campaigns match your search." : "No archived campaigns."}
@@ -429,12 +446,7 @@ export function CampaignDirectory({
                   </div>
                 ) : (
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                    {archivedCampaigns
-                      .filter((campaign) =>
-                        campaign.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                        campaign.role.toLowerCase().includes(searchQuery.toLowerCase())
-                      )
-                      .map((campaign) => (
+                    {filteredCampaigns.map((campaign) => (
                         <CampaignBucketCard
                           key={campaign.campaignId}
                           name={campaign.name}

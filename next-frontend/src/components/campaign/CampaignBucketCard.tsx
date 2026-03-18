@@ -129,6 +129,12 @@ export function CampaignBucketCard({
   const handleArchiveClick = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    console.log("archive_button_clicked", { campaignId: campaignId ?? null });
+    console.log("archive_onArchive_invoking", {
+      campaignId: campaignId ?? null,
+      hasOnArchive: typeof onArchive === "function",
+      onArchiveType: typeof onArchive,
+    });
     if (onArchive && campaignId) {
       onArchive(campaignId);
     }
@@ -240,10 +246,6 @@ export function CampaignBucketCard({
             <button
               type="button"
               data-card-action="true"
-              onMouseDown={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-              }}
               onClick={handleArchiveClick}
               className={cn(
                 "relative z-20 inline-flex items-center gap-1.5 rounded-full px-2 py-1 transition-all duration-200 pointer-events-auto",
