@@ -2,8 +2,7 @@
 
 import type { CSSProperties } from "react";
 import { useState, useRef, useEffect } from "react";
-import Link from "next/link";
-import { Bell, Shield, Trash2, Archive, RotateCcw } from "lucide-react";
+import { Shield, Trash2, Archive, RotateCcw } from "lucide-react";
 import { motion } from "framer-motion";
 import { cn } from "@app/lib/utils";
 import { useTheme } from "next-themes";
@@ -112,8 +111,6 @@ export function CampaignBucketCard({
     setMounted(true);
   }, []);
 
-  const href = campaignId ? `/campaign/${campaignId}` : "/campaign/clean-water";
-
   const handleDeleteClick = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
@@ -160,9 +157,13 @@ export function CampaignBucketCard({
     }
   };
 
-  const handleEnterClick = (e: React.MouseEvent) => {
+  const handleEnterClick = () => {
     if (onClick) {
       onClick();
+      return;
+    }
+    if (campaignId) {
+      window.location.href = `/campaign/${campaignId}`;
     }
   };
 
@@ -377,21 +378,20 @@ export function CampaignBucketCard({
     </motion.div>
   );
 
-  if (onClick) {
-    return (
-      <button type="button" onClick={handleEnterClick} className="block w-full text-left">
-        {cardContent}
-      </button>
-    );
-  }
-
   return (
-    <Link 
-      href={href} 
-      className="block w-full"
+    <div
+      className={cn("block w-full", (onClick || campaignId) && "cursor-pointer")}
       onClick={handleEnterClick}
+      role={onClick || campaignId ? "button" : undefined}
+      tabIndex={onClick || campaignId ? 0 : -1}
+      onKeyDown={(event) => {
+        if ((event.key === "Enter" || event.key === " ") && (onClick || campaignId)) {
+          event.preventDefault();
+          handleEnterClick();
+        }
+      }}
     >
       {cardContent}
-    </Link>
+    </div>
   );
 }
