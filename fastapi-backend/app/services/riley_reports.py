@@ -658,6 +658,107 @@ def _split_report_sections(report_body: str) -> Dict[str, str]:
     return sections
 
 
+def _strip_markdown_prefix_markers(text: str) -> str:
+    value = str(text or "").strip()
+    value = re.sub(r"^\s{0,3}#{1,6}\s*", "", value)
+    value = re.sub(r"^\s*[-*+]\s+", "", value)
+    value = re.sub(r"^\s*\d+[.)]\s+", "", value)
+    return value.strip()
+
+
+def _add_inline_markdown_runs(paragraph: Any, text: str) -> None:
+    value = str(text or "")
+    if not value:
+        return
+    # Normalize links/code to readable text first.
+    value = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", value)
+    value = re.sub(r"`([^`]+)`", r"\1", value)
+
+    token_pattern = re.compile(
+        r"(\*\*\*[^*]+\*\*\*|\*\*[^*]+\*\*|__[^_]+__|\*[^*\n]+\*|_[^_\n]+_)"
+    )
+    parts = token_pattern.split(value)
+    for part in parts:
+        if not part:
+            continue
+        bold = False
+        italic = False
+        content = part
+        if part.startswith("***") and part.endswith("***") and len(part) > 6:
+            content = part[3:-3]
+            bold = True
+            italic = True
+        elif part.startswith("**") and part.endswith("**") and len(part) > 4:
+            content = part[2:-2]
+            bold = True
+        elif part.startswith("__") and part.endswith("__") and len(part) > 4:
+            content = part[2:-2]
+            bold = True
+        elif part.startswith("*") and part.endswith("*") and len(part) > 2:
+            content = part[1:-1]
+            italic = True
+        elif part.startswith("_") and part.endswith("_") and len(part) > 2:
+            content = part[1:-1]
+            italic = True
+        run = paragraph.add_run(content)
+        if bold:
+            run.bold = True
+        if italic:
+            run.italic = True
+
+
+def _add_markdownish_paragraph(document: Any, text: str, *, style: Optional[str] = None) -> None:
+    paragraph = document.add_paragraph(style=style) if style else document.add_paragraph()
+    _add_inline_markdown_runs(paragraph, _strip_markdown_prefix_markers(text))
+
+
+def _render_markdownish_block(document: Any, text: str, *, default_heading_level: int = 2) -> None:
+    raw = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not raw.strip():
+        return
+
+    lines = raw.split("\n")
+    paragraph_buffer: List[str] = []
+
+    def flush_paragraph() -> None:
+        if not paragraph_buffer:
+            return
+        merged = " ".join(line.strip() for line in paragraph_buffer if line.strip()).strip()
+        paragraph_buffer.clear()
+        if merged:
+            _add_markdownish_paragraph(document, merged)
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            flush_paragraph()
+            continue
+
+        heading_match = re.match(r"^\s{0,3}(#{1,6})\s+(.+)$", line)
+        if heading_match:
+            flush_paragraph()
+            level = min(4, max(1, default_heading_level - 1 + len(heading_match.group(1))))
+            heading_text = _strip_markdown_prefix_markers(heading_match.group(2))
+            document.add_heading(heading_text, level=level)
+            continue
+
+        bullet_match = re.match(r"^\s*[-*+]\s+(.+)$", line)
+        if bullet_match:
+            flush_paragraph()
+            _add_markdownish_paragraph(document, bullet_match.group(1), style="List Bullet")
+            continue
+
+        numbered_match = re.match(r"^\s*\d+[.)]\s+(.+)$", line)
+        if numbered_match:
+            flush_paragraph()
+            _add_markdownish_paragraph(document, numbered_match.group(1), style="List Number")
+            continue
+
+        paragraph_buffer.append(line)
+
+    flush_paragraph()
+
+
 def _build_sources_appendix(
     private_results: List[Dict[str, Any]],
     global_results: List[Dict[str, Any]],
@@ -695,7 +796,9 @@ def _generate_docx_bytes(
         raise RuntimeError("python-docx is not installed") from exc
 
     sections = _split_report_sections(report_body)
-    effective_title = (sections.get("title") or title or "Riley Strategy Report").strip()
+    effective_title = _strip_markdown_prefix_markers(
+        sections.get("title") or title or "Riley Strategy Report"
+    ) or "Riley Strategy Report"
     document = Document()
     document.add_heading(effective_title, level=0)
     document.add_paragraph(f"Generated: {generated_at_iso}")
@@ -705,24 +808,36 @@ def _generate_docx_bytes(
     document.add_paragraph(f"Created By User: {user_id}")
 
     document.add_heading("User Request", level=1)
-    document.add_paragraph(query_text.strip() or "[No request provided]")
+    _render_markdownish_block(document, query_text.strip() or "[No request provided]", default_heading_level=2)
 
     document.add_heading("Executive Summary", level=1)
-    document.add_paragraph(sections.get("executive_summary") or report_body)
+    _render_markdownish_block(document, sections.get("executive_summary") or report_body, default_heading_level=2)
 
     document.add_heading("Evidence from Sources", level=1)
-    document.add_paragraph(sections.get("evidence_from_sources") or "No explicit evidence section was generated.")
+    _render_markdownish_block(
+        document,
+        sections.get("evidence_from_sources") or "No explicit evidence section was generated.",
+        default_heading_level=2,
+    )
 
     document.add_heading("Strategic Analysis", level=1)
-    document.add_paragraph(sections.get("strategic_analysis") or "No explicit strategic analysis section was generated.")
+    _render_markdownish_block(
+        document,
+        sections.get("strategic_analysis") or "No explicit strategic analysis section was generated.",
+        default_heading_level=2,
+    )
 
     document.add_heading("Recommendation", level=1)
-    document.add_paragraph(sections.get("recommendation") or "No explicit recommendation section was generated.")
+    _render_markdownish_block(
+        document,
+        sections.get("recommendation") or "No explicit recommendation section was generated.",
+        default_heading_level=2,
+    )
 
     clarifying_questions = (sections.get("clarifying_questions") or "").strip()
     if clarifying_questions:
         document.add_heading("Clarifying Questions", level=1)
-        document.add_paragraph(clarifying_questions)
+        _render_markdownish_block(document, clarifying_questions, default_heading_level=2)
 
     if sources_appendix:
         document.add_heading("Sources / Appendix", level=1)
