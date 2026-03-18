@@ -1639,8 +1639,10 @@ async def rename_riley_conversation(
 @router.get("/chat/history/{session_id}", response_model=List[MessageSchema])
 async def get_chat_session_history(
     session_id: str,
+    http_request: Request,
     tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
-    graph: GraphService = Depends(get_graph)
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
 ) -> List[MessageSchema]:
     """Retrieve chat history for a specific session.
     
@@ -1648,8 +1650,8 @@ async def get_chat_session_history(
     Only returns messages for the specified tenant and user.
     """
     try:
-        # Extract user_id from session_id (format: session_{tenantId}_{userId}_{timestamp})
-        user_id = _extract_user_id_from_session(session_id)
+        user_id = current_user.get("id", "unknown")
+        await check_tenant_membership(user_id, tenant_id, http_request)
         history = await graph.get_chat_history(
             session_id=session_id,
             tenant_id=tenant_id,
@@ -1666,8 +1668,10 @@ async def get_chat_session_history(
 @router.delete("/chat/history/{session_id}")
 async def clear_chat_history(
     session_id: str,
+    http_request: Request,
     tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
-    graph: GraphService = Depends(get_graph)
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
 ) -> Dict[str, str]:
     """Clear chat history for a session.
     
@@ -1678,8 +1682,8 @@ async def clear_chat_history(
     Only deletes sessions for the specified tenant and user.
     """
     try:
-        # Extract user_id from session_id (format: session_{tenantId}_{userId}_{timestamp})
-        user_id = _extract_user_id_from_session(session_id)
+        user_id = current_user.get("id", "unknown")
+        await check_tenant_membership(user_id, tenant_id, http_request)
         await graph.clear_chat_history(
             session_id=session_id,
             tenant_id=tenant_id,
@@ -1699,9 +1703,11 @@ async def clear_chat_history(
 @router.patch("/sessions/{session_id}")
 async def rename_session(
     session_id: str,
+    http_request: Request,
     tenant_id: str = Query(..., description="Tenant/client identifier for scope isolation"),
     request: RenameRequest = ...,
-    graph: GraphService = Depends(get_graph)
+    current_user: Dict = Depends(verify_clerk_token),
+    graph: GraphService = Depends(get_graph),
 ) -> Dict[str, str]:
     """Rename a chat session.
     
@@ -1719,8 +1725,8 @@ async def rename_session(
         Dictionary with status and updated title
     """
     try:
-        # Extract user_id from session_id (format: session_{tenantId}_{userId}_{timestamp})
-        user_id = _extract_user_id_from_session(session_id)
+        user_id = current_user.get("id", "unknown")
+        await check_tenant_membership(user_id, tenant_id, http_request)
         updated_title = await graph.update_session_title(
             session_id=session_id,
             tenant_id=tenant_id,

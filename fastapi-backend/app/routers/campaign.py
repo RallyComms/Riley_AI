@@ -26,12 +26,21 @@ class CampaignResponse(BaseModel):
     role: Optional[str] = None
     access: str = "member"
     created_at: Optional[str] = None
+    status: Literal["active", "archived"] = "active"
+    archived_at: Optional[str] = None
     owner_id: Optional[str] = None
     owner_name: Optional[str] = None
 
 
 class CampaignsListResponse(BaseModel):
     campaigns: List[CampaignResponse]
+
+
+class ArchiveCampaignResponse(BaseModel):
+    ok: bool
+    id: str
+    status: Literal["archived"]
+    archived_at: Optional[str] = None
 
 
 class CreateAccessRequest(BaseModel):
@@ -339,6 +348,7 @@ async def create_campaign(
 @router.get("/campaigns", response_model=CampaignsListResponse)
 async def get_campaigns(
     scope: str = Query("my", pattern="^(my|all)$", description="Visibility scope: my|all"),
+    status_filter: Literal["active", "archived"] = Query("active", alias="status"),
     current_user: Dict = Depends(verify_clerk_token),
     graph: GraphService = Depends(get_graph)
 ) -> CampaignsListResponse:
@@ -352,9 +362,9 @@ async def get_campaigns(
     
     try:
         if scope == "all":
-            campaigns = await graph.get_all_campaigns_with_access(user_id)
+            campaigns = await graph.get_all_campaigns_with_access(user_id, status_filter=status_filter)
         else:
-            campaigns = await graph.get_user_campaigns(user_id)
+            campaigns = await graph.get_user_campaigns(user_id, status_filter=status_filter)
         return CampaignsListResponse(
             campaigns=[CampaignResponse(**camp) for camp in campaigns]
         )
@@ -362,6 +372,34 @@ async def get_campaigns(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to retrieve campaigns: {exc}"
+        ) from exc
+
+
+@router.patch("/campaigns/{id}/archive", response_model=ArchiveCampaignResponse)
+async def archive_campaign(
+    id: str,
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> ArchiveCampaignResponse:
+    """Archive a campaign for all members (soft state change)."""
+    try:
+        await _require_lead_for_campaign(id, current_user, graph)
+        archived = await graph.archive_campaign(campaign_id=id)
+        return ArchiveCampaignResponse(
+            ok=True,
+            id=archived.get("id") or id,
+            status="archived",
+            archived_at=archived.get("archived_at"),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to archive campaign: {exc}",
         ) from exc
 
 
@@ -654,7 +692,8 @@ async def search_campaign_users(
 @router.delete("/campaign/{tenant_id}", response_model=TerminationResponse)
 async def terminate_campaign(
     tenant_id: str,
-    current_user: Dict = Depends(verify_tenant_access)
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
 ) -> TerminationResponse:
     """
     Permanently delete a campaign and ALL its associated data.
@@ -676,6 +715,7 @@ async def terminate_campaign(
             status_code=403,
             detail="Cannot terminate 'global' tenant. This is a protected system tenant."
         )
+    await _require_lead_for_campaign(tenant_id, current_user, graph)
     
     try:
         # Step 1: Get all file URLs from Qdrant before deletion

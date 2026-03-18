@@ -109,6 +109,46 @@ class DeleteResponse(BaseModel):
     message: str
 
 
+async def _get_file_point_for_tenant(
+    *,
+    file_id: str,
+    tenant_id: str,
+    collection_name: Optional[str] = None,
+) -> tuple[Any, Dict[str, Any], str]:
+    """Load a file point and enforce tenant/file ownership before action."""
+    settings = get_settings()
+    resolved_collection = collection_name or (
+        settings.QDRANT_COLLECTION_TIER_1 if tenant_id == "global" else settings.QDRANT_COLLECTION_TIER_2
+    )
+    points = await vector_service.client.retrieve(
+        collection_name=resolved_collection,
+        ids=[file_id],
+        with_payload=True,
+        with_vectors=False,
+    )
+    if not points:
+        raise HTTPException(status_code=404, detail=f"File {file_id} not found")
+
+    point = points[0]
+    payload = point.payload or {}
+
+    if tenant_id == "global":
+        if not bool(payload.get("is_global")):
+            raise HTTPException(
+                status_code=403,
+                detail="File is not in the global archive for this tenant scope.",
+            )
+    else:
+        payload_tenant_id = str(payload.get("client_id") or "").strip()
+        if payload_tenant_id != tenant_id:
+            raise HTTPException(
+                status_code=403,
+                detail="File does not belong to the provided campaign.",
+            )
+
+    return point, payload, resolved_collection
+
+
 class PreviewUrlResponse(BaseModel):
     file_id: str
     preview_url: str
@@ -300,16 +340,11 @@ async def get_file_preview_url(
     )
 
     try:
-        points = await vector_service.client.retrieve(
+        _, payload, _ = await _get_file_point_for_tenant(
+            file_id=file_id,
+            tenant_id=tenant_id,
             collection_name=collection_name,
-            ids=[file_id],
-            with_payload=True,
-            with_vectors=False,
         )
-        if not points:
-            raise HTTPException(status_code=404, detail=f"File {file_id} not found")
-
-        payload = points[0].payload or {}
         preview_type = str(payload.get("preview_type") or "").strip().lower()
         preview_status = str(payload.get("preview_status") or "").strip().lower()
         if preview_type != "pdf" or preview_status != "complete":
@@ -477,8 +512,16 @@ async def rename_file(
         tenant_filter = Filter(
             must=[
                 FieldCondition(
+                    key="record_type",
+                    match=MatchValue(value="file")
+                ),
+                FieldCondition(
                     key="filename",
                     match=MatchValue(value=request.old_name)
+                ),
+                FieldCondition(
+                    key="client_id",
+                    match=MatchValue(value=tenant_id)
                 )
             ]
         )
@@ -606,6 +649,7 @@ async def untag_file_endpoint(
     settings = get_settings()
     
     try:
+        await _get_file_point_for_tenant(file_id=file_id, tenant_id=tenant_id)
         if request.tag == "*" or request.tag.lower() == "all":
             # Clear all tags
             await untag_file(
@@ -651,6 +695,7 @@ async def update_tags_endpoint(
     settings = get_settings()
     
     try:
+        await _get_file_point_for_tenant(file_id=file_id, tenant_id=tenant_id)
         # Update tags in Qdrant
         await vector_service.client.set_payload(
             collection_name=settings.QDRANT_COLLECTION_TIER_2,
@@ -688,15 +733,11 @@ async def assign_file_endpoint(
     
     try:
         # Get current payload
-        points = await vector_service.client.retrieve(
+        _, current_payload, _ = await _get_file_point_for_tenant(
+            file_id=file_id,
+            tenant_id=tenant_id,
             collection_name=settings.QDRANT_COLLECTION_TIER_2,
-            ids=[file_id]
         )
-        
-        if not points:
-            raise HTTPException(status_code=404, detail=f"File {file_id} not found")
-        
-        current_payload = points[0].payload or {}
         
         # Update payload with assignee and status
         updated_payload = {
@@ -771,6 +812,11 @@ async def promote_to_archive(
     print(f"Promote to archive request: user_id={user_id}, file_id={file_id}")
     
     try:
+        await _get_file_point_for_tenant(
+            file_id=file_id,
+            tenant_id=tenant_id,
+            collection_name=settings.QDRANT_COLLECTION_TIER_2,
+        )
         await vector_service.promote_to_global(
             file_id=file_id,
             is_golden=request.is_golden
@@ -817,18 +863,11 @@ async def toggle_ai_enabled(
     
     try:
         # Verify file exists in Tier 2
-        points = await vector_service.client.retrieve(
+        await _get_file_point_for_tenant(
+            file_id=file_id,
+            tenant_id=tenant_id,
             collection_name=settings.QDRANT_COLLECTION_TIER_2,
-            ids=[file_id],
-            with_payload=True,
-            with_vectors=False,
         )
-        
-        if not points:
-            raise HTTPException(
-                status_code=404,
-                detail=f"File with ID {file_id} not found in Qdrant"
-            )
         
         # Update ai_enabled flag in Qdrant payload
         await vector_service.client.set_payload(
@@ -975,21 +1014,12 @@ async def request_ocr(
     
     try:
         # Retrieve the file point
-        points = await vector_service.client.retrieve(
+        _, payload, _ = await _get_file_point_for_tenant(
+            file_id=file_id,
+            tenant_id=tenant_id,
             collection_name=collection_name,
-            ids=[file_id],
-            with_payload=True,
-            with_vectors=False,
+            # collection is chosen by request param, still enforced against tenant ownership
         )
-        
-        if not points:
-            raise HTTPException(
-                status_code=404,
-                detail=f"File with ID {file_id} not found in collection {collection_name}"
-            )
-        
-        point = points[0]
-        payload = point.payload or {}
         filename = payload.get("filename", "unknown")
         
         # Check if file is an image
