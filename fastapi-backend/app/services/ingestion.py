@@ -2139,6 +2139,7 @@ async def process_upload(
         )
 
         preview_url: Optional[str] = None
+        preview_object_name: Optional[str] = None
         preview_type: Optional[str] = None
         preview_status: str = "not_requested"
         preview_error: Optional[str] = None
@@ -2152,13 +2153,8 @@ async def process_upload(
                     pdf_bytes,
                     content_type="application/pdf",
                 )
-                if settings.SIGN_PREVIEW_URLS:
-                    preview_url = await StorageService.generate_signed_url(
-                        preview_object_name,
-                        settings.PREVIEW_URL_TTL_SECONDS,
-                    )
-                else:
-                    preview_url = preview_public_url
+                # Persist a stable preview pointer. Signed URLs are minted on demand.
+                preview_url = preview_public_url
                 preview_type = "pdf"
                 preview_status = "complete"
             except HTTPException as exc:
@@ -2201,6 +2197,7 @@ async def process_upload(
             "chunk_profiles": {"micro": 0, "macro": 0},
             "bm25_enabled": False,
             "preview_url": preview_url,
+            "preview_object_name": preview_object_name,
             "preview_type": preview_type,
             "preview_status": preview_status,
             "preview_error": preview_error,

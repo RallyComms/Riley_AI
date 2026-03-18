@@ -109,6 +109,13 @@ class DeleteResponse(BaseModel):
     message: str
 
 
+class PreviewUrlResponse(BaseModel):
+    file_id: str
+    preview_url: str
+    preview_type: str = "pdf"
+    ttl_seconds: Optional[int] = None
+
+
 @router.get("/files/{tenant_id}", response_model=FilesResponse)
 async def get_tenant_files(
     tenant_id: str,
@@ -274,6 +281,76 @@ async def list_files(
         ) from exc
     
     return FileListResponse(files=files)
+
+
+@router.get("/files/{file_id}/preview-url", response_model=PreviewUrlResponse)
+async def get_file_preview_url(
+    file_id: str,
+    tenant_id: str = Query(..., description="Tenant/client ID that owns this file, or 'global'"),
+    current_user: Dict = Depends(verify_tenant_access),
+) -> PreviewUrlResponse:
+    """
+    Mint a fresh preview URL on demand for Office/HTML-generated PDF previews.
+
+    This avoids relying on persisted expiring signed URLs across sessions.
+    """
+    settings = get_settings()
+    collection_name = (
+        settings.QDRANT_COLLECTION_TIER_1 if tenant_id == "global" else settings.QDRANT_COLLECTION_TIER_2
+    )
+
+    try:
+        points = await vector_service.client.retrieve(
+            collection_name=collection_name,
+            ids=[file_id],
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points:
+            raise HTTPException(status_code=404, detail=f"File {file_id} not found")
+
+        payload = points[0].payload or {}
+        preview_type = str(payload.get("preview_type") or "").strip().lower()
+        preview_status = str(payload.get("preview_status") or "").strip().lower()
+        if preview_type != "pdf" or preview_status != "complete":
+            raise HTTPException(
+                status_code=404,
+                detail="Preview is not available for this file.",
+            )
+
+        preview_object_name = (
+            str(payload.get("preview_object_name") or "").strip()
+            or f"{settings.PREVIEW_BUCKET_PATH_PREFIX}/{file_id}.pdf"
+        )
+
+        ttl_seconds: Optional[int] = None
+        if settings.SIGN_PREVIEW_URLS:
+            # Keep signed previews usable for a normal review session.
+            ttl_seconds = max(int(settings.PREVIEW_URL_TTL_SECONDS), 7200)
+            preview_url = await StorageService.generate_signed_url(
+                preview_object_name,
+                ttl_seconds,
+            )
+        else:
+            preview_url = str(payload.get("preview_url") or "").strip()
+            if not preview_url:
+                preview_url = (
+                    f"https://storage.googleapis.com/{settings.GCS_BUCKET_NAME}/{preview_object_name}"
+                )
+
+        return PreviewUrlResponse(
+            file_id=file_id,
+            preview_url=preview_url,
+            preview_type="pdf",
+            ttl_seconds=ttl_seconds,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to mint preview URL: {exc}",
+        ) from exc
 
 
 @router.post("/upload", response_model=UploadResponse)

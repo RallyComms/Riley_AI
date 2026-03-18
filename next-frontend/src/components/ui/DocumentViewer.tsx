@@ -5,6 +5,9 @@ import { X, Send, FileText, FileType2, Table, Presentation, Image as ImageIcon, 
 import { cn } from "@app/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 import { Asset, KanbanCard } from "@app/lib/types";
+import { useAuth } from "@clerk/nextjs";
+import { usePathname } from "next/navigation";
+import { apiFetch } from "@app/lib/api";
 import DocViewer, { DocViewerRenderers } from "@cyntler/react-doc-viewer";
 import "@cyntler/react-doc-viewer/dist/index.css";
 
@@ -165,10 +168,16 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
   const [width, setWidth] = useState(800); // Default width for drawer
   const [isResizing, setIsResizing] = useState(false);
   const [zoom, setZoom] = useState(1); // Zoom level (0.5 to 3)
+  const [runtimePreviewUrl, setRuntimePreviewUrl] = useState<string | null>(
+    file.previewUrl ?? null
+  );
+  const [isRefreshingPreview, setIsRefreshingPreview] = useState(false);
   const commentsEndRef = useRef<HTMLDivElement>(null);
   const resizeRef = useRef<HTMLDivElement>(null);
   const { icon: FileIcon, color: iconColor } = getFileIcon(file.type);
   const statusBadge = getStatusBadge(file.status || "ready");
+  const { getToken, isLoaded } = useAuth();
+  const pathname = usePathname();
 
   const minWidth = 400;
   const maxWidth = 1200;
@@ -183,6 +192,63 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
       preview_error: file.previewError,
     });
   }, [file.id, file.previewStatus, file.previewUrl, file.previewType, file.previewError]);
+
+  useEffect(() => {
+    setRuntimePreviewUrl(file.previewUrl ?? null);
+  }, [file.id, file.previewUrl]);
+
+  const campaignIdFromPath = useMemo(() => {
+    const match = pathname?.match(/^\/campaign\/([^/]+)/);
+    return match?.[1] ?? null;
+  }, [pathname]);
+
+  useEffect(() => {
+    const shouldRefreshPreview =
+      file.previewType === "pdf" &&
+      file.previewStatus === "complete" &&
+      !!campaignIdFromPath;
+    if (!shouldRefreshPreview || !isLoaded) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const refreshPreviewUrl = async () => {
+      try {
+        setIsRefreshingPreview(true);
+        const token = await getToken();
+        if (!token || !campaignIdFromPath) return;
+        const data = await apiFetch<{ file_id: string; preview_url: string }>(
+          `/api/v1/files/${encodeURIComponent(file.id)}/preview-url?tenant_id=${encodeURIComponent(campaignIdFromPath)}`,
+          {
+            token,
+            method: "GET",
+          }
+        );
+        if (!cancelled && data?.preview_url) {
+          setRuntimePreviewUrl(data.preview_url);
+        }
+      } catch {
+        // Fall back to existing preview URL from payload.
+      } finally {
+        if (!cancelled) {
+          setIsRefreshingPreview(false);
+        }
+      }
+    };
+
+    void refreshPreviewUrl();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    file.id,
+    file.previewType,
+    file.previewStatus,
+    campaignIdFromPath,
+    getToken,
+    isLoaded,
+  ]);
 
   // Auto-scroll comments to bottom
   useEffect(() => {
@@ -240,8 +306,11 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
 
   // Decide which URL and type to use for rendering.
   const effectiveUrl = useMemo(() => {
-    return getRenderableUrl(file);
-  }, [file]);
+    return getRenderableUrl({
+      ...file,
+      previewUrl: runtimePreviewUrl,
+    });
+  }, [file, runtimePreviewUrl]);
 
   const effectiveType = useMemo<Asset["type"]>(() => {
     return getRenderableType(file);
@@ -441,6 +510,14 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
                     />
                   </div>
                 ) : !effectiveUrl ? (
+                  isRefreshingPreview ? (
+                    <div className="flex h-full items-center justify-center">
+                      <div className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/70 px-4 py-2 text-sm text-zinc-300">
+                        <Loader2 className="h-4 w-4 animate-spin text-amber-400" />
+                        Refreshing preview...
+                      </div>
+                    </div>
+                  ) : (
                   <div className="flex flex-col items-center justify-center h-full p-8 text-center bg-zinc-950">
                     <div className="max-w-md space-y-4">
                       <div className="rounded-full bg-zinc-800/50 p-4 inline-block">
@@ -472,6 +549,7 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
                       </div>
                     </div>
                   </div>
+                  )
                 ) : effectiveType === "pdf" ? (
                   <div className="w-full h-full">
                     <iframe
