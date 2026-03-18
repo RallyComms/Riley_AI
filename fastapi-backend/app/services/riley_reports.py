@@ -759,6 +759,32 @@ def _render_markdownish_block(document: Any, text: str, *, default_heading_level
     flush_paragraph()
 
 
+def _has_meaningful_content(text: str) -> bool:
+    normalized = _strip_markdown_prefix_markers(str(text or ""))
+    return bool(normalized.strip())
+
+
+def _strip_summary_memo_headers(report_body: str) -> str:
+    """Remove memo-style preface lines for summary report outputs."""
+    text = str(report_body or "").replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    filtered: List[str] = []
+    memo_header_pattern = re.compile(r"^\s*(from|to|subject|date)\s*:\s*.+$", flags=re.IGNORECASE)
+    # Only strip leading memo-header blocks before first content paragraph/heading.
+    stripping_phase = True
+    for line in lines:
+        if stripping_phase:
+            if not line.strip():
+                # Keep blank lines while still in preface region.
+                continue
+            if memo_header_pattern.match(line):
+                continue
+            stripping_phase = False
+        filtered.append(line)
+    cleaned = "\n".join(filtered).strip()
+    return cleaned or text.strip()
+
+
 def _build_sources_appendix(
     private_results: List[Dict[str, Any]],
     global_results: List[Dict[str, Any]],
@@ -795,44 +821,52 @@ def _generate_docx_bytes(
     except ImportError as exc:
         raise RuntimeError("python-docx is not installed") from exc
 
-    sections = _split_report_sections(report_body)
+    normalized_report_type = _normalize_report_type(report_type)
+    normalized_body = (
+        _strip_summary_memo_headers(report_body)
+        if normalized_report_type == "summary"
+        else (report_body or "")
+    )
+
+    sections = _split_report_sections(normalized_body)
     effective_title = _strip_markdown_prefix_markers(
         sections.get("title") or title or "Riley Strategy Report"
     ) or "Riley Strategy Report"
     document = Document()
     document.add_heading(effective_title, level=0)
-    document.add_paragraph(f"Generated: {generated_at_iso}")
-    document.add_paragraph(f"Tenant/Campaign Context: {tenant_id}")
-    document.add_paragraph(f"Report Job ID: {report_job_id}")
-    document.add_paragraph(f"Report Type: {report_type}")
-    document.add_paragraph(f"Created By User: {user_id}")
 
-    document.add_heading("User Request", level=1)
-    _render_markdownish_block(document, query_text.strip() or "[No request provided]", default_heading_level=2)
+    executive_summary = sections.get("executive_summary") or normalized_body
+    evidence_from_sources = sections.get("evidence_from_sources") or ""
+    strategic_analysis = sections.get("strategic_analysis") or ""
+    recommendation = sections.get("recommendation") or ""
 
-    document.add_heading("Executive Summary", level=1)
-    _render_markdownish_block(document, sections.get("executive_summary") or report_body, default_heading_level=2)
+    if _has_meaningful_content(executive_summary):
+        document.add_heading("Executive Summary", level=1)
+        _render_markdownish_block(document, executive_summary, default_heading_level=2)
 
-    document.add_heading("Evidence from Sources", level=1)
-    _render_markdownish_block(
-        document,
-        sections.get("evidence_from_sources") or "No explicit evidence section was generated.",
-        default_heading_level=2,
-    )
+    if _has_meaningful_content(evidence_from_sources):
+        document.add_heading("Evidence from Sources", level=1)
+        _render_markdownish_block(
+            document,
+            evidence_from_sources,
+            default_heading_level=2,
+        )
 
-    document.add_heading("Strategic Analysis", level=1)
-    _render_markdownish_block(
-        document,
-        sections.get("strategic_analysis") or "No explicit strategic analysis section was generated.",
-        default_heading_level=2,
-    )
+    if _has_meaningful_content(strategic_analysis):
+        document.add_heading("Strategic Analysis", level=1)
+        _render_markdownish_block(
+            document,
+            strategic_analysis,
+            default_heading_level=2,
+        )
 
-    document.add_heading("Recommendation", level=1)
-    _render_markdownish_block(
-        document,
-        sections.get("recommendation") or "No explicit recommendation section was generated.",
-        default_heading_level=2,
-    )
+    if _has_meaningful_content(recommendation):
+        document.add_heading("Recommendation", level=1)
+        _render_markdownish_block(
+            document,
+            recommendation,
+            default_heading_level=2,
+        )
 
     clarifying_questions = (sections.get("clarifying_questions") or "").strip()
     if clarifying_questions:

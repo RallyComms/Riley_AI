@@ -63,6 +63,9 @@ class FileListItem(BaseModel):
     preview_type: Optional[str] = None
     preview_status: Optional[str] = None
     preview_error: Optional[str] = None
+    status: Optional[str] = None
+    assignee: Optional[str] = None
+    assigned_to: Optional[List[str]] = None
     ingestion_status: Optional[str] = None
     extracted_char_count: Optional[int] = None
     chunk_count: Optional[int] = None
@@ -147,6 +150,52 @@ async def _get_file_point_for_tenant(
             )
 
     return point, payload, resolved_collection
+
+
+def _normalize_user_id(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _normalize_user_id_list(values: Any) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    unique_ids: List[str] = []
+    seen: set[str] = set()
+    for value in values:
+        normalized = _normalize_user_id(value)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        unique_ids.append(normalized)
+    return unique_ids
+
+
+def _is_messaging_visible_to_user(payload: Dict[str, Any], user_id: str) -> bool:
+    tags = payload.get("tags") if isinstance(payload.get("tags"), list) else []
+    if "Messaging" not in tags:
+        return False
+
+    normalized_user_id = _normalize_user_id(user_id)
+    if not normalized_user_id:
+        return False
+
+    creator_id = _normalize_user_id(payload.get("messaging_created_by_user_id"))
+    if creator_id and creator_id == normalized_user_id:
+        return True
+
+    visible_user_ids = _normalize_user_id_list(payload.get("messaging_visible_user_ids"))
+    if normalized_user_id in set(visible_user_ids):
+        return True
+
+    assignee = _normalize_user_id(payload.get("assignee"))
+    if assignee and assignee == normalized_user_id:
+        return True
+
+    assigned_to = _normalize_user_id_list(payload.get("assigned_to"))
+    if normalized_user_id in set(assigned_to):
+        return True
+
+    return False
 
 
 class PreviewUrlResponse(BaseModel):
@@ -321,6 +370,76 @@ async def list_files(
         ) from exc
     
     return FileListResponse(files=files)
+
+
+@router.get("/files/messaging/list", response_model=FileListResponse)
+async def list_messaging_files(
+    tenant_id: str = Query(..., description="Tenant/client ID for campaign Messaging Studio"),
+    current_user: Dict = Depends(verify_tenant_access),
+) -> FileListResponse:
+    """List Messaging Studio files visible to the current user only."""
+    settings = get_settings()
+    if tenant_id == "global":
+        raise HTTPException(status_code=400, detail="Messaging Studio is campaign-scoped.")
+    user_id = _normalize_user_id(current_user.get("id"))
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authenticated user id is required.")
+
+    try:
+        tenant_files = await vector_service.list_tenant_files(
+            collection_name=settings.QDRANT_COLLECTION_TIER_2,
+            tenant_id=tenant_id,
+            limit=1000,
+        )
+        files: List[FileListItem] = []
+        for file_data in tenant_files:
+            if not _is_messaging_visible_to_user(file_data, user_id):
+                continue
+            filename = file_data.get("filename")
+            if not filename:
+                continue
+            extension = Path(filename).suffix.lower().lstrip(".")
+            file_type = file_data.get("type") or extension or "unknown"
+            files.append(
+                FileListItem(
+                    id=file_data.get("id", ""),
+                    name=filename,
+                    url=file_data.get("url", ""),
+                    type=file_type,
+                    date=file_data.get("upload_date", datetime.now().isoformat()),
+                    size=file_data.get("size", "Unknown"),
+                    tags=file_data.get("tags", []),
+                    status=file_data.get("status"),
+                    assignee=file_data.get("assignee"),
+                    assigned_to=file_data.get("assigned_to", []),
+                    ai_enabled=file_data.get("ai_enabled"),
+                    ocr_enabled=file_data.get("ocr_enabled"),
+                    ocr_status=file_data.get("ocr_status"),
+                    vision_enabled=file_data.get("vision_enabled"),
+                    vision_status=file_data.get("vision_status"),
+                    multimodal_status=file_data.get("multimodal_status"),
+                    ocr_processed=file_data.get("ocr_processed"),
+                    vision_processed=file_data.get("vision_processed"),
+                    ocr_confidence=file_data.get("ocr_confidence"),
+                    ocr_extracted_at=file_data.get("ocr_extracted_at"),
+                    preview_url=file_data.get("preview_url"),
+                    preview_type=file_data.get("preview_type"),
+                    preview_status=file_data.get("preview_status"),
+                    preview_error=file_data.get("preview_error"),
+                    ingestion_status=file_data.get("ingestion_status"),
+                    extracted_char_count=file_data.get("extracted_char_count"),
+                    chunk_count=file_data.get("chunk_count"),
+                )
+            )
+        files.sort(key=lambda x: x.date, reverse=True)
+        return FileListResponse(files=files)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to load Messaging Studio files: {exc}",
+        ) from exc
 
 
 @router.get("/files/{file_id}/preview-url", response_model=PreviewUrlResponse)
@@ -695,11 +814,24 @@ async def update_tags_endpoint(
     settings = get_settings()
     
     try:
-        await _get_file_point_for_tenant(file_id=file_id, tenant_id=tenant_id)
+        _, current_payload, _ = await _get_file_point_for_tenant(file_id=file_id, tenant_id=tenant_id)
+        current_tags = current_payload.get("tags") if isinstance(current_payload.get("tags"), list) else []
+        user_id = _normalize_user_id((current_user or {}).get("id"))
+        messaging_visible_ids = _normalize_user_id_list(current_payload.get("messaging_visible_user_ids"))
+
+        payload_update: Dict[str, Any] = {"tags": request.tags}
+        if "Messaging" in request.tags:
+            if "Messaging" not in current_tags and user_id:
+                messaging_visible_ids.append(user_id)
+            messaging_visible_ids = _normalize_user_id_list(messaging_visible_ids)
+            payload_update["messaging_visible_user_ids"] = messaging_visible_ids
+            if user_id and not _normalize_user_id(current_payload.get("messaging_created_by_user_id")):
+                payload_update["messaging_created_by_user_id"] = user_id
+
         # Update tags in Qdrant
         await vector_service.client.set_payload(
             collection_name=settings.QDRANT_COLLECTION_TIER_2,
-            payload={"tags": request.tags},
+            payload=payload_update,
             points=[file_id]
         )
         
@@ -738,13 +870,23 @@ async def assign_file_endpoint(
             tenant_id=tenant_id,
             collection_name=settings.QDRANT_COLLECTION_TIER_2,
         )
+        assignee_value = _normalize_user_id(request.assignee)
+        assigned_to = _normalize_user_id_list(current_payload.get("assigned_to"))
+        if assignee_value:
+            assigned_to = _normalize_user_id_list([*assigned_to, assignee_value])
+
+        tags = current_payload.get("tags") if isinstance(current_payload.get("tags"), list) else []
+        messaging_visible_ids = _normalize_user_id_list(current_payload.get("messaging_visible_user_ids"))
+        if "Messaging" in tags and assignee_value:
+            messaging_visible_ids = _normalize_user_id_list([*messaging_visible_ids, assignee_value])
         
         # Update payload with assignee and status
         updated_payload = {
             **current_payload,
             "status": request.status,
-            "assignee": request.assignee,
-            "assigned_to": current_payload.get("assigned_to", []) + [request.assignee] if request.assignee not in current_payload.get("assigned_to", []) else current_payload.get("assigned_to", [])
+            "assignee": assignee_value or "",
+            "assigned_to": assigned_to,
+            "messaging_visible_user_ids": messaging_visible_ids,
         }
         
         # Update Qdrant payload
