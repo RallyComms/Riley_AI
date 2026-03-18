@@ -14,7 +14,7 @@ import { apiFetch } from "@app/lib/api";
 interface MenuItem {
   icon: LucideIcon;
   label: string;
-  onClick: () => void;
+  onClick?: () => void;
   isDestructive?: boolean;
   isDisabled?: boolean;
   suffix?: string;
@@ -168,11 +168,8 @@ export function GlobalMenu() {
     },
     {
       icon: mounted && theme === "light" ? Sun : Moon,
-      label: "Themes",
-      onClick: () => {
-        setTheme(theme === "dark" ? "light" : "dark");
-        setIsOpen(false);
-      },
+      label: "Themes (Coming soon)",
+      isDisabled: true,
     },
     {
       icon: LogOut,
