@@ -157,7 +157,11 @@ export function CampaignBucketCard({
     }
   };
 
-  const handleEnterClick = () => {
+  const handleEnterClick = (event?: React.MouseEvent | React.KeyboardEvent) => {
+    const target = event?.target as HTMLElement | undefined;
+    if (target && target.closest("[data-card-action='true']")) {
+      return;
+    }
     if (onClick) {
       onClick();
       return;
@@ -235,9 +239,14 @@ export function CampaignBucketCard({
           {!isArchived && onArchive && campaignId && (
             <button
               type="button"
+              data-card-action="true"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+              }}
               onClick={handleArchiveClick}
               className={cn(
-                "relative inline-flex items-center gap-1.5 rounded-full px-2 py-1 transition-all duration-200",
+                "relative z-20 inline-flex items-center gap-1.5 rounded-full px-2 py-1 transition-all duration-200 pointer-events-auto",
                 "opacity-0 group-hover:opacity-100",
                 isLightMode
                   ? "bg-black/5 border border-black/20 text-black hover:bg-black/10"
@@ -381,13 +390,13 @@ export function CampaignBucketCard({
   return (
     <div
       className={cn("block w-full", (onClick || campaignId) && "cursor-pointer")}
-      onClick={handleEnterClick}
+      onClick={(event) => handleEnterClick(event)}
       role={onClick || campaignId ? "button" : undefined}
       tabIndex={onClick || campaignId ? 0 : -1}
       onKeyDown={(event) => {
         if ((event.key === "Enter" || event.key === " ") && (onClick || campaignId)) {
           event.preventDefault();
-          handleEnterClick();
+          handleEnterClick(event);
         }
       }}
     >
