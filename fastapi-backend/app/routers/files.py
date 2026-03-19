@@ -99,6 +99,25 @@ class AssignRequest(BaseModel):
     status: str  # "needs_review" or "in_review"
 
 
+class FileCommentItem(BaseModel):
+    id: str
+    author_user_id: str
+    author_display_name: str
+    content: str
+    mentions: List[str] = []
+    mention_display_names: List[str] = []
+    created_at: str
+
+
+class FileCommentsResponse(BaseModel):
+    comments: List[FileCommentItem]
+
+
+class CreateFileCommentRequest(BaseModel):
+    content: str
+    mentions: List[str] = []
+
+
 class PromoteRequest(BaseModel):
     is_golden: bool
 
@@ -196,6 +215,60 @@ def _is_messaging_visible_to_user(payload: Dict[str, Any], user_id: str) -> bool
         return True
 
     return False
+
+
+def _resolve_display_name_from_member(member: Dict[str, Any]) -> str:
+    display_name = str(member.get("display_name") or "").strip()
+    if display_name:
+        return display_name
+    email = str(member.get("email") or "").strip()
+    if email and "@" in email:
+        return email.split("@")[0]
+    if email:
+        return email
+    return str(member.get("user_id") or member.get("id") or "Unknown User").strip()
+
+
+async def _get_campaign_member_display_map(
+    *,
+    graph: GraphService,
+    campaign_id: str,
+) -> Dict[str, str]:
+    members = await graph.list_campaign_members_for_mentions(campaign_id=campaign_id)
+    mapping: Dict[str, str] = {}
+    for member in members:
+        member_id = _normalize_user_id(member.get("user_id") or member.get("id"))
+        if not member_id:
+            continue
+        mapping[member_id] = _resolve_display_name_from_member(member)
+    return mapping
+
+
+def _normalize_comments_payload(comments_raw: Any) -> List[Dict[str, Any]]:
+    if not isinstance(comments_raw, list):
+        return []
+    normalized: List[Dict[str, Any]] = []
+    for item in comments_raw:
+        if not isinstance(item, dict):
+            continue
+        comment_id = str(item.get("id") or "").strip()
+        author_user_id = _normalize_user_id(item.get("author_user_id"))
+        content = str(item.get("content") or "").strip()
+        created_at = str(item.get("created_at") or "").strip() or datetime.now().isoformat()
+        if not comment_id or not author_user_id or not content:
+            continue
+        mentions = _normalize_user_id_list(item.get("mentions"))
+        normalized.append(
+            {
+                "id": comment_id,
+                "author_user_id": author_user_id,
+                "author_display_name": str(item.get("author_display_name") or "").strip(),
+                "content": content,
+                "mentions": mentions,
+                "created_at": created_at,
+            }
+        )
+    return normalized
 
 
 class PreviewUrlResponse(BaseModel):
@@ -440,6 +513,122 @@ async def list_messaging_files(
             status_code=500,
             detail=f"Failed to load Messaging Studio files: {exc}",
         ) from exc
+
+
+@router.get("/files/{file_id}/comments", response_model=FileCommentsResponse)
+async def list_file_comments(
+    file_id: str,
+    tenant_id: str = Query(..., description="Tenant/client ID that owns this file"),
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> FileCommentsResponse:
+    """Return document comments with Riley-native display names and resolved mentions."""
+    try:
+        _, payload, _ = await _get_file_point_for_tenant(file_id=file_id, tenant_id=tenant_id)
+        comments = _normalize_comments_payload(payload.get("comments"))
+        display_map = await _get_campaign_member_display_map(graph=graph, campaign_id=tenant_id)
+        items: List[FileCommentItem] = []
+        for item in comments:
+            author_id = _normalize_user_id(item.get("author_user_id"))
+            mention_ids = _normalize_user_id_list(item.get("mentions"))
+            author_display_name = (
+                display_map.get(author_id)
+                or str(item.get("author_display_name") or "").strip()
+                or author_id
+            )
+            mention_display_names = [display_map.get(mention_id, mention_id) for mention_id in mention_ids]
+            items.append(
+                FileCommentItem(
+                    id=str(item.get("id")),
+                    author_user_id=author_id,
+                    author_display_name=author_display_name,
+                    content=str(item.get("content") or ""),
+                    mentions=mention_ids,
+                    mention_display_names=mention_display_names,
+                    created_at=str(item.get("created_at") or datetime.now().isoformat()),
+                )
+            )
+        items.sort(key=lambda c: c.created_at)
+        return FileCommentsResponse(comments=items)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to list file comments: {exc}") from exc
+
+
+@router.post("/files/{file_id}/comments", response_model=FileCommentsResponse)
+async def create_file_comment(
+    file_id: str,
+    request: CreateFileCommentRequest,
+    tenant_id: str = Query(..., description="Tenant/client ID that owns this file"),
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> FileCommentsResponse:
+    """Create a document comment, persist mentions, and emit activity events for mentioned users."""
+    content = str(request.content or "").strip()
+    if not content:
+        raise HTTPException(status_code=400, detail="Comment content is required.")
+
+    author_user_id = _normalize_user_id(current_user.get("id"))
+    if not author_user_id:
+        raise HTTPException(status_code=401, detail="Authenticated user id is required.")
+
+    try:
+        _, payload, _ = await _get_file_point_for_tenant(file_id=file_id, tenant_id=tenant_id)
+        display_map = await _get_campaign_member_display_map(graph=graph, campaign_id=tenant_id)
+        member_ids = set(display_map.keys())
+        requested_mentions = _normalize_user_id_list(request.mentions)
+        mention_ids = [mentioned_id for mentioned_id in requested_mentions if mentioned_id in member_ids and mentioned_id != author_user_id]
+
+        comments = _normalize_comments_payload(payload.get("comments"))
+        new_comment = {
+            "id": str(datetime.now().timestamp()).replace(".", ""),
+            "author_user_id": author_user_id,
+            "author_display_name": display_map.get(author_user_id, author_user_id),
+            "content": content,
+            "mentions": mention_ids,
+            "created_at": datetime.now().isoformat(),
+        }
+        comments.append(new_comment)
+        await vector_service.client.set_payload(
+            collection_name=get_settings().QDRANT_COLLECTION_TIER_2,
+            payload={"comments": comments},
+            points=[file_id],
+        )
+
+        filename = str(payload.get("filename") or file_id)
+        actor_display = display_map.get(author_user_id, author_user_id)
+        for mentioned_user_id in mention_ids:
+            mentioned_display = display_map.get(mentioned_user_id, mentioned_user_id)
+            await graph.create_campaign_event(
+                campaign_id=tenant_id,
+                event_type="document_mentioned_user",
+                message=f"{actor_display} mentioned {mentioned_display} in {filename}",
+                user_id=mentioned_user_id,
+                actor_user_id=author_user_id,
+            )
+
+        items: List[FileCommentItem] = []
+        for item in comments:
+            author_id = _normalize_user_id(item.get("author_user_id"))
+            item_mentions = _normalize_user_id_list(item.get("mentions"))
+            items.append(
+                FileCommentItem(
+                    id=str(item.get("id")),
+                    author_user_id=author_id,
+                    author_display_name=display_map.get(author_id, str(item.get("author_display_name") or author_id)),
+                    content=str(item.get("content") or ""),
+                    mentions=item_mentions,
+                    mention_display_names=[display_map.get(mention_id, mention_id) for mention_id in item_mentions],
+                    created_at=str(item.get("created_at") or datetime.now().isoformat()),
+                )
+            )
+        items.sort(key=lambda c: c.created_at)
+        return FileCommentsResponse(comments=items)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create file comment: {exc}") from exc
 
 
 @router.get("/files/{file_id}/preview-url", response_model=PreviewUrlResponse)
@@ -870,6 +1059,9 @@ async def assign_file_endpoint(
             tenant_id=tenant_id,
             collection_name=settings.QDRANT_COLLECTION_TIER_2,
         )
+        actor_user_id = _normalize_user_id(current_user.get("id"))
+        previous_assignee = _normalize_user_id(current_payload.get("assignee"))
+        previous_status = str(current_payload.get("status") or "").strip().lower()
         assignee_value = _normalize_user_id(request.assignee)
         assigned_to = _normalize_user_id_list(current_payload.get("assigned_to"))
         if assignee_value:
@@ -900,20 +1092,47 @@ async def assign_file_endpoint(
         try:
             filename = str(current_payload.get("filename") or file_id)
             status_value = str(request.status).strip().lower()
-            event_type = "document_assigned"
-            event_message = f"Document assigned for review: {filename}"
-            if status_value == "needs_review":
-                event_type = "document_moved_needs_review"
-                event_message = f"Document moved to Needs Review: {filename}"
-            elif status_value == "in_review":
-                event_type = "document_moved_in_review"
-                event_message = f"Document moved to In Review: {filename}"
-            await graph.create_campaign_event(
+            member_display_map = await _get_campaign_member_display_map(
+                graph=graph,
                 campaign_id=tenant_id,
-                event_type=event_type,
-                message=event_message,
-                actor_user_id=current_user.get("id", "unknown"),
             )
+            actor_display = member_display_map.get(actor_user_id, actor_user_id or "A teammate")
+            assignee_display = member_display_map.get(assignee_value, assignee_value)
+
+            # Assignment/tagging notifications are targeted recent-activity events (not Riley Bot feed).
+            if assignee_value and assignee_value != previous_assignee:
+                targeted_event_type = (
+                    "document_tagged_for_review"
+                    if status_value == "needs_review"
+                    else "document_assigned_to_user"
+                )
+                targeted_message = (
+                    f"{actor_display} tagged {assignee_display} for review on {filename}"
+                    if targeted_event_type == "document_tagged_for_review"
+                    else f"{actor_display} assigned {filename} to {assignee_display}"
+                )
+                await graph.create_campaign_event(
+                    campaign_id=tenant_id,
+                    event_type=targeted_event_type,
+                    message=targeted_message,
+                    user_id=assignee_value,
+                    actor_user_id=actor_user_id,
+                )
+            elif not assignee_value and status_value != previous_status:
+                event_type = "document_assigned"
+                event_message = f"Document assigned for review: {filename}"
+                if status_value == "needs_review":
+                    event_type = "document_moved_needs_review"
+                    event_message = f"Document moved to Needs Review: {filename}"
+                elif status_value == "in_review":
+                    event_type = "document_moved_in_review"
+                    event_message = f"Document moved to In Review: {filename}"
+                await graph.create_campaign_event(
+                    campaign_id=tenant_id,
+                    event_type=event_type,
+                    message=event_message,
+                    actor_user_id=actor_user_id or current_user.get("id", "unknown"),
+                )
         except Exception as event_exc:
             logger.warning(
                 "campaign_event_create_failed file_id=%s tenant_id=%s error=%s",

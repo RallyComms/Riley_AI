@@ -13,10 +13,17 @@ import "@cyntler/react-doc-viewer/dist/index.css";
 
 interface Comment {
   id: string;
-  author: string;
+  authorUserId: string;
+  authorDisplayName: string;
   content: string;
-  timestamp: string;
-  mentions?: string[];
+  createdAt: string;
+  mentions: string[];
+  mentionDisplayNames: string[];
+}
+
+interface MentionMember {
+  user_id: string;
+  display_name: string;
 }
 
 // Flexible file interface that works with both Asset and KanbanCard
@@ -41,29 +48,6 @@ interface DocumentViewerProps {
   onClose: () => void;
   variant?: "drawer" | "modal";
 }
-
-// Mock comments - in production, these would come from the API
-const mockComments: Comment[] = [
-  {
-    id: "1",
-    author: "Sarah Chen",
-    content: "@John check slide 4. The messaging needs to be more concise.",
-    timestamp: "2 hours ago",
-    mentions: ["John"],
-  },
-  {
-    id: "2",
-    author: "John Martinez",
-    content: "Looks good! The positioning is clear and distinct.",
-    timestamp: "1 hour ago",
-  },
-  {
-    id: "3",
-    author: "Alex Rivera",
-    content: "Can we add a call-to-action section at the end?",
-    timestamp: "30 minutes ago",
-  },
-];
 
 function getFileIcon(type: FileData["type"]) {
   switch (type) {
@@ -163,8 +147,11 @@ const StableDocViewer = memo(({ documents, config }: { documents: any[]; config:
 StableDocViewer.displayName = "StableDocViewer";
 
 export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentViewerProps) {
-  const [comments, setComments] = useState<Comment[]>(mockComments);
+  const [comments, setComments] = useState<Comment[]>([]);
   const [commentInput, setCommentInput] = useState("");
+  const [mentionMembers, setMentionMembers] = useState<MentionMember[]>([]);
+  const [isLoadingComments, setIsLoadingComments] = useState(false);
+  const [isSendingComment, setIsSendingComment] = useState(false);
   const [width, setWidth] = useState(800); // Default width for drawer
   const [isResizing, setIsResizing] = useState(false);
   const [zoom, setZoom] = useState(1); // Zoom level (0.5 to 3)
@@ -201,6 +188,26 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
     const match = pathname?.match(/^\/campaign\/([^/]+)/);
     return match?.[1] ?? null;
   }, [pathname]);
+
+  const mentionMemberByToken = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const member of mentionMembers) {
+      const userId = String(member.user_id || "").toLowerCase();
+      const displayName = String(member.display_name || "").trim();
+      if (!userId || !displayName) continue;
+      const emailPrefix = displayName.includes("@")
+        ? displayName.split("@")[0].toLowerCase()
+        : "";
+      map.set(userId, member.user_id);
+      map.set(displayName.toLowerCase(), member.user_id);
+      map.set(displayName.toLowerCase().replace(/\s+/g, "_"), member.user_id);
+      map.set(displayName.toLowerCase().replace(/\s+/g, ""), member.user_id);
+      if (emailPrefix) {
+        map.set(emailPrefix, member.user_id);
+      }
+    }
+    return map;
+  }, [mentionMembers]);
 
   useEffect(() => {
     const shouldRefreshPreview =
@@ -250,10 +257,82 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
     isLoaded,
   ]);
 
+  useEffect(() => {
+    const loadMembersAndComments = async () => {
+      if (!campaignIdFromPath || !isLoaded) return;
+      try {
+        setIsLoadingComments(true);
+        const token = await getToken();
+        if (!token) return;
+
+        const [membersData, commentsData] = await Promise.all([
+          apiFetch<{ members: MentionMember[] }>(
+            `/api/v1/campaigns/${encodeURIComponent(campaignIdFromPath)}/members?mentions_only=true`,
+            { token, method: "GET" }
+          ),
+          apiFetch<{
+            comments: Array<{
+              id: string;
+              author_user_id: string;
+              author_display_name: string;
+              content: string;
+              mentions: string[];
+              mention_display_names: string[];
+              created_at: string;
+            }>;
+          }>(
+            `/api/v1/files/${encodeURIComponent(file.id)}/comments?tenant_id=${encodeURIComponent(campaignIdFromPath)}`,
+            { token, method: "GET" }
+          ),
+        ]);
+
+        setMentionMembers(membersData.members || []);
+        setComments(
+          (commentsData.comments || []).map((item) => ({
+            id: item.id,
+            authorUserId: item.author_user_id,
+            authorDisplayName: item.author_display_name,
+            content: item.content,
+            createdAt: item.created_at,
+            mentions: Array.isArray(item.mentions) ? item.mentions : [],
+            mentionDisplayNames: Array.isArray(item.mention_display_names)
+              ? item.mention_display_names
+              : [],
+          }))
+        );
+      } catch (error) {
+        console.error("Failed to load document comments or mention members:", error);
+        setComments([]);
+      } finally {
+        setIsLoadingComments(false);
+      }
+    };
+    void loadMembersAndComments();
+  }, [campaignIdFromPath, file.id, getToken, isLoaded]);
+
   // Auto-scroll comments to bottom
   useEffect(() => {
     commentsEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [comments]);
+
+  const formatCommentTimestamp = (iso: string): string => {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "just now";
+    return date.toLocaleString();
+  };
+
+  const extractMentionedUserIds = (text: string): string[] => {
+    const found = text.match(/@([a-zA-Z0-9_.-]+)/g) || [];
+    const ids = new Set<string>();
+    for (const token of found) {
+      const normalized = token.replace("@", "").toLowerCase();
+      const userId = mentionMemberByToken.get(normalized);
+      if (userId) {
+        ids.add(userId);
+      }
+    }
+    return Array.from(ids);
+  };
 
   // Resize handler
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -283,24 +362,59 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
     };
   }, [isResizing, minWidth, maxWidth]);
 
-  const handleSendComment = () => {
-    if (!commentInput.trim()) return;
-
-    const newComment: Comment = {
-      id: Date.now().toString(),
-      author: "You",
-      content: commentInput.trim(),
-      timestamp: "just now",
-    };
-
-    setComments([...comments, newComment]);
-    setCommentInput("");
+  const handleSendComment = async () => {
+    if (!commentInput.trim() || !campaignIdFromPath) return;
+    try {
+      setIsSendingComment(true);
+      const token = await getToken();
+      if (!token) return;
+      const mentionIds = extractMentionedUserIds(commentInput.trim());
+      const data = await apiFetch<{
+        comments: Array<{
+          id: string;
+          author_user_id: string;
+          author_display_name: string;
+          content: string;
+          mentions: string[];
+          mention_display_names: string[];
+          created_at: string;
+        }>;
+      }>(
+        `/api/v1/files/${encodeURIComponent(file.id)}/comments?tenant_id=${encodeURIComponent(campaignIdFromPath)}`,
+        {
+          token,
+          method: "POST",
+          body: {
+            content: commentInput.trim(),
+            mentions: mentionIds,
+          },
+        }
+      );
+      setComments(
+        (data.comments || []).map((item) => ({
+          id: item.id,
+          authorUserId: item.author_user_id,
+          authorDisplayName: item.author_display_name,
+          content: item.content,
+          createdAt: item.created_at,
+          mentions: Array.isArray(item.mentions) ? item.mentions : [],
+          mentionDisplayNames: Array.isArray(item.mention_display_names)
+            ? item.mention_display_names
+            : [],
+        }))
+      );
+      setCommentInput("");
+    } catch (error) {
+      console.error("Failed to send comment:", error);
+    } finally {
+      setIsSendingComment(false);
+    }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      handleSendComment();
+      void handleSendComment();
     }
   };
 
@@ -585,6 +699,9 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
 
               {/* Comments List */}
               <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin">
+                {isLoadingComments ? (
+                  <div className="text-sm text-zinc-500">Loading comments...</div>
+                ) : null}
                 {comments.map((comment) => (
                   <div
                     key={comment.id}
@@ -593,14 +710,14 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
                     <div className="flex items-start gap-3">
                       {/* Avatar */}
                       <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full border-2 border-zinc-800 bg-zinc-700 text-xs font-medium text-zinc-100">
-                        {getInitials(comment.author)}
+                        {getInitials(comment.authorDisplayName)}
                       </div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
                           <span className="text-sm font-medium text-zinc-100">
-                            {comment.author}
+                            {comment.authorDisplayName}
                           </span>
-                          <span className="text-xs text-zinc-500">{comment.timestamp}</span>
+                          <span className="text-xs text-zinc-500">{formatCommentTimestamp(comment.createdAt)}</span>
                         </div>
                         <p className="text-sm text-zinc-300 whitespace-pre-wrap break-words">
                           {comment.content.split(" ").map((word, idx) => {
@@ -638,14 +755,30 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
                   />
                   <button
                     type="button"
-                    onClick={handleSendComment}
-                    disabled={!commentInput.trim()}
+                    onClick={() => void handleSendComment()}
+                    disabled={!commentInput.trim() || isSendingComment}
                     className="rounded-lg bg-amber-500/10 border border-amber-500/20 p-2 text-amber-400 transition-colors hover:bg-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed flex-shrink-0"
                     aria-label="Send comment"
                   >
                     <Send className="h-4 w-4" />
                   </button>
                 </div>
+                {commentInput.includes("@") && mentionMembers.length > 0 ? (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {mentionMembers.slice(0, 8).map((member) => (
+                      <button
+                        key={member.user_id}
+                        type="button"
+                        onClick={() =>
+                          setCommentInput((prev) => `${prev} @${member.display_name.replace(/\s+/g, "_")} `)
+                        }
+                        className="rounded border border-zinc-700 bg-zinc-800/60 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-700/70"
+                      >
+                        @{member.display_name}
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
                 <p className="text-xs text-zinc-500 mt-2">
                   Press Enter to send, Shift+Enter for new line
                 </p>

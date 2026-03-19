@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { useParams } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
 import { Sparkles, X } from "lucide-react";
@@ -17,7 +17,10 @@ function isAISupportedType(type: Asset["type"]): boolean {
 }
 
 // Convert Asset to KanbanCard
-function assetToKanbanCard(asset: Asset): KanbanCard {
+function assetToKanbanCard(
+  asset: Asset,
+  resolveDisplayName: (userId: string) => string
+): KanbanCard {
   // Map Asset status to KanbanStatus
   const statusMap: Record<Asset["status"], KanbanStatus> = {
     "in_progress": "Draft",
@@ -30,8 +33,9 @@ function assetToKanbanCard(asset: Asset): KanbanCard {
   };
 
   // Extract initials from assignedTo names
-  const assignees = asset.assignedTo.map((name) => {
-    return name
+  const assignees = asset.assignedTo.map((assigneeId) => {
+    const displayName = resolveDisplayName(assigneeId);
+    return displayName
       .split(" ")
       .map((n) => n[0])
       .join("")
@@ -79,7 +83,7 @@ function kanbanCardToFile(card: KanbanCard): Asset {
 
 export default function MessagingPage() {
   const params = useParams();
-  const { getToken } = useAuth();
+  const { getToken, userId } = useAuth();
   const campaignId = params.id as string;
   const [assets, setAssets] = useState<Asset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -87,8 +91,24 @@ export default function MessagingPage() {
   const [selectedFile, setSelectedFile] = useState<Asset | null>(null);
   const [assignmentModalOpen, setAssignmentModalOpen] = useState(false);
   const [managingAssignees, setManagingAssignees] = useState<KanbanCard | null>(null);
+  const [campaignMembers, setCampaignMembers] = useState<
+    Array<{ user_id: string; display_name: string }>
+  >([]);
 
-  // Fetch files from backend and filter by Messaging tag
+  const memberDisplayMap = useMemo(() => {
+    const mapping: Record<string, string> = {};
+    for (const member of campaignMembers) {
+      mapping[String(member.user_id || "").toLowerCase()] = member.display_name;
+    }
+    return mapping;
+  }, [campaignMembers]);
+
+  const resolveDisplayName = (userId: string): string => {
+    const normalized = String(userId || "").toLowerCase();
+    return memberDisplayMap[normalized] || userId;
+  };
+
+  // Fetch Messaging-visible files from backend (user-scoped visibility).
   useEffect(() => {
     const fetchFiles = async () => {
       if (!campaignId) return;
@@ -100,20 +120,35 @@ export default function MessagingPage() {
         }
         
         const data = await apiFetch<{ files: any[] }>(
-          `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
+          `/api/v1/files/messaging/list?tenant_id=${encodeURIComponent(campaignId)}`,
           {
             token,
             method: "GET",
           }
         );
 
-        // Convert backend file list to Asset format and filter by Messaging tag
-        const fetchedAssets: Asset[] = data.files
-          .filter((file: any) => {
-            const tags = Array.isArray(file.tags) ? file.tags : [];
-            return tags.includes("Messaging");
-          })
-          .map((file: any) => toAsset(file, { status: "in_progress" }));
+        // Convert backend file list to Asset format. Status/assignees are server-scoped.
+        const fetchedAssets: Asset[] = data.files.map((file: any) => {
+          const normalizedStatus = String(file.status || "").trim().toLowerCase();
+          const status =
+            normalizedStatus === "needs_review" ||
+            normalizedStatus === "in_review" ||
+            normalizedStatus === "approved" ||
+            normalizedStatus === "in_progress" ||
+            normalizedStatus === "ready" ||
+            normalizedStatus === "processing" ||
+            normalizedStatus === "error"
+              ? (normalizedStatus as Asset["status"])
+              : "in_progress";
+          const assignedTo = Array.isArray(file.assigned_to)
+            ? file.assigned_to.filter((value: unknown) => typeof value === "string")
+            : [];
+          const asset = toAsset(file, { status });
+          return {
+            ...asset,
+            assignedTo,
+          };
+        });
 
         setAssets(fetchedAssets);
       } catch (error) {
@@ -126,6 +161,28 @@ export default function MessagingPage() {
 
     fetchFiles();
   }, [campaignId]);
+
+  useEffect(() => {
+    const fetchMembers = async () => {
+      if (!campaignId) return;
+      try {
+        const token = await getToken();
+        if (!token) return;
+        const data = await apiFetch<{ members: Array<{ user_id: string; display_name: string }> }>(
+          `/api/v1/campaigns/${encodeURIComponent(campaignId)}/members?mentions_only=true`,
+          {
+            token,
+            method: "GET",
+          }
+        );
+        setCampaignMembers(data.members || []);
+      } catch (error) {
+        console.error("Failed to load campaign members for assignment:", error);
+        setCampaignMembers([]);
+      }
+    };
+    void fetchMembers();
+  }, [campaignId, getToken]);
 
   // Handle viewing an asset from citation badge
   const handleViewAsset = (filename: string) => {
@@ -141,7 +198,9 @@ export default function MessagingPage() {
   };
 
   // Convert assets to KanbanCards
-  const kanbanCards: KanbanCard[] = assets.map(assetToKanbanCard);
+  const kanbanCards: KanbanCard[] = assets.map((asset) =>
+    assetToKanbanCard(asset, resolveDisplayName)
+  );
 
   // Handle status change (when dragging cards)
   const handleStatusChange = async (cardId: string, newStatus: KanbanStatus) => {
@@ -172,7 +231,7 @@ export default function MessagingPage() {
         throw new Error("Authentication required");
       }
       
-      await apiFetch(`/api/v1/files/${cardId}/assign`, {
+      await apiFetch(`/api/v1/files/${cardId}/assign?tenant_id=${encodeURIComponent(campaignId)}`, {
         token,
         method: "PATCH",
         body: {
@@ -189,26 +248,6 @@ export default function MessagingPage() {
     }
   };
 
-  // Helper: Map initials to user IDs
-  const initialsToUserId = (initials: string): string | null => {
-    const mapping: Record<string, string> = {
-      "SJ": "sarah",
-      "JD": "john",
-      "AK": "anova",
-    };
-    return mapping[initials] || null;
-  };
-
-  // Helper: Map user IDs to full names
-  const userIdToName = (userId: string): string => {
-    const userMap: Record<string, string> = {
-      sarah: "Sarah Johnson",
-      john: "John Doe",
-      anova: "Anova Kim",
-    };
-    return userMap[userId] || userId;
-  };
-
   // Handle assignment confirmation (from manage assignees flow)
   const handleAssignmentConfirm = async (userIds: string[]) => {
     if (!managingAssignees) return;
@@ -216,24 +255,37 @@ export default function MessagingPage() {
     const cardId = managingAssignees.id;
     
     try {
-      // Update assignees - convert user IDs to full names
-      const assigneeNames = userIds.map(userIdToName);
-      
-      // Update local state
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required");
+      }
+
+      const previousAsset = assets.find((asset) => asset.id === cardId);
+      const currentStatus = previousAsset?.status || "in_progress";
+
+      for (const userId of userIds) {
+        await apiFetch(`/api/v1/files/${cardId}/assign?tenant_id=${encodeURIComponent(campaignId)}`, {
+          token,
+          method: "PATCH",
+          body: {
+            assignee: userId,
+            status: currentStatus,
+          },
+        });
+      }
+
+      // Optimistic update with real user IDs.
       setAssets((prev) =>
         prev.map((asset) => {
           if (asset.id === cardId) {
             return {
               ...asset,
-              assignedTo: assigneeNames,
+              assignedTo: userIds,
             };
           }
           return asset;
         })
       );
-
-      // TODO: Call backend to update assignees
-      // For now, we'll just update local state
     } catch (error) {
       console.error("Failed to update assignees:", error);
       alert("Failed to update assignees. Please try again.");
@@ -332,11 +384,14 @@ export default function MessagingPage() {
         fileName={managingAssignees?.name || ""}
         currentAssignees={
           managingAssignees
-            ? managingAssignees.assignees
-                .map(initialsToUserId)
-                .filter((id): id is string => id !== null)
+            ? assets.find((asset) => asset.id === managingAssignees.id)?.assignedTo || []
             : []
         }
+        users={campaignMembers.map((member) => ({
+          id: member.user_id,
+          displayName: member.display_name,
+          isMe: member.user_id === userId,
+        }))}
         onClose={() => {
           setAssignmentModalOpen(false);
           setManagingAssignees(null);

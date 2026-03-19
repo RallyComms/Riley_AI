@@ -1531,13 +1531,19 @@ class GraphService:
                 id: $campaign_id,
                 name: $name,
                 description: $description,
+                status: "active",
                 created_at: datetime()
             })
             CREATE (u)-[:MEMBER_OF {
                 role: "Lead",
                 added_at: datetime()
             }]->(c)
-            RETURN c.id as id, c.name as name, c.description as description
+            RETURN
+                c.id as id,
+                c.name as name,
+                c.description as description,
+                c.status as status,
+                toString(c.archived_at) as archived_at
             """
             
             result = await session.run(
@@ -1556,10 +1562,12 @@ class GraphService:
                 "id": record["id"],
                 "name": record["name"],
                 "description": record.get("description"),
-                "role": "Lead"
+                "role": "Lead",
+                "status": record.get("status") or "active",
+                "archived_at": record.get("archived_at"),
             }
 
-    async def get_user_campaigns(self, user_id: str) -> List[Dict[str, Any]]:
+    async def get_user_campaigns(self, user_id: str, status_filter: str = "active") -> List[Dict[str, Any]]:
         """Get all campaigns that a user is a member of.
         
         Args:
@@ -1571,11 +1579,21 @@ class GraphService:
         async with self._driver.session() as session:
             query = """
             MATCH (u:User {id: $user_id})-[r:MEMBER_OF]->(c:Campaign)
-            RETURN c.id as id, c.name as name, c.description as description, r.role as role
+            WHERE (
+                ($status_filter = "active" AND coalesce(c.status, "active") = "active")
+                OR ($status_filter = "archived" AND c.status = "archived")
+            )
+            RETURN
+                c.id as id,
+                c.name as name,
+                c.description as description,
+                r.role as role,
+                coalesce(c.status, "active") as status,
+                toString(c.archived_at) as archived_at
             ORDER BY c.created_at DESC
             """
             
-            result = await session.run(query, user_id=user_id)
+            result = await session.run(query, user_id=user_id, status_filter=status_filter)
             
             campaigns = []
             async for record in result:
@@ -1585,11 +1603,13 @@ class GraphService:
                     "description": record.get("description"),
                     "role": record["role"],
                     "access": "member",
+                    "status": record.get("status") or "active",
+                    "archived_at": record.get("archived_at"),
                 })
             
             return campaigns
 
-    async def get_all_campaigns_with_access(self, user_id: str) -> List[Dict[str, Any]]:
+    async def get_all_campaigns_with_access(self, user_id: str, status_filter: str = "active") -> List[Dict[str, Any]]:
         """Return metadata-only campaign list across org with user access status.
 
         access:
@@ -1599,6 +1619,10 @@ class GraphService:
         async with self._driver.session() as session:
             query = """
             MATCH (c:Campaign)
+            WHERE (
+                ($status_filter = "active" AND coalesce(c.status, "active") = "active")
+                OR ($status_filter = "archived" AND c.status = "archived")
+            )
             OPTIONAL MATCH (owner:User)-[owner_rel:MEMBER_OF]->(c)
             WHERE owner_rel.role = "Lead"
             WITH c, owner
@@ -1608,6 +1632,8 @@ class GraphService:
                 c.name as name,
                 c.description as description,
                 toString(c.created_at) as created_at,
+                coalesce(c.status, "active") as status,
+                toString(c.archived_at) as archived_at,
                 owner.id as owner_id,
                 coalesce(owner.email, owner.id) as owner_name,
                 CASE WHEN r IS NULL THEN "requestable" ELSE "member" END as access,
@@ -1615,7 +1641,7 @@ class GraphService:
             ORDER BY c.created_at DESC
             """
 
-            result = await session.run(query, user_id=user_id)
+            result = await session.run(query, user_id=user_id, status_filter=status_filter)
             campaigns: List[Dict[str, Any]] = []
             async for record in result:
                 campaigns.append(
@@ -1626,11 +1652,36 @@ class GraphService:
                         "role": record.get("role"),
                         "access": record["access"],
                         "created_at": record.get("created_at"),
+                        "status": record.get("status") or "active",
+                        "archived_at": record.get("archived_at"),
                         "owner_id": record.get("owner_id"),
                         "owner_name": record.get("owner_name"),
                     }
                 )
             return campaigns
+
+    async def archive_campaign(self, campaign_id: str) -> Dict[str, Any]:
+        """Archive a campaign by setting status and archived timestamp."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (c:Campaign {id: $campaign_id})
+            SET
+                c.status = "archived",
+                c.archived_at = datetime()
+            RETURN
+                c.id as id,
+                coalesce(c.status, "active") as status,
+                toString(c.archived_at) as archived_at
+            """
+            result = await session.run(query, campaign_id=campaign_id)
+            record = await result.single()
+            if not record:
+                raise ValueError(f"Campaign {campaign_id} not found")
+            return {
+                "id": record.get("id"),
+                "status": record.get("status") or "archived",
+                "archived_at": record.get("archived_at"),
+            }
 
     async def create_access_request(
         self, tenant_id: str, requester_user_id: str, message: Optional[str] = None
@@ -1870,6 +1921,20 @@ class GraphService:
                     }
                 )
                 AND (
+                    e.type NOT IN [
+                        "document_assigned_to_user",
+                        "document_tagged_for_review",
+                        "document_mentioned_user"
+                    ]
+                    OR (
+                        $viewer_user_id IS NOT NULL
+                        AND (
+                            e.user_id = $viewer_user_id
+                            OR e.actor_user_id = $viewer_user_id
+                        )
+                    )
+                )
+                AND (
                     e.type <> "access_request_created"
                     OR (
                         EXISTS {
@@ -1928,6 +1993,12 @@ class GraphService:
             }
             MATCH (e:CampaignEvent {campaign_id: c.id})
             WHERE
+                e.type NOT IN [
+                    "document_assigned_to_user",
+                    "document_tagged_for_review",
+                    "document_mentioned_user"
+                ]
+                AND
                 NOT EXISTS {
                     MATCH (:User {id: $user_id})-[:DISMISSED_FEED_EVENT]->(e)
                 }

@@ -1,23 +1,33 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { X, User, Check } from "lucide-react";
+import { X, Check } from "lucide-react";
 import { cn } from "@app/lib/utils";
+
+export interface AssignmentUser {
+  id: string;
+  displayName: string;
+  isMe?: boolean;
+}
 
 interface AssignmentModalProps {
   isOpen: boolean;
   fileName: string;
   onClose: () => void;
   onConfirm: (userIds: string[]) => void;
-  currentAssignees?: string[]; // Array of user IDs like ["sarah", "john"]
+  currentAssignees?: string[];
+  users: AssignmentUser[];
 }
 
-// Mock users - in production, this would come from the backend
-const mockUsers = [
-  { id: "anova", name: "Anova", initials: "AK", isMe: true },
-  { id: "sarah", name: "Sarah", initials: "SJ", isMe: false },
-  { id: "john", name: "John", initials: "JD", isMe: false },
-];
+function getInitials(name: string): string {
+  return name
+    .split(" ")
+    .filter(Boolean)
+    .map((part) => part[0] || "")
+    .join("")
+    .slice(0, 2)
+    .toUpperCase();
+}
 
 export function AssignmentModal({
   isOpen,
@@ -25,6 +35,7 @@ export function AssignmentModal({
   onClose,
   onConfirm,
   currentAssignees = [],
+  users,
 }: AssignmentModalProps) {
   // Track selected users (initialize from currentAssignees)
   const [selectedUsers, setSelectedUsers] = useState<Set<string>>(new Set(currentAssignees));
@@ -80,8 +91,9 @@ export function AssignmentModal({
 
           {/* User List */}
           <div className="space-y-2">
-            {mockUsers.map((user) => {
+            {users.map((user) => {
               const isSelected = selectedUsers.has(user.id);
+              const initials = getInitials(user.displayName || user.id);
               return (
                 <button
                   key={user.id}
@@ -123,14 +135,14 @@ export function AssignmentModal({
                         : "border-zinc-700 bg-zinc-800 text-zinc-300"
                     )}
                   >
-                    {user.initials}
+                    {initials}
                   </div>
 
                   {/* Name */}
                   <div className="flex-1">
                     <p className="text-sm font-medium text-zinc-100">
-                      {user.isMe ? "Me" : user.name}
-                      {user.isMe && <span className="ml-2 text-xs text-amber-400">({user.name})</span>}
+                      {user.isMe ? "Me" : user.displayName}
+                      {user.isMe && <span className="ml-2 text-xs text-amber-400">({user.displayName})</span>}
                     </p>
                     <p className="text-xs text-zinc-500">
                       {user.isMe ? "Assign to yourself" : "Team Member"}
