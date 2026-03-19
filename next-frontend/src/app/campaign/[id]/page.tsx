@@ -29,6 +29,7 @@ interface CampaignDeadlineItem {
   visibility: "team" | "personal";
   assigned_user_id?: string | null;
   created_at?: string | null;
+  completed_at?: string | null;
 }
 
 interface TeamMemberStatusItem {
@@ -56,6 +57,7 @@ export default function CampaignOverviewPage() {
   const [deadlineTime, setDeadlineTime] = useState("");
   const [deadlineVisibility, setDeadlineVisibility] = useState<"team" | "personal">("team");
   const [isCreatingDeadline, setIsCreatingDeadline] = useState(false);
+  const [completingDeadlineId, setCompletingDeadlineId] = useState<string | null>(null);
   const [deadlineError, setDeadlineError] = useState<string | null>(null);
   const [requestActionLoadingId, setRequestActionLoadingId] = useState<string | null>(null);
   const [activityDismissLoadingId, setActivityDismissLoadingId] = useState<string | null>(null);
@@ -157,7 +159,7 @@ export default function CampaignOverviewPage() {
         const token = await getToken();
         if (!token) return;
         const data = await apiFetch<{ deadlines: CampaignDeadlineItem[] }>(
-          `/api/v1/campaigns/${campaignId}/deadlines?include_past=false&limit=100`,
+          `/api/v1/campaigns/${campaignId}/deadlines?limit=100`,
           {
             token,
             method: "GET",
@@ -208,7 +210,7 @@ export default function CampaignOverviewPage() {
           { token, method: "GET" }
         ),
         apiFetch<{ deadlines: CampaignDeadlineItem[] }>(
-          `/api/v1/campaigns/${campaignId}/deadlines?include_past=false&limit=100`,
+          `/api/v1/campaigns/${campaignId}/deadlines?limit=100`,
           { token, method: "GET" }
         ),
       ]);
@@ -220,6 +222,33 @@ export default function CampaignOverviewPage() {
       );
     } finally {
       setIsCreatingDeadline(false);
+    }
+  };
+
+  const getDeadlineTimingLabel = (iso: string) => {
+    const now = new Date();
+    const due = new Date(iso);
+    const nowDate = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    const dueDate = new Date(due.getFullYear(), due.getMonth(), due.getDate()).getTime();
+    if (due.getTime() < now.getTime()) return "Overdue";
+    if (dueDate === nowDate) return "Due today";
+    return "Upcoming";
+  };
+
+  const handleCompleteDeadline = async (deadlineId: string) => {
+    try {
+      setCompletingDeadlineId(deadlineId);
+      const token = await getToken();
+      if (!token) return;
+      await apiFetch(`/api/v1/campaigns/${campaignId}/deadlines/${encodeURIComponent(deadlineId)}/complete`, {
+        token,
+        method: "POST",
+      });
+      setDeadlines((prev) => prev.filter((deadline) => deadline.id !== deadlineId));
+    } catch (err) {
+      console.error("Failed to complete deadline:", err);
+    } finally {
+      setCompletingDeadlineId(null);
     }
   };
 
@@ -499,9 +528,28 @@ export default function CampaignOverviewPage() {
                     ) : null}
                   </div>
                   <div className="flex-shrink-0 ml-3">
-                    <span className="inline-flex items-center rounded-full bg-amber-500/10 border border-amber-500/20 px-2.5 py-1 text-xs font-medium text-amber-400">
-                      {getDaysLeft(deadline.due_at)}d
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={cn(
+                          "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium",
+                          getDeadlineTimingLabel(deadline.due_at) === "Overdue"
+                            ? "bg-red-500/10 border-red-500/20 text-red-300"
+                            : getDeadlineTimingLabel(deadline.due_at) === "Due today"
+                            ? "bg-amber-500/10 border-amber-500/20 text-amber-300"
+                            : "bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
+                        )}
+                      >
+                        {getDeadlineTimingLabel(deadline.due_at)}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleCompleteDeadline(deadline.id)}
+                        disabled={completingDeadlineId === deadline.id}
+                        className="rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 hover:bg-zinc-700/50 disabled:opacity-50"
+                      >
+                        Done
+                      </button>
+                    </div>
                   </div>
                 </div>
               ))

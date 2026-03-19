@@ -140,6 +140,7 @@ class CampaignDeadlineItem(BaseModel):
     visibility: Literal["team", "personal"]
     assigned_user_id: Optional[str] = None
     created_at: Optional[str] = None
+    completed_at: Optional[str] = None
 
 
 class CampaignDeadlinesResponse(BaseModel):
@@ -673,6 +674,32 @@ async def list_campaign_deadlines(
     return CampaignDeadlinesResponse(
         deadlines=[CampaignDeadlineItem(**item) for item in deadlines]
     )
+
+
+@router.post(
+    "/campaigns/{tenant_id}/deadlines/{deadline_id}/complete",
+    response_model=CampaignDeadlineItem,
+)
+async def complete_campaign_deadline(
+    tenant_id: str,
+    deadline_id: str,
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> CampaignDeadlineItem:
+    """Mark a visible deadline complete (idempotent)."""
+    user_id = current_user.get("id", "unknown")
+    try:
+        completed = await graph.complete_campaign_deadline(
+            campaign_id=tenant_id,
+            deadline_id=deadline_id,
+            viewer_user_id=user_id,
+        )
+        return CampaignDeadlineItem(**completed)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
 
 
 @router.get("/campaigns/{tenant_id}/users/search", response_model=DirectoryUserSearchResponse)

@@ -2187,7 +2187,8 @@ class GraphService:
                 due_at: datetime($due_at),
                 visibility: $visibility,
                 assigned_user_id: $assigned_user_id,
-                created_at: datetime()
+                created_at: datetime(),
+                completed_at: null
             })
             RETURN
                 d.id as id,
@@ -2198,7 +2199,8 @@ class GraphService:
                 toString(d.due_at) as due_at,
                 d.visibility as visibility,
                 d.assigned_user_id as assigned_user_id,
-                toString(d.created_at) as created_at
+                toString(d.created_at) as created_at,
+                toString(d.completed_at) as completed_at
             """
             result = await session.run(
                 query,
@@ -2224,6 +2226,7 @@ class GraphService:
                 "visibility": record.get("visibility"),
                 "assigned_user_id": record.get("assigned_user_id"),
                 "created_at": record.get("created_at"),
+                "completed_at": record.get("completed_at"),
             }
 
     async def list_campaign_deadlines(
@@ -2246,7 +2249,7 @@ class GraphService:
                         AND coalesce(d.assigned_user_id, d.created_by) = $viewer_user_id
                     )
                 )
-                AND ($include_past OR d.due_at >= datetime())
+                AND d.completed_at IS NULL
             RETURN
                 d.id as id,
                 d.campaign_id as campaign_id,
@@ -2256,7 +2259,8 @@ class GraphService:
                 toString(d.due_at) as due_at,
                 d.visibility as visibility,
                 d.assigned_user_id as assigned_user_id,
-                toString(d.created_at) as created_at
+                toString(d.created_at) as created_at,
+                toString(d.completed_at) as completed_at
             ORDER BY d.due_at ASC
             LIMIT $limit
             """
@@ -2280,9 +2284,64 @@ class GraphService:
                         "visibility": record.get("visibility"),
                         "assigned_user_id": record.get("assigned_user_id"),
                         "created_at": record.get("created_at"),
+                        "completed_at": record.get("completed_at"),
                     }
                 )
             return items
+
+    async def complete_campaign_deadline(
+        self,
+        *,
+        campaign_id: str,
+        deadline_id: str,
+        viewer_user_id: str,
+    ) -> Dict[str, Any]:
+        """Mark a visible deadline complete (idempotent)."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (d:CampaignDeadline {campaign_id: $campaign_id, id: $deadline_id})
+            WHERE
+                (
+                    d.visibility = "team"
+                    OR (
+                        d.visibility = "personal"
+                        AND coalesce(d.assigned_user_id, d.created_by) = $viewer_user_id
+                    )
+                )
+            SET d.completed_at = coalesce(d.completed_at, datetime())
+            RETURN
+                d.id as id,
+                d.campaign_id as campaign_id,
+                d.created_by as created_by,
+                d.title as title,
+                d.description as description,
+                toString(d.due_at) as due_at,
+                d.visibility as visibility,
+                d.assigned_user_id as assigned_user_id,
+                toString(d.created_at) as created_at,
+                toString(d.completed_at) as completed_at
+            """
+            result = await session.run(
+                query,
+                campaign_id=campaign_id,
+                deadline_id=deadline_id,
+                viewer_user_id=viewer_user_id,
+            )
+            record = await result.single()
+            if not record:
+                raise ValueError("Deadline not found or not visible to current user")
+            return {
+                "id": record.get("id"),
+                "campaign_id": record.get("campaign_id"),
+                "created_by": record.get("created_by"),
+                "title": record.get("title"),
+                "description": record.get("description"),
+                "due_at": record.get("due_at"),
+                "visibility": record.get("visibility"),
+                "assigned_user_id": record.get("assigned_user_id"),
+                "created_at": record.get("created_at"),
+                "completed_at": record.get("completed_at"),
+            }
 
     async def check_membership(self, user_id: str, tenant_id: str) -> bool:
         """Check if a user is a member of a campaign (tenant).
