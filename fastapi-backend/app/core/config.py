@@ -104,6 +104,8 @@ class Settings(BaseSettings):
     RILEY_CAMPAIGN_INTEL_WORKER_URL: Optional[str] = None
     RILEY_CAMPAIGN_INTEL_WORKER_TOKEN: Optional[str] = None
     RILEY_CAMPAIGN_INTEL_TASKS_SERVICE_ACCOUNT_EMAIL: Optional[str] = None
+    DEADLINE_REMINDERS_ENABLED: bool = True
+    DEADLINE_REMINDER_WORKER_TOKEN: Optional[str] = None
 
     # Google Cloud Storage configuration
     GCS_BUCKET_NAME: str = "riley-assets-riley-ai-479422"

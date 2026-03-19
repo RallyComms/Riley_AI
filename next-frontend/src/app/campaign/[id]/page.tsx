@@ -93,19 +93,17 @@ export default function CampaignOverviewPage() {
     [deadlines]
   );
 
-  const formatDueLabel = (iso: string) =>
-    new Date(iso).toLocaleString(undefined, {
+  const formatDueLabel = (iso: string) => {
+    const due = new Date(iso);
+    const dateLabel = due.toLocaleDateString(undefined, {
       month: "short",
       day: "numeric",
+    });
+    const timeLabel = due.toLocaleTimeString(undefined, {
       hour: "numeric",
       minute: "2-digit",
     });
-
-  const getDaysLeft = (iso: string) => {
-    const now = Date.now();
-    const due = new Date(iso).getTime();
-    const diff = due - now;
-    return Math.ceil(diff / (1000 * 60 * 60 * 24));
+    return `${dateLabel} • ${timeLabel}`;
   };
 
   useEffect(() => {
@@ -508,51 +506,56 @@ export default function CampaignOverviewPage() {
           )}
           <div className="space-y-3">
             {sortedDeadlines.length === 0 ? (
-              <p className="text-sm text-zinc-500">No upcoming deadlines yet.</p>
+              <p className="text-sm text-zinc-500">No active deadlines yet.</p>
             ) : (
-              sortedDeadlines.slice(0, 8).map((deadline) => (
-                <div
-                  key={deadline.id}
-                  className="flex items-center justify-between p-3 rounded-lg bg-zinc-800/30 hover:bg-zinc-800/50 transition-colors"
-                >
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium text-zinc-100 truncate">{deadline.title}</p>
-                    <p className="text-xs text-zinc-500 mt-0.5">
-                      {formatDueLabel(deadline.due_at)} •{" "}
-                      {deadline.visibility === "team" ? "Team" : "Personal"}
-                    </p>
-                    {deadline.description ? (
-                      <p className="mt-1 text-[11px] text-zinc-500 line-clamp-2">
-                        {deadline.description}
+              sortedDeadlines.slice(0, 8).map((deadline) => {
+                const timingLabel = getDeadlineTimingLabel(deadline.due_at);
+                const visibilityLabel =
+                  deadline.visibility === "team" ? "Team" : "Just for me";
+                return (
+                  <div
+                    key={deadline.id}
+                    className="flex items-start justify-between gap-3 rounded-lg bg-zinc-800/30 p-3.5 transition-colors hover:bg-zinc-800/50"
+                  >
+                    <div className="min-w-0 flex-1 space-y-1.5">
+                      <p className="line-clamp-2 text-sm font-semibold leading-5 text-zinc-100 break-words">
+                        {deadline.title}
                       </p>
-                    ) : null}
-                  </div>
-                  <div className="flex-shrink-0 ml-3">
-                    <div className="flex items-center gap-2">
+                      <p className="text-xs text-zinc-400">
+                        {formatDueLabel(deadline.due_at)}
+                      </p>
+                      <p className="text-[11px] text-zinc-500">{visibilityLabel}</p>
+                      {deadline.description ? (
+                        <p className="line-clamp-2 break-words text-xs leading-4 text-zinc-500">
+                          {deadline.description}
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-2 self-start pl-1">
                       <span
                         className={cn(
                           "inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium",
-                          getDeadlineTimingLabel(deadline.due_at) === "Overdue"
-                            ? "bg-red-500/10 border-red-500/20 text-red-300"
-                            : getDeadlineTimingLabel(deadline.due_at) === "Due today"
-                            ? "bg-amber-500/10 border-amber-500/20 text-amber-300"
-                            : "bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
+                          timingLabel === "Overdue"
+                            ? "border-red-500/20 bg-red-500/10 text-red-300"
+                            : timingLabel === "Due today"
+                            ? "border-amber-500/20 bg-amber-500/10 text-amber-300"
+                            : "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
                         )}
                       >
-                        {getDeadlineTimingLabel(deadline.due_at)}
+                        {timingLabel}
                       </span>
                       <button
                         type="button"
                         onClick={() => handleCompleteDeadline(deadline.id)}
                         disabled={completingDeadlineId === deadline.id}
-                        className="rounded border border-zinc-700 px-2 py-1 text-[10px] text-zinc-300 hover:bg-zinc-700/50 disabled:opacity-50"
+                        className="rounded border border-zinc-700 px-2.5 py-1 text-[10px] text-zinc-300 hover:bg-zinc-700/50 disabled:opacity-50"
                       >
                         Done
                       </button>
                     </div>
                   </div>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>

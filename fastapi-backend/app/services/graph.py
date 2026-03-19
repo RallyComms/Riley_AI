@@ -1924,12 +1924,15 @@ class GraphService:
                     e.type NOT IN [
                         "document_assigned_to_user",
                         "document_tagged_for_review",
-                        "document_mentioned_user"
+                        "document_mentioned_user",
+                        "deadline_reminder_10m",
+                        "deadline_happening_now"
                     ]
                     OR (
                         $viewer_user_id IS NOT NULL
                         AND (
-                            e.user_id = $viewer_user_id
+                            e.user_id IS NULL
+                            OR e.user_id = $viewer_user_id
                             OR e.actor_user_id = $viewer_user_id
                         )
                     )
@@ -2027,6 +2030,16 @@ class GraphService:
                     "deadline_created",
                     "deadline_upcoming"
                 ]
+                OR (
+                    e.type IN [
+                        "deadline_reminder_10m",
+                        "deadline_happening_now"
+                    ]
+                    AND (
+                        e.user_id IS NULL
+                        OR e.user_id = $user_id
+                    )
+                )
                 OR (
                     EXISTS {
                         MATCH (:User {id: $user_id})-[m:MEMBER_OF]->(c)
@@ -2188,7 +2201,11 @@ class GraphService:
                 visibility: $visibility,
                 assigned_user_id: $assigned_user_id,
                 created_at: datetime(),
-                completed_at: null
+                completed_at: null,
+                reminder_10m_sent_at: null,
+                reminder_10m_event_id: null,
+                reminder_now_sent_at: null,
+                reminder_now_event_id: null
             })
             RETURN
                 d.id as id,
@@ -2227,6 +2244,80 @@ class GraphService:
                 "assigned_user_id": record.get("assigned_user_id"),
                 "created_at": record.get("created_at"),
                 "completed_at": record.get("completed_at"),
+            }
+
+    async def generate_deadline_reminder_events(self) -> Dict[str, Any]:
+        """Generate deduplicated deadline reminder campaign events.
+
+        Emits at most one reminder per deadline per type:
+        - deadline_reminder_10m
+        - deadline_happening_now
+        """
+        async with self._driver.session() as session:
+            ten_min_query = """
+            MATCH (d:CampaignDeadline)
+            WHERE d.completed_at IS NULL
+                AND d.due_at IS NOT NULL
+                AND d.reminder_10m_sent_at IS NULL
+                AND d.due_at > datetime()
+                AND d.due_at <= datetime() + duration({minutes: 10})
+            WITH d
+            CREATE (e:CampaignEvent {
+                id: randomUUID(),
+                campaign_id: d.campaign_id,
+                type: "deadline_reminder_10m",
+                message: "Deadline in 10 minutes: " + coalesce(d.title, "Untitled deadline"),
+                user_id: CASE
+                    WHEN d.visibility = "personal" THEN coalesce(d.assigned_user_id, d.created_by)
+                    ELSE null
+                END,
+                actor_user_id: "system:deadline-reminder",
+                request_id: null,
+                created_at: datetime()
+            })
+            SET
+                d.reminder_10m_sent_at = datetime(),
+                d.reminder_10m_event_id = e.id
+            RETURN count(e) as emitted_count
+            """
+            ten_min_result = await session.run(ten_min_query)
+            ten_min_record = await ten_min_result.single()
+            ten_min_count = int((ten_min_record or {}).get("emitted_count") or 0)
+
+            now_query = """
+            MATCH (d:CampaignDeadline)
+            WHERE d.completed_at IS NULL
+                AND d.due_at IS NOT NULL
+                AND d.reminder_now_sent_at IS NULL
+                AND d.due_at <= datetime()
+                AND d.due_at >= datetime() - duration({minutes: 10})
+            WITH d
+            CREATE (e:CampaignEvent {
+                id: randomUUID(),
+                campaign_id: d.campaign_id,
+                type: "deadline_happening_now",
+                message: "Deadline happening now: " + coalesce(d.title, "Untitled deadline"),
+                user_id: CASE
+                    WHEN d.visibility = "personal" THEN coalesce(d.assigned_user_id, d.created_by)
+                    ELSE null
+                END,
+                actor_user_id: "system:deadline-reminder",
+                request_id: null,
+                created_at: datetime()
+            })
+            SET
+                d.reminder_now_sent_at = datetime(),
+                d.reminder_now_event_id = e.id
+            RETURN count(e) as emitted_count
+            """
+            now_result = await session.run(now_query)
+            now_record = await now_result.single()
+            now_count = int((now_record or {}).get("emitted_count") or 0)
+
+            return {
+                "deadline_reminder_10m": ten_min_count,
+                "deadline_happening_now": now_count,
+                "total_emitted": ten_min_count + now_count,
             }
 
     async def list_campaign_deadlines(
