@@ -76,7 +76,7 @@ function kanbanCardToFile(card: KanbanCard): Asset {
 
 export default function PitchIntakePage() {
   const params = useParams();
-  const { getToken } = useAuth();
+  const { getToken, userId } = useAuth();
   const campaignId = params.id as string;
   const [assets, setAssets] = useState<Asset[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -84,6 +84,9 @@ export default function PitchIntakePage() {
   const [selectedFile, setSelectedFile] = useState<Asset | null>(null);
   const [assignmentModalOpen, setAssignmentModalOpen] = useState(false);
   const [managingAssignees, setManagingAssignees] = useState<KanbanCard | null>(null);
+  const [campaignMembers, setCampaignMembers] = useState<
+    Array<{ user_id: string; display_name: string }>
+  >([]);
 
   // Fetch files from backend and filter by Pitch tag
   useEffect(() => {
@@ -122,6 +125,28 @@ export default function PitchIntakePage() {
 
     fetchFiles();
   }, [campaignId]);
+
+  useEffect(() => {
+    const fetchMembers = async () => {
+      if (!campaignId) return;
+      try {
+        const token = await getToken();
+        if (!token) return;
+        const data = await apiFetch<{ members: Array<{ user_id: string; display_name: string }> }>(
+          `/api/v1/campaigns/${encodeURIComponent(campaignId)}/members?mentions_only=true`,
+          {
+            token,
+            method: "GET",
+          }
+        );
+        setCampaignMembers(data.members || []);
+      } catch (error) {
+        console.error("Failed to load campaign members for assignment:", error);
+        setCampaignMembers([]);
+      }
+    };
+    void fetchMembers();
+  }, [campaignId, getToken]);
 
   // Handle viewing an asset from citation badge
   const handleViewAsset = (filename: string) => {
@@ -333,6 +358,11 @@ export default function PitchIntakePage() {
           setAssignmentModalOpen(false);
           setManagingAssignees(null);
         }}
+        users={campaignMembers.map((member) => ({
+          id: member.user_id,
+          displayName: member.display_name,
+          isMe: member.user_id === userId,
+        }))}
         onConfirm={handleAssignmentConfirm}
       />
     </div>
