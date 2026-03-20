@@ -1706,6 +1706,7 @@ class GraphService:
                 ar.message = $message,
                 ar.created_at = datetime()
             ON MATCH SET
+                ar.id = coalesce(ar.id, $request_id),
                 ar.message = coalesce($message, ar.message)
             MERGE (u)-[:REQUESTED_ACCESS]->(ar)
             MERGE (ar)-[:FOR_CAMPAIGN]->(c)
@@ -1715,6 +1716,7 @@ class GraphService:
                 type: "access_request_created",
                 message: "Access request submitted",
                 user_id: $requester_user_id,
+                actor_user_id: $requester_user_id,
                 request_id: ar.id,
                 created_at: datetime()
             })
@@ -1947,6 +1949,16 @@ class GraphService:
                             })
                             WHERE ar.status = "pending"
                         }
+                        OR (
+                            e.request_id IS NULL
+                            AND EXISTS {
+                                MATCH (ar:CampaignAccessRequest {
+                                    campaign_id: $campaign_id,
+                                    user_id: e.user_id,
+                                    status: "pending"
+                                })
+                            }
+                        )
                     )
                 )
             RETURN
@@ -2016,6 +2028,16 @@ class GraphService:
                             })
                             WHERE ar.status = "pending"
                         }
+                        OR (
+                            e.request_id IS NULL
+                            AND EXISTS {
+                                MATCH (ar:CampaignAccessRequest {
+                                    campaign_id: c.id,
+                                    user_id: e.user_id,
+                                    status: "pending"
+                                })
+                            }
+                        )
                     )
                 )
                 AND

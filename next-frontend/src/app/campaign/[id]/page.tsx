@@ -107,6 +107,7 @@ export default function CampaignOverviewPage() {
   };
 
   useEffect(() => {
+    let mounted = true;
     const fetchEvents = async () => {
       if (!isLoaded || !campaignId) return;
       try {
@@ -119,13 +120,22 @@ export default function CampaignOverviewPage() {
             method: "GET",
           }
         );
-        setEvents(data.events || []);
+        if (mounted) {
+          setEvents(data.events || []);
+        }
       } catch (err) {
         console.error("Failed to load campaign activity events:", err);
-        setEvents([]);
+        if (mounted) {
+          setEvents([]);
+        }
       }
     };
     fetchEvents();
+    const interval = setInterval(fetchEvents, 30000);
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+    };
   }, [campaignId, getToken, isLoaded]);
 
   useEffect(() => {
