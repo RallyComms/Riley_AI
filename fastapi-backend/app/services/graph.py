@@ -1923,13 +1923,13 @@ class GraphService:
                     }
                 )
                 AND (
-                    e.type NOT IN [
+                    NOT (e.type IN [
                         "document_assigned_to_user",
                         "document_tagged_for_review",
                         "document_mentioned_user",
                         "deadline_reminder_10m",
                         "deadline_happening_now"
-                    ]
+                    ])
                     OR (
                         $viewer_user_id IS NOT NULL
                         AND (
@@ -2008,11 +2008,11 @@ class GraphService:
             }
             MATCH (e:CampaignEvent {campaign_id: c.id})
             WHERE
-                e.type NOT IN [
+                NOT (e.type IN [
                     "document_assigned_to_user",
                     "document_tagged_for_review",
                     "document_mentioned_user"
-                ]
+                ])
                 AND
                 NOT EXISTS {
                     MATCH (:User {id: $user_id})-[:DISMISSED_FEED_EVENT]->(e)
