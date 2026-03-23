@@ -5,6 +5,15 @@ from typing import Any, Dict, List, Optional
 from neo4j import AsyncGraphDatabase
 
 from app.core.config import get_settings
+from app.services.analytics_contract import (
+    canonical_campaign_id,
+    classify_chat_type,
+    infer_provider_from_model,
+    normalize_event_type,
+    now_iso_utc,
+    resolve_riley_display_identity,
+    safe_metadata_json,
+)
 
 
 class GraphService:
@@ -45,6 +54,204 @@ class GraphService:
             )
             record = await result.single()
             return bool(record and record.get("exists"))
+
+    async def append_analytics_event(
+        self,
+        *,
+        event_id: str,
+        source_event_type_raw: str,
+        source_entity: str,
+        campaign_id: Optional[str] = None,
+        tenant_id: Optional[str] = None,
+        client_id: Optional[str] = None,
+        is_global: Optional[bool] = None,
+        user_id: Optional[str] = None,
+        actor_user_id: Optional[str] = None,
+        occurred_at: Optional[str] = None,
+        object_id: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        status: Optional[str] = None,
+        latency_ms: Optional[int] = None,
+        cost_estimate_usd: Optional[float] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append/merge a normalized analytics event contract row."""
+        canonical_id = canonical_campaign_id(
+            campaign_id=campaign_id,
+            tenant_id=tenant_id,
+            client_id=client_id,
+            is_global=is_global,
+        )
+        metadata_obj = dict(metadata or {})
+        resolved_user_display = resolve_riley_display_identity(
+            display_name=metadata_obj.get("user_display_name"),
+            username=metadata_obj.get("user_username"),
+            email=metadata_obj.get("user_email"),
+            user_id=user_id,
+        )
+        resolved_actor_display = resolve_riley_display_identity(
+            display_name=metadata_obj.get("actor_display_name"),
+            username=metadata_obj.get("actor_username"),
+            email=metadata_obj.get("actor_email"),
+            user_id=actor_user_id,
+        )
+        metadata_obj.setdefault("user_display_name_normalized", resolved_user_display)
+        metadata_obj.setdefault("actor_display_name_normalized", resolved_actor_display)
+        chat_type = classify_chat_type(
+            source_entity=source_entity,
+            is_private_thread=metadata_obj.get("is_private_thread"),
+        )
+        normalized_type, feature_area, object_type = normalize_event_type(
+            source_event_type_raw=source_event_type_raw,
+            source_entity=source_entity,
+            chat_type=chat_type,
+        )
+        if chat_type and "chat_type" not in metadata_obj:
+            metadata_obj["chat_type"] = chat_type
+        target_object_id = str(object_id or "").strip() or None
+        if target_object_id is None and metadata_obj.get("request_id"):
+            target_object_id = str(metadata_obj.get("request_id") or "").strip() or None
+        resolved_provider = provider or infer_provider_from_model(model)
+
+        async with self._driver.session() as session:
+            query = """
+            MERGE (e:AnalyticsEvent {event_id: $event_id})
+            ON CREATE SET
+                e.created_at = datetime()
+            SET
+                e.event_type_normalized = $event_type_normalized,
+                e.source_event_type_raw = $source_event_type_raw,
+                e.occurred_at = $occurred_at,
+                e.campaign_id = $campaign_id,
+                e.user_id = $user_id,
+                e.actor_user_id = $actor_user_id,
+                e.feature_area = $feature_area,
+                e.object_type = $object_type,
+                e.object_id = $object_id,
+                e.provider = $provider,
+                e.model = $model,
+                e.status = $status,
+                e.latency_ms = $latency_ms,
+                e.cost_estimate_usd = $cost_estimate_usd,
+                e.source_entity = $source_entity,
+                e.metadata_json = $metadata_json,
+                e.updated_at = datetime()
+            """
+            await session.run(
+                query,
+                event_id=event_id,
+                event_type_normalized=normalized_type,
+                source_event_type_raw=source_event_type_raw,
+                occurred_at=occurred_at or now_iso_utc(),
+                campaign_id=canonical_id,
+                user_id=user_id,
+                actor_user_id=actor_user_id,
+                feature_area=feature_area,
+                object_type=object_type,
+                object_id=target_object_id,
+                provider=resolved_provider,
+                model=model,
+                status=status,
+                latency_ms=latency_ms,
+                cost_estimate_usd=cost_estimate_usd,
+                source_entity=source_entity,
+                metadata_json=safe_metadata_json(metadata_obj),
+            )
+
+    async def rebuild_analytics_daily_rollups(self, *, days_back: int = 30) -> Dict[str, int]:
+        """Rebuild v1 daily analytics rollups from AnalyticsEvent."""
+        async with self._driver.session() as session:
+            campaign_query = """
+            MATCH (e:AnalyticsEvent)
+            WHERE date(datetime(e.occurred_at)) >= date() - duration({days: $days_back})
+            WITH
+                date(datetime(e.occurred_at)) as event_date,
+                coalesce(e.campaign_id, "unknown_campaign") as campaign_id,
+                count(e) as event_count,
+                count(DISTINCT coalesce(e.user_id, e.actor_user_id, "")) as active_users,
+                coalesce(sum(e.cost_estimate_usd), 0.0) as total_cost_estimate_usd
+            MERGE (r:AnalyticsDailyCampaignRollup {event_date: toString(event_date), campaign_id: campaign_id})
+            SET
+                r.event_count = event_count,
+                r.active_users = active_users,
+                r.total_cost_estimate_usd = total_cost_estimate_usd,
+                r.updated_at = datetime()
+            RETURN count(r) as count_rows
+            """
+            user_query = """
+            MATCH (e:AnalyticsEvent)
+            WHERE date(datetime(e.occurred_at)) >= date() - duration({days: $days_back})
+            WITH
+                date(datetime(e.occurred_at)) as event_date,
+                coalesce(e.campaign_id, "unknown_campaign") as campaign_id,
+                coalesce(e.user_id, e.actor_user_id, "unknown_user") as user_id,
+                count(e) as event_count,
+                coalesce(sum(e.cost_estimate_usd), 0.0) as total_cost_estimate_usd
+            MERGE (r:AnalyticsDailyUserRollup {
+                event_date: toString(event_date),
+                campaign_id: campaign_id,
+                user_id: user_id
+            })
+            SET
+                r.event_count = event_count,
+                r.total_cost_estimate_usd = total_cost_estimate_usd,
+                r.updated_at = datetime()
+            RETURN count(r) as count_rows
+            """
+            system_query = """
+            MATCH (e:AnalyticsEvent)
+            WHERE date(datetime(e.occurred_at)) >= date() - duration({days: $days_back})
+            WITH
+                date(datetime(e.occurred_at)) as event_date,
+                count(e) as event_count,
+                count(DISTINCT coalesce(e.campaign_id, "unknown_campaign")) as active_campaigns,
+                count(DISTINCT coalesce(e.user_id, e.actor_user_id, "unknown_user")) as active_users,
+                coalesce(sum(e.cost_estimate_usd), 0.0) as total_cost_estimate_usd,
+                avg(toFloat(e.latency_ms)) as avg_latency_ms
+            MERGE (r:AnalyticsDailySystemRollup {event_date: toString(event_date)})
+            SET
+                r.event_count = event_count,
+                r.active_campaigns = active_campaigns,
+                r.active_users = active_users,
+                r.total_cost_estimate_usd = total_cost_estimate_usd,
+                r.avg_latency_ms = avg_latency_ms,
+                r.updated_at = datetime()
+            RETURN count(r) as count_rows
+            """
+            provider_query = """
+            MATCH (e:AnalyticsEvent)
+            WHERE date(datetime(e.occurred_at)) >= date() - duration({days: $days_back})
+              AND e.provider IS NOT NULL
+            WITH
+                date(datetime(e.occurred_at)) as event_date,
+                coalesce(e.provider, "unknown_provider") as provider,
+                coalesce(e.model, "unknown_model") as model,
+                count(e) as event_count,
+                coalesce(sum(e.cost_estimate_usd), 0.0) as total_cost_estimate_usd,
+                avg(toFloat(e.latency_ms)) as avg_latency_ms
+            MERGE (r:AnalyticsDailyProviderRollup {
+                event_date: toString(event_date),
+                provider: provider,
+                model: model
+            })
+            SET
+                r.event_count = event_count,
+                r.total_cost_estimate_usd = total_cost_estimate_usd,
+                r.avg_latency_ms = avg_latency_ms,
+                r.updated_at = datetime()
+            RETURN count(r) as count_rows
+            """
+            campaign_rows = int((await (await session.run(campaign_query, days_back=days_back)).single() or {}).get("count_rows") or 0)
+            user_rows = int((await (await session.run(user_query, days_back=days_back)).single() or {}).get("count_rows") or 0)
+            system_rows = int((await (await session.run(system_query, days_back=days_back)).single() or {}).get("count_rows") or 0)
+            provider_rows = int((await (await session.run(provider_query, days_back=days_back)).single() or {}).get("count_rows") or 0)
+            return {
+                "campaign_rollups": campaign_rows,
+                "user_rollups": user_rows,
+                "system_rollups": system_rows,
+                "provider_rollups": provider_rows,
+            }
 
     async def get_client_structure(self, client_id: str) -> Dict[str, Any]:
         """Retrieve the structure of a client including campaigns and assets.
@@ -128,6 +335,17 @@ class GraphService:
                 role=role,
                 content=content,
             )
+        await self.append_analytics_event(
+            event_id=f"assistant_message:{session_id}:{role}:{now_iso_utc()}",
+            source_event_type_raw="assistant_message_saved",
+            source_entity="Message",
+            campaign_id=tenant_id,
+            user_id=user_id,
+            actor_user_id=user_id,
+            object_id=session_id,
+            status=role,
+            metadata={"chat_type": "assistant_chat"},
+        )
 
     async def get_chat_history(
         self, session_id: str, tenant_id: str, user_id: str, limit: int = 10
@@ -447,11 +665,24 @@ class GraphService:
             record = await result.single()
             if not record:
                 raise Exception("Failed to create Riley conversation")
-            return {
+            created = {
                 "id": record["id"],
                 "title": record.get("title") or "New Conversation",
                 "created_at": record.get("created_at"),
             }
+            await self.append_analytics_event(
+                event_id=f"assistant_session:{created.get('id')}:created",
+                source_event_type_raw="assistant_session_created",
+                source_entity="ChatSession",
+                campaign_id=tenant_id,
+                user_id=user_id,
+                actor_user_id=user_id,
+                occurred_at=created.get("created_at"),
+                object_id=created.get("id"),
+                status="created",
+                metadata={"chat_type": "assistant_chat"},
+            )
+            return created
 
     async def get_riley_conversation_messages(
         self, session_id: str, tenant_id: str, user_id: str, limit: int = 100
@@ -512,6 +743,17 @@ class GraphService:
                 role=role,
                 content=content,
             )
+        await self.append_analytics_event(
+            event_id=f"assistant_message:{session_id}:{role}:{now_iso_utc()}",
+            source_event_type_raw="assistant_conversation_message_appended",
+            source_entity="Message",
+            campaign_id=tenant_id,
+            user_id=user_id,
+            actor_user_id=user_id,
+            object_id=session_id,
+            status=role,
+            metadata={"chat_type": "assistant_chat"},
+        )
 
     async def create_riley_report_job(
         self,
@@ -609,7 +851,24 @@ class GraphService:
             record = await result.single()
             if not record:
                 raise Exception("Failed to create Riley report job")
-            return dict(record)
+            created_job = dict(record)
+            await self.append_analytics_event(
+                event_id=f"riley_report_job:{report_job_id}:created",
+                source_event_type_raw="report_job_created",
+                source_entity="RileyReportJob",
+                campaign_id=tenant_id,
+                user_id=user_id,
+                actor_user_id=user_id,
+                occurred_at=created_job.get("created_at"),
+                object_id=report_job_id,
+                status=created_job.get("status"),
+                metadata={
+                    "mode": mode,
+                    "report_type": report_type,
+                    "conversation_id": conversation_id,
+                },
+            )
+            return created_job
 
     async def list_riley_report_jobs(
         self,
@@ -943,6 +1202,26 @@ class GraphService:
                 failure_code=failure_code,
                 failure_detail=failure_detail,
             )
+        await self.append_analytics_event(
+            event_id=f"riley_report_job:{report_job_id}:status:{status}:{now_iso_utc()}",
+            source_event_type_raw="report_job_status_changed",
+            source_entity="RileyReportJob",
+            campaign_id=tenant_id,
+            user_id=user_id,
+            actor_user_id=user_id,
+            object_id=report_job_id,
+            status=status,
+            model=generation_model,
+            metadata={
+                "failure_stage": failure_stage,
+                "failure_code": failure_code,
+                "retrieval_doc_count": retrieval_doc_count,
+                "retrieval_chunk_count": retrieval_chunk_count,
+                "context_chars_included": context_chars_included,
+                "report_fidelity_level": report_fidelity_level,
+                "report_context_strategy": report_context_strategy,
+            },
+        )
 
     async def upsert_riley_document_intelligence(
         self,
@@ -1733,11 +2012,24 @@ class GraphService:
             record = await result.single()
             if not record:
                 raise ValueError(f"Campaign {tenant_id} not found")
-            return {
+            created = {
                 "id": record.get("id"),
                 "status": record.get("status") or "pending",
                 "created_at": record.get("created_at"),
             }
+            await self.append_analytics_event(
+                event_id=f"campaign_access_request:{created.get('id')}",
+                source_event_type_raw="access_request_created",
+                source_entity="CampaignAccessRequest",
+                campaign_id=tenant_id,
+                user_id=requester_user_id,
+                actor_user_id=requester_user_id,
+                occurred_at=created.get("created_at"),
+                object_id=created.get("id"),
+                status=created.get("status"),
+                metadata={"message_present": bool(normalized_message)},
+            )
+            return created
 
     async def list_campaign_access_requests(
         self, campaign_id: str, status: str = "pending", limit: int = 50
@@ -1897,7 +2189,7 @@ class GraphService:
             record = await result.single()
             if not record:
                 raise ValueError("Pending access request not found")
-            return {
+            decided_payload = {
                 "id": record.get("id"),
                 "user_id": record.get("user_id"),
                 "status": record.get("status"),
@@ -1905,6 +2197,24 @@ class GraphService:
                 "decided_at": record.get("decided_at"),
                 "decided_by": record.get("decided_by"),
             }
+            decided_type = (
+                "access_request_approved"
+                if str(decided_payload.get("status") or "").lower() == "approved"
+                else "access_request_denied"
+            )
+            await self.append_analytics_event(
+                event_id=f"campaign_access_request_decision:{decided_payload.get('id')}:{decided_type}",
+                source_event_type_raw=decided_type,
+                source_entity="CampaignAccessRequest",
+                campaign_id=campaign_id,
+                user_id=decided_payload.get("user_id"),
+                actor_user_id=actor_user_id,
+                occurred_at=decided_payload.get("decided_at") or decided_payload.get("created_at"),
+                object_id=decided_payload.get("id"),
+                status=decided_payload.get("status"),
+                metadata={"decision_actor_user_id": actor_user_id},
+            )
+            return decided_payload
 
     async def list_campaign_events(
         self,
@@ -2192,8 +2502,11 @@ class GraphService:
         user_id: Optional[str] = None,
         actor_user_id: Optional[str] = None,
         request_id: Optional[str] = None,
+        object_id: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Create a campaign-scoped activity event."""
+        event_id = str(uuid.uuid4())
         async with self._driver.session() as session:
             query = """
             CREATE (e:CampaignEvent {
@@ -2209,7 +2522,7 @@ class GraphService:
             """
             await session.run(
                 query,
-                event_id=str(uuid.uuid4()),
+                event_id=event_id,
                 campaign_id=campaign_id,
                 event_type=event_type,
                 message=message,
@@ -2217,6 +2530,16 @@ class GraphService:
                 actor_user_id=actor_user_id,
                 request_id=request_id,
             )
+        await self.append_analytics_event(
+            event_id=event_id,
+            source_event_type_raw=event_type,
+            source_entity="CampaignEvent",
+            campaign_id=campaign_id,
+            user_id=user_id,
+            actor_user_id=actor_user_id,
+            object_id=object_id or request_id,
+            metadata={"request_id": request_id, **(metadata or {})},
+        )
 
     async def create_campaign_deadline(
         self,
@@ -2293,7 +2616,7 @@ class GraphService:
             record = await result.single()
             if not record:
                 raise ValueError(f"Campaign {campaign_id} not found")
-            return {
+            created = {
                 "id": record.get("id"),
                 "campaign_id": record.get("campaign_id"),
                 "created_by": record.get("created_by"),
@@ -2305,6 +2628,22 @@ class GraphService:
                 "created_at": record.get("created_at"),
                 "completed_at": record.get("completed_at"),
             }
+            await self.append_analytics_event(
+                event_id=f"campaign_deadline:{created.get('id')}:created",
+                source_event_type_raw="campaign_deadline_created",
+                source_entity="CampaignDeadline",
+                campaign_id=campaign_id,
+                user_id=created.get("assigned_user_id") or created_by,
+                actor_user_id=created_by,
+                occurred_at=created.get("created_at"),
+                object_id=created.get("id"),
+                status="created",
+                metadata={
+                    "visibility": created.get("visibility"),
+                    "assigned_user_id": created.get("assigned_user_id"),
+                },
+            )
+            return created
 
     async def generate_deadline_reminder_events(self) -> Dict[str, Any]:
         """Generate deduplicated deadline reminder campaign events.
@@ -2481,7 +2820,7 @@ class GraphService:
             record = await result.single()
             if not record:
                 raise ValueError("Deadline not found or not visible to current user")
-            return {
+            completed = {
                 "id": record.get("id"),
                 "campaign_id": record.get("campaign_id"),
                 "created_by": record.get("created_by"),
@@ -2493,6 +2832,19 @@ class GraphService:
                 "created_at": record.get("created_at"),
                 "completed_at": record.get("completed_at"),
             }
+            await self.append_analytics_event(
+                event_id=f"campaign_deadline:{completed.get('id')}:completed",
+                source_event_type_raw="campaign_deadline_completed",
+                source_entity="CampaignDeadline",
+                campaign_id=campaign_id,
+                user_id=completed.get("assigned_user_id") or viewer_user_id,
+                actor_user_id=viewer_user_id,
+                occurred_at=completed.get("completed_at"),
+                object_id=completed.get("id"),
+                status="completed",
+                metadata={"visibility": completed.get("visibility")},
+            )
+            return completed
 
     async def check_membership(self, user_id: str, tenant_id: str) -> bool:
         """Check if a user is a member of a campaign (tenant).
@@ -2684,6 +3036,22 @@ class GraphService:
                         event_id=str(uuid.uuid4()),
                         message=f"{actor_display_name} mentioned you in campaign chat",
                     )
+            await self.append_analytics_event(
+                event_id=f"team_message:{created_message.get('id')}",
+                source_event_type_raw="team_message_posted",
+                source_entity="TeamMessage",
+                campaign_id=campaign_id,
+                user_id=user_id,
+                actor_user_id=user_id,
+                occurred_at=created_message.get("timestamp"),
+                object_id=created_message.get("id"),
+                status="created",
+                metadata={
+                    "chat_type": "campaign_team_chat",
+                    "mention_count": len(normalized_mentions),
+                    "content_chars": len(content),
+                },
+            )
             return created_message
 
     async def create_private_chat_thread(
@@ -2994,6 +3362,24 @@ class GraphService:
                         event_id=str(uuid.uuid4()),
                         message=f"{actor_display_name} mentioned you in campaign chat",
                     )
+            await self.append_analytics_event(
+                event_id=f"thread_message:{created_message.get('id')}",
+                source_event_type_raw="private_thread_message_posted",
+                source_entity="ThreadMessage",
+                campaign_id=campaign_id,
+                user_id=user_id,
+                actor_user_id=user_id,
+                occurred_at=created_message.get("timestamp"),
+                object_id=created_message.get("id"),
+                status="created",
+                metadata={
+                    "chat_type": "private_thread_chat",
+                    "thread_id": thread_id,
+                    "is_private_thread": True,
+                    "mention_count": len(normalized_mentions),
+                    "content_chars": len(content),
+                },
+            )
             return created_message
 
     async def update_team_message(

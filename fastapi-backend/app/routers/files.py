@@ -1302,6 +1302,7 @@ async def promote_to_archive(
     # Log user_id for every request
     user_id = current_user.get("id", "unknown")
     print(f"Promote to archive request: user_id={user_id}, file_id={file_id}")
+    settings = get_settings()
     
     try:
         await _get_file_point_for_tenant(
