@@ -69,10 +69,23 @@ class FileListItem(BaseModel):
     ingestion_status: Optional[str] = None
     extracted_char_count: Optional[int] = None
     chunk_count: Optional[int] = None
+    is_golden: Optional[bool] = None
+    client_id: Optional[str] = None
+    source_campaign_id: Optional[str] = None
 
 
 class FileListResponse(BaseModel):
     files: List[FileListItem]
+
+
+class FirmDocumentsAuditResponse(BaseModel):
+    total_scanned: int
+    valid_records: int
+    blocked_records: int
+    blocked_by_reason: Dict[str, int]
+    safe_delete_candidate_count: int
+    safe_delete_candidate_ids: List[str]
+    blocked_examples: List[Dict[str, Any]]
 
 
 class RenameRequest(BaseModel):
@@ -173,6 +186,54 @@ async def _get_file_point_for_tenant(
 
 def _normalize_user_id(value: Any) -> str:
     return str(value or "").strip().lower()
+
+
+def _normalize_optional_string(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _looks_invalid_filename(filename: str) -> bool:
+    lowered = filename.strip().lower()
+    if not lowered:
+        return True
+    return lowered in {"unknown", "untitled", "none", "null", "n/a", "na"}
+
+
+def _resolve_origin_campaign_id(file_data: Dict[str, Any]) -> str:
+    for key in ("source_campaign_id", "client_id", "tenant_id"):
+        candidate = _normalize_optional_string(file_data.get(key))
+        lowered = candidate.lower()
+        if candidate and lowered not in {"unknown", "none", "null", "global"}:
+            return candidate
+    return ""
+
+
+def _has_usable_file_reference(file_data: Dict[str, Any]) -> bool:
+    url = _normalize_optional_string(file_data.get("url"))
+    preview_url = _normalize_optional_string(file_data.get("preview_url"))
+    return bool(url or preview_url)
+
+
+def _classify_global_record(file_data: Dict[str, Any]) -> List[str]:
+    reasons: List[str] = []
+    filename = _normalize_optional_string(file_data.get("filename"))
+    origin_campaign_id = _resolve_origin_campaign_id(file_data)
+    if _looks_invalid_filename(filename):
+        reasons.append("missing_filename")
+    if not origin_campaign_id:
+        reasons.append("missing_origin_campaign")
+    if not _has_usable_file_reference(file_data):
+        reasons.append("missing_file_reference")
+    return reasons
+
+
+def _is_safe_orphan_delete_candidate(reasons: List[str]) -> bool:
+    # Conservative delete candidate: no filename, no origin, and no usable URL/preview.
+    return {
+        "missing_filename",
+        "missing_origin_campaign",
+        "missing_file_reference",
+    }.issubset(set(reasons))
 
 
 def _normalize_user_id_list(values: Any) -> List[str]:
@@ -358,9 +419,13 @@ async def list_files(
             
             # Convert to FileListItem format
             for file_data in global_files:
-                filename = file_data.get("filename")
+                reasons = _classify_global_record(file_data)
+                if reasons:
+                    continue
+                filename = _normalize_optional_string(file_data.get("filename"))
                 if not filename:
                     continue
+                origin_campaign_id = _resolve_origin_campaign_id(file_data)
                 
                 # Determine file type from extension or payload
                 extension = Path(filename).suffix.lower().lstrip(".")
@@ -378,6 +443,9 @@ async def list_files(
                     date=date,
                     size="Unknown",  # Global files may not have size
                     tags=[],  # Global files don't have tags
+                    is_golden=bool(file_data.get("is_golden", False)),
+                    client_id=origin_campaign_id,
+                    source_campaign_id=origin_campaign_id,
                     ai_enabled=file_data.get("ai_enabled"),
                     ocr_enabled=file_data.get("ocr_enabled"),
                     ocr_status=file_data.get("ocr_status"),
@@ -388,6 +456,10 @@ async def list_files(
                     vision_processed=file_data.get("vision_processed"),
                     ocr_confidence=file_data.get("ocr_confidence"),
                     ocr_extracted_at=file_data.get("ocr_extracted_at"),
+                    preview_url=file_data.get("preview_url"),
+                    preview_type=file_data.get("preview_type"),
+                    preview_status=file_data.get("preview_status"),
+                    preview_error=file_data.get("preview_error"),
                     ingestion_status=file_data.get("ingestion_status"),
                     extracted_char_count=file_data.get("extracted_char_count"),
                     chunk_count=file_data.get("chunk_count"),
@@ -443,6 +515,65 @@ async def list_files(
         ) from exc
     
     return FileListResponse(files=files)
+
+
+@router.get("/files/global/audit", response_model=FirmDocumentsAuditResponse)
+async def audit_firm_documents(
+    tenant_id: str = Query("global", description="Must be global for Firm Documents audit."),
+    current_user: Dict = Depends(verify_tenant_access),
+) -> FirmDocumentsAuditResponse:
+    """Audit global Firm Documents records and classify invalid/orphaned rows."""
+    if tenant_id != "global":
+        raise HTTPException(status_code=400, detail="tenant_id must be 'global' for this audit endpoint.")
+
+    settings = get_settings()
+    global_files = await vector_service.list_global_files(
+        collection_name=settings.QDRANT_COLLECTION_TIER_1,
+        limit=5000,
+    )
+
+    blocked_by_reason: Dict[str, int] = {}
+    blocked_examples: List[Dict[str, Any]] = []
+    valid_records = 0
+    safe_delete_candidate_ids: List[str] = []
+
+    for file_data in global_files:
+        reasons = _classify_global_record(file_data)
+        if not reasons:
+            valid_records += 1
+            continue
+
+        for reason in reasons:
+            blocked_by_reason[reason] = blocked_by_reason.get(reason, 0) + 1
+
+        if _is_safe_orphan_delete_candidate(reasons):
+            safe_delete_candidate_ids.append(str(file_data.get("id") or ""))
+
+        if len(blocked_examples) < 50:
+            blocked_examples.append(
+                {
+                    "id": str(file_data.get("id") or ""),
+                    "filename": _normalize_optional_string(file_data.get("filename")) or None,
+                    "origin_campaign_id": _resolve_origin_campaign_id(file_data) or None,
+                    "url_present": bool(_normalize_optional_string(file_data.get("url"))),
+                    "preview_url_present": bool(_normalize_optional_string(file_data.get("preview_url"))),
+                    "reasons": reasons,
+                }
+            )
+
+    total_scanned = len(global_files)
+    blocked_records = total_scanned - valid_records
+    safe_delete_candidate_ids = [item for item in safe_delete_candidate_ids if item]
+
+    return FirmDocumentsAuditResponse(
+        total_scanned=total_scanned,
+        valid_records=valid_records,
+        blocked_records=blocked_records,
+        blocked_by_reason=blocked_by_reason,
+        safe_delete_candidate_count=len(safe_delete_candidate_ids),
+        safe_delete_candidate_ids=safe_delete_candidate_ids,
+        blocked_examples=blocked_examples,
+    )
 
 
 @router.get("/files/messaging/list", response_model=FileListResponse)

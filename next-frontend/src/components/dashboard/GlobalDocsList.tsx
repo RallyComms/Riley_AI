@@ -18,6 +18,12 @@ interface GlobalFile {
   tags: string[];
   is_golden?: boolean;
   client_id?: string; // Original campaign ID
+  source_campaign_id?: string;
+  preview_url?: string | null;
+  preview_type?: string | null;
+  preview_status?: "complete" | "failed" | "processing" | "queued" | null;
+  preview_error?: string | null;
+  ingestion_status?: string | null;
 }
 
 function getFileIcon(type: string) {
@@ -55,6 +61,20 @@ function formatCampaignName(campaignId: string | undefined): string {
     .join(" ");
 }
 
+function hasValidGlobalRecord(file: GlobalFile): boolean {
+  const name = String(file.name || "").trim().toLowerCase();
+  const origin = String(file.source_campaign_id || file.client_id || "").trim().toLowerCase();
+  const url = String(file.url || "").trim();
+  const previewUrl = String(file.preview_url || "").trim();
+  if (!name || ["unknown", "untitled", "none", "null", "n/a", "na"].includes(name)) {
+    return false;
+  }
+  if (!origin || ["unknown", "none", "null", "global"].includes(origin)) {
+    return false;
+  }
+  return Boolean(url || previewUrl);
+}
+
 interface GlobalDocsListProps {
   onViewDocument?: (file: Asset) => void;
 }
@@ -82,7 +102,8 @@ export function GlobalDocsList({ onViewDocument }: GlobalDocsListProps) {
             method: "GET",
           }
         );
-        setFiles(data.files || []);
+        const incoming = data.files || [];
+        setFiles(incoming.filter(hasValidGlobalRecord));
       } catch (error) {
         console.error("Error fetching global files:", error);
         setFiles([]);
@@ -118,6 +139,11 @@ export function GlobalDocsList({ onViewDocument }: GlobalDocsListProps) {
       name: file.name,
       type: file.type as Asset["type"],
       url: file.url,
+      previewUrl: file.preview_url ?? null,
+      previewType: file.preview_type ?? null,
+      previewStatus: file.preview_status ?? null,
+      previewError: file.preview_error ?? null,
+      ingestionStatus: (file.ingestion_status as Asset["ingestionStatus"]) ?? null,
       tags: convertTags(file.tags),
       uploadDate: file.date.split("T")[0],
       uploader: "Firm Archive",
@@ -223,7 +249,7 @@ export function GlobalDocsList({ onViewDocument }: GlobalDocsListProps) {
                       {/* Origin Campaign */}
                       <td className="px-4 py-4">
                         <span className="text-sm text-zinc-400">
-                          {formatCampaignName(file.client_id)}
+                          {formatCampaignName(file.source_campaign_id || file.client_id)}
                         </span>
                       </td>
 

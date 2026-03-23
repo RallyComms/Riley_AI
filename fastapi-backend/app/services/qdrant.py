@@ -991,6 +991,11 @@ class VectorService:
                 "year": year,
                 "url": payload.get("url", ""),
                 "tags": payload.get("tags", []),
+                "status": payload.get("status"),
+                "assignee": payload.get("assignee"),
+                "assigned_to": payload.get("assigned_to", []),
+                "messaging_visible_user_ids": payload.get("messaging_visible_user_ids", []),
+                "messaging_created_by_user_id": payload.get("messaging_created_by_user_id"),
                 "size": payload.get("size", "Unknown"),
                 "upload_date": payload.get("upload_date", datetime.now().isoformat()),
                 "ai_enabled": payload.get("ai_enabled"),
@@ -1110,8 +1115,13 @@ class VectorService:
         files = []
         for point in points:
             payload = point.payload or {}
-            filename = payload.get("filename") or payload.get("name", "Unknown")
+            filename = payload.get("filename") or payload.get("name")
             file_type = payload.get("type") or payload.get("file_type", "")
+            source_campaign_id = (
+                payload.get("source_campaign_id")
+                or payload.get("client_id")
+                or payload.get("tenant_id")
+            )
             
             files.append({
                 "id": str(point.id),
@@ -1120,7 +1130,8 @@ class VectorService:
                 "url": payload.get("url", ""),
                 "is_golden": payload.get("is_golden", False),
                 "promoted_at": payload.get("promoted_at"),
-                "client_id": payload.get("client_id"),  # Original campaign ID
+                "client_id": source_campaign_id,
+                "source_campaign_id": source_campaign_id,
                 "ai_enabled": payload.get("ai_enabled"),
                 "ocr_enabled": payload.get("ocr_enabled"),
                 "ocr_status": payload.get("ocr_status"),
@@ -1129,6 +1140,7 @@ class VectorService:
                 "preview_url": payload.get("preview_url"),
                 "preview_type": payload.get("preview_type"),
                 "preview_status": payload.get("preview_status"),
+                "preview_error": payload.get("preview_error"),
                 "ingestion_status": payload.get("ingestion_status"),
                 "extracted_char_count": payload.get("extracted_char_count"),
                 "chunk_count": payload.get("chunk_count"),
@@ -1352,6 +1364,15 @@ class VectorService:
         
         # Mark as global file (CRITICAL for retrieval)
         new_payload["is_global"] = True
+
+        # Preserve original campaign/source scope for Firm Documents origin metadata.
+        source_campaign_id = (
+            original_payload.get("source_campaign_id")
+            or original_payload.get("client_id")
+            or original_payload.get("tenant_id")
+        )
+        if source_campaign_id:
+            new_payload["source_campaign_id"] = source_campaign_id
         
         # Remove tenant-specific fields or set to "global"
         # Remove client_id to ensure it's truly global (or set to "global" if needed for tracking)
