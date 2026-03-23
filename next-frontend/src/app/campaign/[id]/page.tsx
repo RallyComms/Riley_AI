@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
 import { useAuth, useUser } from "@clerk/nextjs";
-import { Users, FileText, Calendar } from "lucide-react";
+import { Users, FileText, Calendar, Plus, X } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { useCampaignName } from "@app/lib/useCampaignName";
 import { apiFetch } from "@app/lib/api";
@@ -17,6 +17,13 @@ interface CampaignEventItem {
   user_id?: string | null;
   actor_user_id?: string | null;
   created_at?: string | null;
+  requester_display_name?: string | null;
+}
+
+interface DirectoryUserResult {
+  id: string;
+  email: string;
+  display_name: string;
 }
 
 interface CampaignDeadlineItem {
@@ -61,10 +68,18 @@ export default function CampaignOverviewPage() {
   const [deadlineError, setDeadlineError] = useState<string | null>(null);
   const [requestActionLoadingId, setRequestActionLoadingId] = useState<string | null>(null);
   const [activityDismissLoadingId, setActivityDismissLoadingId] = useState<string | null>(null);
+  const [isAddUserModalOpen, setIsAddUserModalOpen] = useState(false);
+  const [memberSearchQuery, setMemberSearchQuery] = useState("");
+  const [memberSearchResults, setMemberSearchResults] = useState<DirectoryUserResult[]>([]);
+  const [isSearchingMembers, setIsSearchingMembers] = useState(false);
+  const [addingMemberUserId, setAddingMemberUserId] = useState<string | null>(null);
+  const [addUserError, setAddUserError] = useState<string | null>(null);
   const headerTitle = campaignName?.trim()
     ? `${campaignName} Dashboard`
     : "Campaign Dashboard";
   const recentActivity = useMemo(() => events.slice(0, 8), [events]);
+  const getAccessRequesterLabel = (event: CampaignEventItem) =>
+    event.requester_display_name?.trim() || event.user_id?.trim() || "Unknown user";
 
   const sortedTeamMembers = useMemo(() => {
     const rank = (s?: string | null) => {
@@ -305,6 +320,84 @@ export default function CampaignOverviewPage() {
     }
   };
 
+  const handleSearchMembers = async () => {
+    if (!isLead) return;
+    const query = memberSearchQuery.trim();
+    if (query.length < 2) {
+      setMemberSearchResults([]);
+      return;
+    }
+    try {
+      setIsSearchingMembers(true);
+      setAddUserError(null);
+      const token = await getToken();
+      if (!token) return;
+      const data = await apiFetch<{ users: DirectoryUserResult[] }>(
+        `/api/v1/campaigns/${campaignId}/users/search?query=${encodeURIComponent(query)}&limit=10`,
+        {
+          token,
+          method: "GET",
+        }
+      );
+      const memberIds = new Set(teamMembers.map((m) => m.user_id));
+      setMemberSearchResults((data.users || []).filter((candidate) => !memberIds.has(candidate.id)));
+    } catch (err) {
+      setMemberSearchResults([]);
+      setAddUserError(err instanceof Error ? err.message : "Failed to search users.");
+    } finally {
+      setIsSearchingMembers(false);
+    }
+  };
+
+  const handleAddMemberDirect = async (candidate: DirectoryUserResult) => {
+    if (!isLead) return;
+    const confirmed = window.confirm(
+      "Are you sure you want to add this user to the campaign?"
+    );
+    if (!confirmed) return;
+    try {
+      setAddingMemberUserId(candidate.id);
+      setAddUserError(null);
+      const token = await getToken();
+      if (!token) return;
+      await apiFetch(`/api/v1/campaigns/${campaignId}/members`, {
+        token,
+        method: "POST",
+        body: { email: candidate.email, user_id: candidate.id, role: "Member" },
+      });
+      setMemberSearchResults((prev) => prev.filter((u) => u.id !== candidate.id));
+      setMemberSearchQuery("");
+      const [eventsData, membersData] = await Promise.all([
+        apiFetch<{ events: CampaignEventItem[] }>(
+          `/api/v1/campaigns/${campaignId}/events?limit=20`,
+          { token, method: "GET" }
+        ),
+        apiFetch<{ members: TeamMemberStatusItem[] }>(
+          `/api/v1/campaigns/${campaignId}/members?mentions_only=true`,
+          { token, method: "GET" }
+        ),
+      ]);
+      setEvents(eventsData.events || []);
+      setTeamMembers(membersData.members || []);
+    } catch (err) {
+      setAddUserError(err instanceof Error ? err.message : "Failed to add member.");
+    } finally {
+      setAddingMemberUserId(null);
+    }
+  };
+
+  useEffect(() => {
+    if (!isAddUserModalOpen || !isLead) return;
+    if (memberSearchQuery.trim().length < 2) {
+      setMemberSearchResults([]);
+      return;
+    }
+    const handle = setTimeout(() => {
+      void handleSearchMembers();
+    }, 250);
+    return () => clearTimeout(handle);
+  }, [campaignId, isAddUserModalOpen, isLead, memberSearchQuery]);
+
   return (
     <div className="min-h-full p-6 bg-transparent">
       {/* Header */}
@@ -336,7 +429,11 @@ export default function CampaignOverviewPage() {
                     <div className="h-2 w-2 rounded-full bg-emerald-500" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm text-zinc-100">{activity.message}</p>
+                    <p className="text-sm text-zinc-100">
+                      {activity.type === "access_request_created"
+                        ? `${getAccessRequesterLabel(activity)} requested access to this campaign`
+                        : activity.message}
+                    </p>
                     <p className="text-xs text-zinc-500 mt-0.5">
                       {activity.created_at
                         ? new Date(activity.created_at).toLocaleString()
@@ -383,9 +480,25 @@ export default function CampaignOverviewPage() {
 
         {/* Team Status Widget */}
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 backdrop-blur-md p-6">
-          <div className="flex items-center gap-2 mb-4">
-            <Users className="h-5 w-5 text-zinc-400" />
-            <h2 className="text-lg font-semibold text-zinc-100">Team Status</h2>
+          <div className="flex items-center justify-between gap-2 mb-4">
+            <div className="flex items-center gap-2">
+              <Users className="h-5 w-5 text-zinc-400" />
+              <h2 className="text-lg font-semibold text-zinc-100">Team Status</h2>
+            </div>
+            {isLead ? (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsAddUserModalOpen(true);
+                  setAddUserError(null);
+                }}
+                className="rounded-md border border-zinc-700 p-1.5 text-zinc-300 hover:bg-zinc-800/60 inline-flex items-center justify-center"
+                title="Add user to campaign"
+                aria-label="Add user to campaign"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
+            ) : null}
           </div>
           <div className="space-y-3">
             {sortedTeamMembers.length === 0 ? (
@@ -570,6 +683,65 @@ export default function CampaignOverviewPage() {
           </div>
         </div>
       </div>
+
+      {isAddUserModalOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-900 p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-sm font-semibold text-zinc-100">Add User to Campaign</h3>
+              <button
+                type="button"
+                onClick={() => setIsAddUserModalOpen(false)}
+                className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                aria-label="Close add-user modal"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <input
+              value={memberSearchQuery}
+              onChange={(e) => setMemberSearchQuery(e.target.value)}
+              placeholder="Search by username or display name"
+              className="w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100"
+            />
+            <p className="mt-2 text-xs text-zinc-500">
+              Search all Riley users. Select a user to add them to this campaign.
+            </p>
+            {addUserError ? (
+              <p className="mt-2 text-xs text-red-400">{addUserError}</p>
+            ) : null}
+            <div className="mt-3 max-h-72 space-y-2 overflow-y-auto pr-1">
+              {isSearchingMembers ? (
+                <p className="text-xs text-zinc-400">Searching users...</p>
+              ) : memberSearchQuery.trim().length < 2 ? (
+                <p className="text-xs text-zinc-500">Type at least 2 characters.</p>
+              ) : memberSearchResults.length === 0 ? (
+                <p className="text-xs text-zinc-500">No matching users found.</p>
+              ) : (
+                memberSearchResults.map((candidate) => (
+                  <div
+                    key={candidate.id}
+                    className="flex items-center justify-between rounded-md border border-zinc-800 bg-zinc-950/70 px-3 py-2"
+                  >
+                    <div className="min-w-0">
+                      <p className="truncate text-sm text-zinc-100">{candidate.display_name}</p>
+                      <p className="truncate text-xs text-zinc-500">{candidate.email}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleAddMemberDirect(candidate)}
+                      disabled={addingMemberUserId === candidate.id}
+                      className="rounded border border-emerald-600/40 bg-emerald-500/10 px-2 py-1 text-[11px] text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+                    >
+                      {addingMemberUserId === candidate.id ? "Adding..." : "Add"}
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

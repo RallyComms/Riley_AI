@@ -1762,6 +1762,7 @@ class GraphService:
                 coalesce(u.email, "") as user_email,
                 CASE
                     WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
+                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                     WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
                     WHEN ar.user_id IS NOT NULL AND trim(ar.user_id) <> "" THEN ar.user_id
@@ -1915,6 +1916,14 @@ class GraphService:
         async with self._driver.session() as session:
             query = """
             MATCH (e:CampaignEvent {campaign_id: $campaign_id})
+            OPTIONAL MATCH (requester:User {id: e.user_id})
+            WITH
+                e,
+                requester,
+                CASE
+                    WHEN requester.email IS NULL OR trim(requester.email) = "" THEN NULL
+                    ELSE split(requester.email, "@")[0]
+                END as requester_email_prefix
             WHERE
                 (
                     $viewer_user_id IS NULL
@@ -1927,6 +1936,7 @@ class GraphService:
                         "document_assigned_to_user",
                         "document_tagged_for_review",
                         "document_mentioned_user",
+                        "campaign_message_mentioned_user",
                         "deadline_reminder_10m",
                         "deadline_happening_now"
                     ])
@@ -1968,6 +1978,14 @@ class GraphService:
                 e.user_id as user_id,
                 e.actor_user_id as actor_user_id,
                 e.request_id as request_id,
+                CASE
+                    WHEN requester.display_name IS NOT NULL AND trim(requester.display_name) <> "" THEN requester.display_name
+                    WHEN requester.username IS NOT NULL AND trim(requester.username) <> "" THEN requester.username
+                    WHEN requester_email_prefix IS NOT NULL AND trim(requester_email_prefix) <> "" THEN requester_email_prefix
+                    WHEN requester.email IS NOT NULL AND trim(requester.email) <> "" THEN requester.email
+                    WHEN e.user_id IS NOT NULL AND trim(e.user_id) <> "" THEN e.user_id
+                    ELSE e.user_id
+                END as requester_display_name,
                 toString(e.created_at) as created_at
             ORDER BY e.created_at DESC
             LIMIT $limit
@@ -1988,6 +2006,7 @@ class GraphService:
                         "user_id": record.get("user_id"),
                         "actor_user_id": record.get("actor_user_id"),
                         "request_id": record.get("request_id"),
+                        "requester_display_name": record.get("requester_display_name"),
                         "created_at": record.get("created_at"),
                     }
                 )
@@ -2007,11 +2026,21 @@ class GraphService:
                 MATCH (:User {id: $user_id})-[:MEMBER_OF]->(c)
             }
             MATCH (e:CampaignEvent {campaign_id: c.id})
+            OPTIONAL MATCH (requester:User {id: e.user_id})
+            WITH
+                c,
+                e,
+                requester,
+                CASE
+                    WHEN requester.email IS NULL OR trim(requester.email) = "" THEN NULL
+                    ELSE split(requester.email, "@")[0]
+                END as requester_email_prefix
             WHERE
                 NOT (e.type IN [
                     "document_assigned_to_user",
                     "document_tagged_for_review",
-                    "document_mentioned_user"
+                    "document_mentioned_user",
+                    "campaign_message_mentioned_user"
                 ])
                 AND
                 NOT EXISTS {
@@ -2084,6 +2113,14 @@ class GraphService:
                 e.campaign_id as campaign_id,
                 c.name as campaign_name,
                 CASE
+                    WHEN requester.display_name IS NOT NULL AND trim(requester.display_name) <> "" THEN requester.display_name
+                    WHEN requester.username IS NOT NULL AND trim(requester.username) <> "" THEN requester.username
+                    WHEN requester_email_prefix IS NOT NULL AND trim(requester_email_prefix) <> "" THEN requester_email_prefix
+                    WHEN requester.email IS NOT NULL AND trim(requester.email) <> "" THEN requester.email
+                    WHEN e.user_id IS NOT NULL AND trim(e.user_id) <> "" THEN e.user_id
+                    ELSE e.user_id
+                END as requester_display_name,
+                CASE
                     WHEN EXISTS {
                         MATCH (:User {id: $user_id})-[m:MEMBER_OF]->(c)
                         WHERE m.role = "Lead"
@@ -2107,6 +2144,7 @@ class GraphService:
                         "request_id": record.get("request_id"),
                         "campaign_id": record.get("campaign_id"),
                         "campaign_name": record.get("campaign_name"),
+                        "requester_display_name": record.get("requester_display_name"),
                         "member_role": record.get("member_role"),
                         "created_at": record.get("created_at"),
                     }
@@ -2544,7 +2582,11 @@ class GraphService:
             }
 
     async def post_team_message(
-        self, campaign_id: str, user: Dict[str, Any], content: str
+        self,
+        campaign_id: str,
+        user: Dict[str, Any],
+        content: str,
+        mention_user_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Post a team message to a campaign.
         
@@ -2576,6 +2618,13 @@ class GraphService:
             raise ValueError("User ID is required")
         
         message_id = str(uuid.uuid4())
+        normalized_mentions = sorted(
+            {
+                str(mentioned_user_id).strip()
+                for mentioned_user_id in (mention_user_ids or [])
+                if str(mentioned_user_id).strip() and str(mentioned_user_id).strip() != user_id
+            }
+        )
         
         async with self._driver.session() as session:
             query = """
@@ -2602,7 +2651,7 @@ class GraphService:
             if not record:
                 raise Exception("Failed to create team message")
             
-            return {
+            created_message = {
                 "id": record["id"],
                 "content": record["content"],
                 "timestamp": record["timestamp"],
@@ -2610,6 +2659,32 @@ class GraphService:
                 "edited_at": None,
                 "deleted_at": None,
             }
+            if normalized_mentions:
+                actor_display_name = await self.resolve_user_display_name(
+                    user_id=user_id,
+                    email_fallback=user.get("email"),
+                )
+                for mentioned_user_id in normalized_mentions:
+                    await session.run(
+                        """
+                        MATCH (c:Campaign {id: $campaign_id})
+                        MATCH (target:User {id: $mentioned_user_id})-[:MEMBER_OF]->(c)
+                        CREATE (:CampaignEvent {
+                            id: $event_id,
+                            campaign_id: $campaign_id,
+                            type: "campaign_message_mentioned_user",
+                            message: $message,
+                            user_id: $mentioned_user_id,
+                            actor_user_id: null,
+                            created_at: datetime()
+                        })
+                        """,
+                        campaign_id=campaign_id,
+                        mentioned_user_id=mentioned_user_id,
+                        event_id=str(uuid.uuid4()),
+                        message=f"{actor_display_name} mentioned you in campaign chat",
+                    )
+            return created_message
 
     async def create_private_chat_thread(
         self,
@@ -2823,7 +2898,12 @@ class GraphService:
             return messages
 
     async def post_private_thread_message(
-        self, campaign_id: str, thread_id: str, user_id: str, content: str
+        self,
+        campaign_id: str,
+        thread_id: str,
+        user_id: str,
+        content: str,
+        mention_user_ids: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Post message to a private campaign thread for an authorized thread member."""
         content = content.strip()
@@ -2831,6 +2911,14 @@ class GraphService:
             raise ValueError("Message content cannot be empty")
         if len(content) > 2000:
             raise ValueError("Message content cannot exceed 2000 characters")
+
+        normalized_mentions = sorted(
+            {
+                str(mentioned_user_id).strip()
+                for mentioned_user_id in (mention_user_ids or [])
+                if str(mentioned_user_id).strip() and str(mentioned_user_id).strip() != user_id
+            }
+        )
 
         async with self._driver.session() as session:
             membership_query = """
@@ -2875,7 +2963,7 @@ class GraphService:
             if not record:
                 raise Exception("Failed to post thread message")
 
-            return {
+            created_message = {
                 "id": record["id"],
                 "content": record["content"],
                 "timestamp": record["timestamp"],
@@ -2883,6 +2971,30 @@ class GraphService:
                 "edited_at": None,
                 "deleted_at": None,
             }
+            if normalized_mentions:
+                actor_display_name = await self.resolve_user_display_name(user_id=user_id)
+                for mentioned_user_id in normalized_mentions:
+                    await session.run(
+                        """
+                        MATCH (t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})
+                        MATCH (target:User {id: $mentioned_user_id})-[:THREAD_MEMBER]->(t)
+                        CREATE (:CampaignEvent {
+                            id: $event_id,
+                            campaign_id: $campaign_id,
+                            type: "campaign_message_mentioned_user",
+                            message: $message,
+                            user_id: $mentioned_user_id,
+                            actor_user_id: null,
+                            created_at: datetime()
+                        })
+                        """,
+                        thread_id=thread_id,
+                        campaign_id=campaign_id,
+                        mentioned_user_id=mentioned_user_id,
+                        event_id=str(uuid.uuid4()),
+                        message=f"{actor_display_name} mentioned you in campaign chat",
+                    )
+            return created_message
 
     async def update_team_message(
         self, campaign_id: str, message_id: str, user_id: str, content: str
@@ -3155,6 +3267,7 @@ class GraphService:
                 u.id as user_id,
                 CASE
                     WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
+                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                     WHEN email_value <> "" THEN email_value
                     WHEN u.id IS NOT NULL AND trim(u.id) <> "" THEN u.id
@@ -3167,6 +3280,7 @@ class GraphService:
             ORDER BY toLower(
                 CASE
                     WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
+                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                     WHEN email_value <> "" THEN email_value
                     WHEN u.id IS NOT NULL AND trim(u.id) <> "" THEN u.id
@@ -3293,6 +3407,7 @@ class GraphService:
             MATCH (u:User {id: $user_id})
             RETURN
                 coalesce(u.email, $email_fallback) as email,
+                u.username as username,
                 u.display_name as display_name,
                 toString(u.updated_at) as updated_at
             """
@@ -3305,14 +3420,39 @@ class GraphService:
             if not record:
                 return {
                     "email": email_fallback or "",
+                    "username": None,
                     "display_name": None,
                     "updated_at": None,
                 }
             return {
                 "email": record.get("email") or (email_fallback or ""),
+                "username": record.get("username"),
                 "display_name": record.get("display_name"),
                 "updated_at": record.get("updated_at"),
             }
+
+    async def resolve_user_display_name(
+        self,
+        *,
+        user_id: str,
+        email_fallback: Optional[str] = None,
+    ) -> str:
+        """Resolve display_name -> username -> email_prefix -> email -> user_id chain."""
+        profile = await self.get_user_profile(user_id=user_id, email_fallback=email_fallback)
+        display_name = str(profile.get("display_name") or "").strip()
+        if display_name:
+            return display_name
+        username = str(profile.get("username") or "").strip()
+        if username:
+            return username
+        email = str(profile.get("email") or "").strip()
+        if email:
+            email_prefix = email.split("@")[0].strip()
+            if email_prefix:
+                return email_prefix
+            return email
+        normalized_user_id = (user_id or "").strip()
+        return normalized_user_id or "Unknown User"
 
     async def update_user_profile(
         self,
@@ -3358,6 +3498,7 @@ class GraphService:
         *,
         user_id: str,
         email: Optional[str] = None,
+        username: Optional[str] = None,
         first_name: Optional[str] = None,
         last_name: Optional[str] = None,
         display_name: Optional[str] = None,
@@ -3369,6 +3510,7 @@ class GraphService:
             MERGE (u:User {id: $user_id})
             SET
                 u.email = coalesce($email, u.email),
+                u.username = coalesce($username, u.username),
                 u.first_name = coalesce($first_name, u.first_name),
                 u.last_name = coalesce($last_name, u.last_name),
                 u.display_name = coalesce($display_name, u.display_name),
@@ -3378,11 +3520,72 @@ class GraphService:
                 query,
                 user_id=user_id,
                 email=email,
+                username=username,
                 first_name=first_name,
                 last_name=last_name,
                 display_name=display_name,
                 avatar_url=avatar_url,
             )
+
+    async def search_users_for_campaign_add(
+        self,
+        *,
+        query: str,
+        limit: int = 8,
+    ) -> List[Dict[str, str]]:
+        """Search known Riley users by display_name/email/user_id with Riley fallback display names."""
+        normalized_query = (query or "").strip().lower()
+        if not normalized_query:
+            return []
+        capped_limit = max(1, min(int(limit), 20))
+
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (u:User)
+                WITH
+                    u,
+                    CASE
+                        WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
+                        ELSE split(u.email, "@")[0]
+                    END as email_prefix
+                WHERE
+                    (u.id IS NOT NULL AND toLower(u.id) CONTAINS $query)
+                    OR (u.email IS NOT NULL AND toLower(u.email) CONTAINS $query)
+                    OR (email_prefix IS NOT NULL AND toLower(email_prefix) CONTAINS $query)
+                    OR (u.username IS NOT NULL AND toLower(u.username) CONTAINS $query)
+                    OR (u.display_name IS NOT NULL AND toLower(u.display_name) CONTAINS $query)
+                RETURN
+                    u.id as id,
+                    coalesce(u.email, "") as email,
+                    CASE
+                        WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
+                        WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
+                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
+                        WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
+                        WHEN u.id IS NOT NULL AND trim(u.id) <> "" THEN u.id
+                        ELSE u.id
+                    END as display_name
+                ORDER BY coalesce(u.updated_at, u.status_updated_at, datetime({epochMillis: 0})) DESC
+                LIMIT $limit
+                """,
+                query=normalized_query,
+                limit=capped_limit,
+            )
+            users: List[Dict[str, str]] = []
+            async for record in result:
+                user_id = str(record.get("id") or "").strip()
+                email = str(record.get("email") or "").strip()
+                if not user_id or not email:
+                    continue
+                users.append(
+                    {
+                        "id": user_id,
+                        "email": email,
+                        "display_name": str(record.get("display_name") or user_id).strip() or user_id,
+                    }
+                )
+            return users
 
     async def get_campaign_member_ids(self, campaign_id: str) -> List[str]:
         """Return all user IDs that are members of a campaign."""

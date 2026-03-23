@@ -69,8 +69,15 @@ def find_user_by_email(email: str) -> Optional[Dict[str, str]]:
                     return {
                         "id": user.get("id", ""),
                         "email": email_addr.get("email_address", ""),
+                        "username": str(user.get("username") or ""),
                         "first_name": user.get("first_name", ""),
-                        "last_name": user.get("last_name", "")
+                        "last_name": user.get("last_name", ""),
+                        "display_name": (
+                            str(user.get("username") or "").strip()
+                            or f"{str(user.get('first_name') or '').strip()} {str(user.get('last_name') or '').strip()}".strip()
+                            or email_addr.get("email_address", "")
+                            or str(user.get("id") or "")
+                        ),
                     }
         
         # No exact match found
@@ -124,13 +131,21 @@ def search_users(query: str, limit: int = 8) -> List[Dict[str, str]]:
             if isinstance(email_addresses, list) and email_addresses:
                 first_email = email_addresses[0] or {}
                 primary_email = str(first_email.get("email_address") or "")
+            username = str(user.get("username") or "").strip()
             first_name = str(user.get("first_name") or "").strip()
             last_name = str(user.get("last_name") or "").strip()
-            display_name = f"{first_name} {last_name}".strip() or primary_email or str(user.get("id") or "Unknown User")
+            display_name = (
+                str(user.get("display_name") or "").strip()
+                or username
+                or f"{first_name} {last_name}".strip()
+                or primary_email
+                or str(user.get("id") or "Unknown User")
+            )
             results.append(
                 {
                     "id": str(user.get("id") or ""),
                     "email": primary_email,
+                    "username": username,
                     "display_name": display_name,
                 }
             )
@@ -180,11 +195,19 @@ def find_user_by_id(user_id: str) -> Optional[Dict[str, str]]:
             primary_email = str(first_email.get("email_address") or "")
         first_name = str(user.get("first_name") or "").strip()
         last_name = str(user.get("last_name") or "").strip()
-        display_name = f"{first_name} {last_name}".strip() or primary_email or normalized_user_id
+        username = str(user.get("username") or "").strip()
+        display_name = (
+            str(user.get("display_name") or "").strip()
+            or username
+            or f"{first_name} {last_name}".strip()
+            or primary_email
+            or normalized_user_id
+        )
         image_url = str(user.get("image_url") or "")
         return {
             "id": str(user.get("id") or normalized_user_id),
             "email": primary_email,
+            "username": username,
             "first_name": first_name,
             "last_name": last_name,
             "display_name": display_name,

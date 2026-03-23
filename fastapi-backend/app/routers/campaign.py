@@ -8,7 +8,7 @@ from app.dependencies.graph_dep import get_graph
 from app.services.graph import GraphService
 from app.services.qdrant import vector_service
 from app.services.storage import StorageService
-from app.services.clerk_directory import find_user_by_email, search_users
+from app.services.clerk_directory import find_user_by_email, find_user_by_id, search_users
 
 
 router = APIRouter()
@@ -82,6 +82,7 @@ class CampaignEventItem(BaseModel):
     user_id: Optional[str] = None
     actor_user_id: Optional[str] = None
     request_id: Optional[str] = None
+    requester_display_name: Optional[str] = None
     created_at: Optional[str] = None
 
 
@@ -98,6 +99,7 @@ class UserCampaignFeedEventItem(BaseModel):
     user_id: Optional[str] = None
     actor_user_id: Optional[str] = None
     request_id: Optional[str] = None
+    requester_display_name: Optional[str] = None
     member_role: Optional[str] = None
     created_at: Optional[str] = None
 
@@ -155,6 +157,10 @@ class TerminationResponse(BaseModel):
 
 class PostMessageRequest(BaseModel):
     content: str = Field(..., max_length=2000, description="Message content (max 2000 characters)")
+    mention_user_ids: List[str] = Field(
+        default_factory=list,
+        description="Optional mentioned user IDs for campaign activity notifications",
+    )
 
 
 class UpdateMessageRequest(BaseModel):
@@ -175,7 +181,8 @@ class TeamMessagesResponse(BaseModel):
 
 
 class AddMemberRequest(BaseModel):
-    email: str = Field(..., description="Email address of the user to add")
+    email: Optional[str] = Field(None, description="Email address of the user to add")
+    user_id: Optional[str] = Field(None, description="Optional Clerk/Riley user ID to add")
     role: str = Field(..., description="Role to assign: 'Member' or 'Lead'")
 
 
@@ -253,6 +260,27 @@ async def _require_lead_for_campaign(campaign_id: str, current_user: Dict, graph
             detail="Only Lead members can perform this action",
         )
     return requester_id
+
+
+def _extract_riley_identity_fields(current_user: Dict) -> Dict[str, Optional[str]]:
+    """Extract Riley-native identity fields from verified JWT payload."""
+    raw_claims = current_user.get("raw") if isinstance(current_user, dict) else None
+    raw = raw_claims if isinstance(raw_claims, dict) else {}
+
+    username = str(raw.get("username") or "").strip() or None
+    display_name = (
+        str(raw.get("display_name") or "").strip()
+        or str(raw.get("name") or "").strip()
+        or str(raw.get("full_name") or "").strip()
+        or None
+    )
+    if not display_name:
+        first_name = str(raw.get("given_name") or raw.get("first_name") or "").strip()
+        last_name = str(raw.get("family_name") or raw.get("last_name") or "").strip()
+        combined = f"{first_name} {last_name}".strip()
+        display_name = combined or None
+
+    return {"username": username, "display_name": display_name}
 
 
 @router.get("/users/me/status", response_model=UserStatusResponse)
@@ -420,9 +448,12 @@ async def request_campaign_access(
     """
     user_id = current_user.get("id", "unknown")
     try:
+        identity_fields = _extract_riley_identity_fields(current_user)
         await graph.upsert_user_identity(
             user_id=user_id,
             email=current_user.get("email"),
+            username=identity_fields.get("username"),
+            display_name=identity_fields.get("display_name"),
         )
         created = await graph.create_access_request(
             tenant_id=tenant_id,
@@ -712,8 +743,42 @@ async def search_campaign_users(
 ) -> DirectoryUserSearchResponse:
     """Search Clerk users for direct campaign member add (Lead only)."""
     await _require_lead_for_campaign(tenant_id, current_user, graph)
-    users = search_users(query=query, limit=limit)
-    return DirectoryUserSearchResponse(users=[DirectoryUserResult(**u) for u in users])
+    clerk_users = search_users(query=query, limit=limit)
+    riley_users = await graph.search_users_for_campaign_add(query=query, limit=limit)
+
+    users_by_id: Dict[str, Dict[str, str]] = {}
+    for candidate in clerk_users:
+        candidate_id = str(candidate.get("id") or "").strip()
+        candidate_email = str(candidate.get("email") or "").strip()
+        if not candidate_id or not candidate_email:
+            continue
+        users_by_id[candidate_id] = {
+            "id": candidate_id,
+            "email": candidate_email,
+            "display_name": str(candidate.get("display_name") or candidate_email).strip() or candidate_id,
+        }
+
+    for candidate in riley_users:
+        candidate_id = str(candidate.get("id") or "").strip()
+        candidate_email = str(candidate.get("email") or "").strip()
+        if not candidate_id or not candidate_email:
+            continue
+        existing = users_by_id.get(candidate_id)
+        if existing is None:
+            users_by_id[candidate_id] = {
+                "id": candidate_id,
+                "email": candidate_email,
+                "display_name": str(candidate.get("display_name") or candidate_email).strip() or candidate_id,
+            }
+            continue
+        riley_display_name = str(candidate.get("display_name") or "").strip()
+        if riley_display_name:
+            existing["display_name"] = riley_display_name
+        if not existing.get("email"):
+            existing["email"] = candidate_email
+
+    merged_users = list(users_by_id.values())[: max(1, min(int(limit), 20))]
+    return DirectoryUserSearchResponse(users=[DirectoryUserResult(**u) for u in merged_users])
 
 
 @router.delete("/campaign/{tenant_id}", response_model=TerminationResponse)
@@ -834,10 +899,18 @@ async def post_team_message(
         Created message object
     """
     try:
+        identity_fields = _extract_riley_identity_fields(current_user)
+        await graph.upsert_user_identity(
+            user_id=current_user.get("id"),
+            email=current_user.get("email"),
+            username=identity_fields.get("username"),
+            display_name=identity_fields.get("display_name"),
+        )
         message = await graph.post_team_message(
             campaign_id=id,
             user=current_user,
-            content=request.content
+            content=request.content,
+            mention_user_ids=request.mention_user_ids,
         )
         
         return TeamMessageResponse(**message)
@@ -1038,11 +1111,19 @@ async def post_chat_thread_message(
     """Post message to a private campaign thread (thread members only)."""
     user_id = current_user.get("id", "unknown")
     try:
+        identity_fields = _extract_riley_identity_fields(current_user)
+        await graph.upsert_user_identity(
+            user_id=user_id,
+            email=current_user.get("email"),
+            username=identity_fields.get("username"),
+            display_name=identity_fields.get("display_name"),
+        )
         message = await graph.post_private_thread_message(
             campaign_id=tenant_id,
             thread_id=thread_id,
             user_id=user_id,
             content=request.content,
+            mention_user_ids=request.mention_user_ids,
         )
         return TeamMessageResponse(**message)
     except PermissionError as exc:
@@ -1148,9 +1229,19 @@ async def add_campaign_member(
             detail=f"Failed to check requester role: {exc}"
         ) from exc
     
-    # Resolve user by email using Clerk
+    normalized_email = (request.email or "").strip()
+    normalized_user_id = (request.user_id or "").strip()
+    if not normalized_email and not normalized_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Either email or user_id is required",
+        )
+
+    # Resolve user by user_id/email using Clerk
     try:
-        clerk_user = find_user_by_email(request.email)
+        clerk_user = find_user_by_id(normalized_user_id) if normalized_user_id else None
+        if clerk_user is None:
+            clerk_user = find_user_by_email(normalized_email)
         if not clerk_user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1173,6 +1264,12 @@ async def add_campaign_member(
             role=request.role,
             target_first_name=clerk_user.get("first_name"),
             target_last_name=clerk_user.get("last_name"),
+        )
+        await graph.upsert_user_identity(
+            user_id=clerk_user.get("id"),
+            email=clerk_user.get("email"),
+            username=clerk_user.get("username"),
+            display_name=clerk_user.get("display_name"),
         )
         if not bool(added.get("already_member")):
             campaign_name = (added.get("campaign_name") or "").strip() or id

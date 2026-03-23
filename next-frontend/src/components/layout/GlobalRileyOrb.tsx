@@ -17,6 +17,7 @@ type FeedEvent = {
   user_id?: string | null;
   actor_user_id?: string | null;
   request_id?: string | null;
+  requester_display_name?: string | null;
   member_role?: string | null;
 };
 
@@ -35,6 +36,8 @@ export function GlobalRileyOrb() {
   const [notifications, setNotifications] = useState<FeedEvent[]>([]);
   const [dismissLoadingEventId, setDismissLoadingEventId] = useState<string | null>(null);
   const [requestActionLoadingEventId, setRequestActionLoadingEventId] = useState<string | null>(null);
+  const getAccessRequesterLabel = (event: FeedEvent) =>
+    event.requester_display_name?.trim() || event.user_id?.trim() || "Unknown user";
   const popoverRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   
@@ -325,7 +328,15 @@ export function GlobalRileyOrb() {
                         </div>
                         <div className="flex-1 min-w-0">
                           <p className="text-sm text-zinc-300">
-                            {event.campaign_name ? `${event.campaign_name}: ${event.message}` : event.message}
+                            {event.campaign_name
+                              ? `${event.campaign_name}: ${
+                                  event.type === "access_request_created"
+                                    ? `${getAccessRequesterLabel(event)} requested access to this campaign`
+                                    : event.message
+                                }`
+                              : event.type === "access_request_created"
+                              ? `${getAccessRequesterLabel(event)} requested access to this campaign`
+                              : event.message}
                           </p>
                           <p className="mt-1 text-[11px] text-zinc-500">
                             {event.created_at ? new Date(event.created_at).toLocaleString() : ""}

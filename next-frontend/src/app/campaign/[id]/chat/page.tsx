@@ -784,12 +784,18 @@ export default function TeamChatPage() {
         currentThreadId === MAIN_THREAD_ID
           ? `/api/v1/campaigns/${campaignId}/chat`
           : `/api/v1/campaigns/${campaignId}/chat-threads/${currentThreadId}/messages`;
+      const mentionedUserIds = Array.from(
+        new Set(
+          extractMentionMetadata(messageText, campaignMembers).map((mention) => mention.user_id)
+        )
+      );
 
       await apiFetch(sendPath, {
         token,
         method: "POST",
         body: {
           content: messageText,
+          mention_user_ids: mentionedUserIds,
         },
       });
 
@@ -805,19 +811,6 @@ export default function TeamChatPage() {
         await fetchMessages(null, currentThreadId);
       }
 
-      // Check for mentions and dispatch notification event
-      const mentionPattern = /@(Anova|Me|anova|me)\b/i;
-      if (mentionPattern.test(messageText)) {
-        window.dispatchEvent(
-          new CustomEvent("riley-notification", {
-            detail: {
-              type: "mention",
-              message: messageText,
-              author: user.firstName || user.emailAddresses[0]?.emailAddress || "You",
-            },
-          })
-        );
-      }
     } catch (err) {
       console.error("Error sending message:", err);
       setError(
@@ -1125,6 +1118,10 @@ export default function TeamChatPage() {
 
   const handleAddMemberDirect = async (candidate: DirectoryUserResult) => {
     if (!isLead) return;
+    const confirmed = window.confirm(
+      "Are you sure you want to add this user to the campaign?"
+    );
+    if (!confirmed) return;
     try {
       setAddingMemberUserId(candidate.id);
       setError(null);
@@ -1135,7 +1132,7 @@ export default function TeamChatPage() {
       await apiFetch(`/api/v1/campaigns/${campaignId}/members`, {
         token,
         method: "POST",
-        body: { email: candidate.email, role: "Member" },
+        body: { email: candidate.email, user_id: candidate.id, role: "Member" },
       });
       setMemberSearchResults((prev) => prev.filter((u) => u.id !== candidate.id));
       await Promise.all([fetchCampaignMembers(), fetchCampaignFeedEvents()]);
