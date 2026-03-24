@@ -1312,7 +1312,8 @@ async def promote_to_archive(
         )
         await vector_service.promote_to_global(
             file_id=file_id,
-            is_golden=request.is_golden
+            is_golden=request.is_golden,
+            source_campaign_id=tenant_id,
         )
         
         golden_text = " (marked as Golden Standard)" if request.is_golden else ""

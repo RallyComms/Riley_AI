@@ -1323,7 +1323,12 @@ class VectorService:
             "recent_uploads": recent_uploads[:5],
         }
 
-    async def promote_to_global(self, file_id: str, is_golden: bool) -> None:
+    async def promote_to_global(
+        self,
+        file_id: str,
+        is_golden: bool,
+        source_campaign_id: Optional[str] = None,
+    ) -> None:
         """Promote a file from Tier 2 (Private Client Silo) to Tier 1 (Global Firm Archive).
         
         This copies a high-value document from the private client collection to the global
@@ -1366,13 +1371,14 @@ class VectorService:
         new_payload["is_global"] = True
 
         # Preserve original campaign/source scope for Firm Documents origin metadata.
-        source_campaign_id = (
-            original_payload.get("source_campaign_id")
+        resolved_source_campaign_id = (
+            str(source_campaign_id or "").strip()
+            or original_payload.get("source_campaign_id")
             or original_payload.get("client_id")
             or original_payload.get("tenant_id")
         )
-        if source_campaign_id:
-            new_payload["source_campaign_id"] = source_campaign_id
+        if resolved_source_campaign_id:
+            new_payload["source_campaign_id"] = resolved_source_campaign_id
         
         # Remove tenant-specific fields or set to "global"
         # Remove client_id to ensure it's truly global (or set to "global" if needed for tracking)
