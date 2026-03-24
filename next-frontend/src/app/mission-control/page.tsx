@@ -66,6 +66,8 @@ type SystemData = {
   ingestion_failures_24h: number;
 };
 
+type UnknownRecord = Record<string, unknown>;
+
 const tabs: Array<{ id: MissionControlTab; label: string }> = [
   { id: "overview", label: "Overview" },
   { id: "performance", label: "Riley Performance" },
@@ -137,8 +139,27 @@ function asString(value: unknown, fallback = ""): string {
   return s || fallback;
 }
 
+function asRecord(value: unknown): UnknownRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return value as UnknownRecord;
+}
+
+function asArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function normalizeMetricValue(value: unknown): string | number {
+  if (value === null || value === undefined) return 0;
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value === "string") return value;
+  if (typeof value === "boolean") return value ? "true" : "false";
+  return 0;
+}
+
 function normalizeOverview(raw: unknown): OverviewData {
-  const src = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const src = asRecord(raw);
   return {
     active_users_7d: asNumber(src.active_users_7d),
     active_campaigns_7d: asNumber(src.active_campaigns_7d),
@@ -155,7 +176,7 @@ function normalizeOverview(raw: unknown): OverviewData {
 }
 
 function normalizePerformance(raw: unknown): PerformanceData {
-  const src = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const src = asRecord(raw);
   return {
     avg_latency_ms_7d: asNumber(src.avg_latency_ms_7d),
     p95_latency_ms_7d: asNumber(src.p95_latency_ms_7d),
@@ -166,8 +187,8 @@ function normalizePerformance(raw: unknown): PerformanceData {
 }
 
 function normalizeCost(raw: unknown): CostData {
-  const src = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const rows = Array.isArray(src.provider_cost_30d) ? src.provider_cost_30d : [];
+  const src = asRecord(raw);
+  const rows = asArray(src.provider_cost_30d);
   return {
     month_estimated_cost: asNumber(src.month_estimated_cost),
     last_7d_estimated_cost: asNumber(src.last_7d_estimated_cost),
@@ -182,7 +203,7 @@ function normalizeCost(raw: unknown): CostData {
 }
 
 function normalizeAdoption(raw: unknown): AdoptionData {
-  const src = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const src = asRecord(raw);
   return {
     events_30d: asNumber(src.events_30d),
     unique_users_30d: asNumber(src.unique_users_30d),
@@ -193,7 +214,7 @@ function normalizeAdoption(raw: unknown): AdoptionData {
 }
 
 function normalizeWorkflow(raw: unknown): WorkflowData {
-  const src = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const src = asRecord(raw);
   return {
     access_requests_24h: asNumber(src.access_requests_24h),
     access_decisions_24h: asNumber(src.access_decisions_24h),
@@ -205,7 +226,7 @@ function normalizeWorkflow(raw: unknown): WorkflowData {
 }
 
 function normalizeSystem(raw: unknown): SystemData {
-  const src = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const src = asRecord(raw);
   return {
     auth_denied_24h: asNumber(src.auth_denied_24h),
     worker_failures_24h: asNumber(src.worker_failures_24h),
@@ -221,12 +242,12 @@ export default function MissionControlPage() {
   const [accessDenied, setAccessDenied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [overview, setOverview] = useState<OverviewData | null>(null);
-  const [performance, setPerformance] = useState<PerformanceData | null>(null);
-  const [cost, setCost] = useState<CostData | null>(null);
-  const [adoption, setAdoption] = useState<AdoptionData | null>(null);
-  const [workflow, setWorkflow] = useState<WorkflowData | null>(null);
-  const [system, setSystem] = useState<SystemData | null>(null);
+  const [overview, setOverview] = useState<OverviewData>(defaultOverview);
+  const [performance, setPerformance] = useState<PerformanceData>(defaultPerformance);
+  const [cost, setCost] = useState<CostData>(defaultCost);
+  const [adoption, setAdoption] = useState<AdoptionData>(defaultAdoption);
+  const [workflow, setWorkflow] = useState<WorkflowData>(defaultWorkflow);
+  const [system, setSystem] = useState<SystemData>(defaultSystem);
 
   const fetchMissionControl = async () => {
     if (!isLoaded) return;
@@ -284,7 +305,6 @@ export default function MissionControlPage() {
   }, [isLoaded]);
 
   const topKpis = useMemo(() => {
-    if (!overview) return [];
     return [
       { label: "Active Users (7d)", value: String(overview.active_users_7d), icon: Users },
       { label: "Active Campaigns (7d)", value: String(overview.active_campaigns_7d), icon: Activity },
@@ -366,7 +386,7 @@ export default function MissionControlPage() {
               </div>
 
               <div className="rounded-xl border border-slate-100 bg-slate-50 p-5">
-                {activeTab === "overview" && overview && (
+                {activeTab === "overview" && (
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                     <Metric label="Chats Today" value={overview.chats_today} />
                     <Metric label="Reports Today" value={overview.reports_today} />
@@ -378,7 +398,7 @@ export default function MissionControlPage() {
                   </div>
                 )}
 
-                {activeTab === "performance" && performance && (
+                {activeTab === "performance" && (
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                     <Metric label="Avg Latency (7d, ms)" value={performance.avg_latency_ms_7d} />
                     <Metric label="P95 Latency (7d, ms)" value={performance.p95_latency_ms_7d} />
@@ -388,7 +408,7 @@ export default function MissionControlPage() {
                   </div>
                 )}
 
-                {activeTab === "cost" && cost && (
+                {activeTab === "cost" && (
                   <div className="space-y-4">
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                       <Metric label="Month Estimated Cost" value={`$${asNumber(cost.month_estimated_cost).toFixed(2)}`} />
@@ -401,8 +421,8 @@ export default function MissionControlPage() {
                       </div>
                       {cost.provider_cost_30d?.length ? (
                         <div className="space-y-2">
-                          {cost.provider_cost_30d.map((row) => (
-                            <div key={row.provider} className="flex items-center justify-between text-sm">
+                          {cost.provider_cost_30d.map((row, idx) => (
+                            <div key={`${row.provider}-${idx}`} className="flex items-center justify-between text-sm">
                               <span className="capitalize text-slate-600">{row.provider}</span>
                               <span className="font-medium text-slate-900">${asNumber(row.cost).toFixed(2)}</span>
                             </div>
@@ -415,7 +435,7 @@ export default function MissionControlPage() {
                   </div>
                 )}
 
-                {activeTab === "system" && system && (
+                {activeTab === "system" && (
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
                     <Metric label="Auth Denied (24h)" value={system.auth_denied_24h} />
                     <Metric label="Worker Failures (24h)" value={system.worker_failures_24h} />
@@ -424,7 +444,7 @@ export default function MissionControlPage() {
                   </div>
                 )}
 
-                {activeTab === "adoption" && adoption && (
+                {activeTab === "adoption" && (
                   <div className="space-y-3">
                     <p className="text-sm text-slate-600">Initial adoption snapshot is live. Expanded trend views are next.</p>
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -437,7 +457,7 @@ export default function MissionControlPage() {
                   </div>
                 )}
 
-                {activeTab === "workflow" && workflow && (
+                {activeTab === "workflow" && (
                   <div className="space-y-3">
                     <p className="text-sm text-slate-600">Workflow health shell is active with core operational indicators.</p>
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -459,11 +479,12 @@ export default function MissionControlPage() {
   );
 }
 
-function Metric({ label, value }: { label: string; value: string | number }) {
+function Metric({ label, value }: { label: string; value: unknown }) {
+  const safeValue = normalizeMetricValue(value);
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-4">
       <p className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</p>
-      <p className="mt-1 text-xl font-semibold text-slate-900">{value}</p>
+      <p className="mt-1 text-xl font-semibold text-slate-900">{safeValue}</p>
     </div>
   );
 }
