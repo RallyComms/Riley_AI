@@ -2,6 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
+import { usePathname } from "next/navigation";
 import { Bot, Minus, AlertCircle, Calendar, FileText, MessageCircle, UserPlus } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { motion, AnimatePresence, useMotionValue } from "framer-motion";
@@ -30,6 +31,7 @@ const STORAGE_KEY = "riley_orb_pos";
 const DEFAULT_POSITION = { x: 0, y: 0 }; // Relative to bottom-right corner
 
 export function GlobalRileyOrb() {
+  const pathname = usePathname();
   const { user } = useUser();
   const { getToken, isLoaded } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(true);
@@ -43,6 +45,10 @@ export function GlobalRileyOrb() {
   
   // Position state - stored as offset from bottom-right corner
   const [position, setPosition] = useState<SavedPosition>(DEFAULT_POSITION);
+  if (pathname?.startsWith("/mission-control")) {
+    return null;
+  }
+
   
   // Motion values for dragging
   const x = useMotionValue(0);

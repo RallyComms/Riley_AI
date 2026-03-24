@@ -6,7 +6,7 @@ import { useClerk } from "@clerk/nextjs";
 import { useAuth } from "@clerk/nextjs";
 import { useUser } from "@clerk/nextjs";
 import { useTheme } from "next-themes";
-import { Menu, Bell, User, LogOut, X, Sun, Moon, LucideIcon } from "lucide-react";
+import { Menu, Bell, User, LogOut, X, Sun, Moon, Shield, LucideIcon } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 import { apiFetch } from "@app/lib/api";
@@ -32,6 +32,7 @@ export function GlobalMenu() {
   const [isProfileLoading, setIsProfileLoading] = useState(false);
   const [isProfileSaving, setIsProfileSaving] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
+  const [canAccessMissionControl, setCanAccessMissionControl] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const { signOut } = useClerk();
   const { getToken, isLoaded } = useAuth();
@@ -66,6 +67,30 @@ export function GlobalMenu() {
     };
     loadStatus();
   }, [getToken, isLoaded]);
+
+  useEffect(() => {
+    const checkMissionControlAccess = async () => {
+      if (!isLoaded || !user?.id) {
+        setCanAccessMissionControl(false);
+        return;
+      }
+      try {
+        const token = await getToken();
+        if (!token) {
+          setCanAccessMissionControl(false);
+          return;
+        }
+        await apiFetch("/api/v1/mission-control/overview", {
+          token,
+          method: "GET",
+        });
+        setCanAccessMissionControl(true);
+      } catch {
+        setCanAccessMissionControl(false);
+      }
+    };
+    void checkMissionControlAccess();
+  }, [getToken, isLoaded, user?.id]);
 
   const handleSetStatus = async (nextStatus: "active" | "away" | "in_meeting") => {
     try {
@@ -166,6 +191,18 @@ export function GlobalMenu() {
       label: "Account Settings",
       onClick: openAccountSettings,
     },
+    ...(canAccessMissionControl
+      ? [
+          {
+            icon: Shield,
+            label: "Mission Control",
+            onClick: () => {
+              setIsOpen(false);
+              router.push("/mission-control");
+            },
+          } satisfies MenuItem,
+        ]
+      : []),
     {
       icon: mounted && theme === "light" ? Sun : Moon,
       label: "Themes (Coming soon)",

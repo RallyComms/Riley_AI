@@ -1,0 +1,325 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useAuth } from "@clerk/nextjs";
+import { Activity, AlertTriangle, BarChart3, ChevronRight, DollarSign, Gauge, ShieldCheck, Users } from "lucide-react";
+import { apiFetch, ApiRequestError } from "@app/lib/api";
+
+type MissionControlTab =
+  | "overview"
+  | "performance"
+  | "cost"
+  | "system"
+  | "adoption"
+  | "workflow";
+
+type OverviewData = {
+  active_users_7d: number;
+  active_campaigns_7d: number;
+  chats_today: number;
+  reports_today: number;
+  avg_response_latency_ms: number;
+  report_success_rate: number;
+  current_month_estimated_cost: number;
+  forecast_month_end_cost: number;
+  pending_access_requests: number;
+  overdue_deadlines: number;
+  failed_reports_24h: number;
+};
+
+type PerformanceData = {
+  avg_latency_ms_7d: number;
+  p95_latency_ms_7d: number;
+  provider_fallback_successes_7d: number;
+  provider_fallback_failures_7d: number;
+  reranker_failures_7d: number;
+};
+
+type CostData = {
+  month_estimated_cost: number;
+  last_7d_estimated_cost: number;
+  provider_cost_30d: Array<{ provider: string; cost: number }>;
+};
+
+type AdoptionData = {
+  events_30d: number;
+  unique_users_30d: number;
+  unique_campaigns_30d: number;
+  chat_users_30d: number;
+  report_users_30d: number;
+};
+
+type WorkflowData = {
+  access_requests_24h: number;
+  access_decisions_24h: number;
+  deadline_reminders_24h: number;
+  preview_failures_24h: number;
+  pending_access_requests: number;
+  overdue_deadlines: number;
+};
+
+type SystemData = {
+  auth_denied_24h: number;
+  worker_failures_24h: number;
+  report_failures_24h: number;
+  ingestion_failures_24h: number;
+};
+
+const tabs: Array<{ id: MissionControlTab; label: string }> = [
+  { id: "overview", label: "Overview" },
+  { id: "performance", label: "Riley Performance" },
+  { id: "cost", label: "Cost & Forecasting" },
+  { id: "system", label: "System Health" },
+  { id: "adoption", label: "Adoption & Engagement" },
+  { id: "workflow", label: "Workflow Health" },
+];
+
+export default function MissionControlPage() {
+  const { getToken, isLoaded } = useAuth();
+  const [activeTab, setActiveTab] = useState<MissionControlTab>("overview");
+  const [isLoading, setIsLoading] = useState(true);
+  const [accessDenied, setAccessDenied] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const [overview, setOverview] = useState<OverviewData | null>(null);
+  const [performance, setPerformance] = useState<PerformanceData | null>(null);
+  const [cost, setCost] = useState<CostData | null>(null);
+  const [adoption, setAdoption] = useState<AdoptionData | null>(null);
+  const [workflow, setWorkflow] = useState<WorkflowData | null>(null);
+  const [system, setSystem] = useState<SystemData | null>(null);
+
+  const fetchMissionControl = async () => {
+    if (!isLoaded) return;
+    try {
+      setIsLoading(true);
+      setError(null);
+      setAccessDenied(false);
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication required.");
+      }
+
+      const [
+        overviewData,
+        performanceData,
+        costData,
+        adoptionData,
+        workflowData,
+        systemData,
+      ] = await Promise.all([
+        apiFetch<OverviewData>("/api/v1/mission-control/overview", { token, method: "GET" }),
+        apiFetch<PerformanceData>("/api/v1/mission-control/riley-performance", { token, method: "GET" }),
+        apiFetch<CostData>("/api/v1/mission-control/cost-summary", { token, method: "GET" }),
+        apiFetch<AdoptionData>("/api/v1/mission-control/adoption-summary", { token, method: "GET" }),
+        apiFetch<WorkflowData>("/api/v1/mission-control/workflow-health-summary", { token, method: "GET" }),
+        apiFetch<SystemData>("/api/v1/mission-control/system-health-summary", { token, method: "GET" }),
+      ]);
+
+      setOverview(overviewData);
+      setPerformance(performanceData);
+      setCost(costData);
+      setAdoption(adoptionData);
+      setWorkflow(workflowData);
+      setSystem(systemData);
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 403) {
+        setAccessDenied(true);
+        return;
+      }
+      setError(err instanceof Error ? err.message : "Failed to load Mission Control.");
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void fetchMissionControl();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isLoaded]);
+
+  const topKpis = useMemo(() => {
+    if (!overview) return [];
+    return [
+      { label: "Active Users (7d)", value: String(overview.active_users_7d), icon: Users },
+      { label: "Active Campaigns (7d)", value: String(overview.active_campaigns_7d), icon: Activity },
+      { label: "Report Success Rate", value: `${overview.report_success_rate}%`, icon: ShieldCheck },
+      { label: "Month Est. Cost", value: `$${overview.current_month_estimated_cost.toFixed(2)}`, icon: DollarSign },
+    ];
+  }, [overview]);
+
+  return (
+    <div className="min-h-screen bg-slate-100 text-slate-900">
+      <div className="mx-auto max-w-7xl px-6 py-8">
+        <header className="mb-8 flex items-center justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Admin Surface</p>
+            <h1 className="mt-2 text-4xl font-semibold tracking-tight">Mission Control</h1>
+            <p className="mt-2 text-sm text-slate-600">Executive analytics and platform health for Riley.</p>
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => void fetchMissionControl()}
+              className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Refresh
+            </button>
+            <Link
+              href="/"
+              className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+            >
+              Back to Riley
+              <ChevronRight className="h-4 w-4" />
+            </Link>
+          </div>
+        </header>
+
+        {isLoading ? (
+          <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-slate-600">Loading Mission Control...</div>
+        ) : accessDenied ? (
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 p-10 text-center">
+            <AlertTriangle className="mx-auto mb-3 h-6 w-6 text-rose-600" />
+            <h2 className="text-lg font-semibold text-rose-900">Access denied</h2>
+            <p className="mt-1 text-sm text-rose-700">You are not allowed to access Mission Control.</p>
+          </div>
+        ) : error ? (
+          <div className="rounded-2xl border border-amber-200 bg-amber-50 p-10 text-center text-amber-800">{error}</div>
+        ) : (
+          <>
+            <section className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-4">
+              {topKpis.map((kpi) => {
+                const Icon = kpi.icon;
+                return (
+                  <div key={kpi.label} className="rounded-xl border border-slate-200 bg-white p-5">
+                    <div className="mb-3 flex items-center justify-between">
+                      <p className="text-xs font-medium uppercase tracking-wide text-slate-500">{kpi.label}</p>
+                      <Icon className="h-4 w-4 text-slate-400" />
+                    </div>
+                    <p className="text-2xl font-semibold">{kpi.value}</p>
+                  </div>
+                );
+              })}
+            </section>
+
+            <section className="rounded-2xl border border-slate-200 bg-white p-3">
+              <div className="mb-4 flex flex-wrap gap-2">
+                {tabs.map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setActiveTab(tab.id)}
+                    className={`rounded-lg px-3 py-2 text-sm font-medium ${
+                      activeTab === tab.id
+                        ? "bg-slate-900 text-white"
+                        : "bg-slate-100 text-slate-700 hover:bg-slate-200"
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              <div className="rounded-xl border border-slate-100 bg-slate-50 p-5">
+                {activeTab === "overview" && overview && (
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    <Metric label="Chats Today" value={overview.chats_today} />
+                    <Metric label="Reports Today" value={overview.reports_today} />
+                    <Metric label="Avg Response Latency (ms)" value={overview.avg_response_latency_ms} />
+                    <Metric label="Forecast Month-End Cost" value={`$${overview.forecast_month_end_cost.toFixed(2)}`} />
+                    <Metric label="Pending Access Requests" value={overview.pending_access_requests} />
+                    <Metric label="Overdue Deadlines" value={overview.overdue_deadlines} />
+                    <Metric label="Failed Reports (24h)" value={overview.failed_reports_24h} />
+                  </div>
+                )}
+
+                {activeTab === "performance" && performance && (
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    <Metric label="Avg Latency (7d, ms)" value={performance.avg_latency_ms_7d} />
+                    <Metric label="P95 Latency (7d, ms)" value={performance.p95_latency_ms_7d} />
+                    <Metric label="Fallback Successes (7d)" value={performance.provider_fallback_successes_7d} />
+                    <Metric label="Fallback Failures (7d)" value={performance.provider_fallback_failures_7d} />
+                    <Metric label="Reranker Failures (7d)" value={performance.reranker_failures_7d} />
+                  </div>
+                )}
+
+                {activeTab === "cost" && cost && (
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      <Metric label="Month Estimated Cost" value={`$${cost.month_estimated_cost.toFixed(2)}`} />
+                      <Metric label="Last 7d Estimated Cost" value={`$${cost.last_7d_estimated_cost.toFixed(2)}`} />
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                      <div className="mb-2 flex items-center gap-2">
+                        <BarChart3 className="h-4 w-4 text-slate-500" />
+                        <p className="text-sm font-semibold">Provider Cost Breakdown (30d)</p>
+                      </div>
+                      {cost.provider_cost_30d?.length ? (
+                        <div className="space-y-2">
+                          {cost.provider_cost_30d.map((row) => (
+                            <div key={row.provider} className="flex items-center justify-between text-sm">
+                              <span className="capitalize text-slate-600">{row.provider}</span>
+                              <span className="font-medium text-slate-900">${row.cost.toFixed(2)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-sm text-slate-500">No provider cost data returned.</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {activeTab === "system" && system && (
+                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <Metric label="Auth Denied (24h)" value={system.auth_denied_24h} />
+                    <Metric label="Worker Failures (24h)" value={system.worker_failures_24h} />
+                    <Metric label="Report Failures (24h)" value={system.report_failures_24h} />
+                    <Metric label="Ingestion Failures (24h)" value={system.ingestion_failures_24h} />
+                  </div>
+                )}
+
+                {activeTab === "adoption" && adoption && (
+                  <div className="space-y-3">
+                    <p className="text-sm text-slate-600">Initial adoption snapshot is live. Expanded trend views are next.</p>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                      <Metric label="Events (30d)" value={adoption.events_30d} />
+                      <Metric label="Unique Users (30d)" value={adoption.unique_users_30d} />
+                      <Metric label="Unique Campaigns (30d)" value={adoption.unique_campaigns_30d} />
+                      <Metric label="Chat Users (30d)" value={adoption.chat_users_30d} />
+                      <Metric label="Report Users (30d)" value={adoption.report_users_30d} />
+                    </div>
+                  </div>
+                )}
+
+                {activeTab === "workflow" && workflow && (
+                  <div className="space-y-3">
+                    <p className="text-sm text-slate-600">Workflow health shell is active with core operational indicators.</p>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+                      <Metric label="Access Requests (24h)" value={workflow.access_requests_24h} />
+                      <Metric label="Access Decisions (24h)" value={workflow.access_decisions_24h} />
+                      <Metric label="Deadline Reminders (24h)" value={workflow.deadline_reminders_24h} />
+                      <Metric label="Preview Failures (24h)" value={workflow.preview_failures_24h} />
+                      <Metric label="Pending Access Requests" value={workflow.pending_access_requests} />
+                      <Metric label="Overdue Deadlines" value={workflow.overdue_deadlines} />
+                    </div>
+                  </div>
+                )}
+              </div>
+            </section>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Metric({ label, value }: { label: string; value: string | number }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-4">
+      <p className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</p>
+      <p className="mt-1 text-xl font-semibold text-slate-900">{value}</p>
+    </div>
+  );
+}
+
