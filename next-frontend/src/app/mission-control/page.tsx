@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "@clerk/nextjs";
 import { Activity, AlertTriangle, BarChart3, ChevronRight, DollarSign, Gauge, ShieldCheck, Users } from "lucide-react";
@@ -237,6 +237,7 @@ function normalizeSystem(raw: unknown): SystemData {
 
 export default function MissionControlPage() {
   const { getToken, isLoaded } = useAuth();
+  const hasAutoFetchedRef = useRef(false);
   const [activeTab, setActiveTab] = useState<MissionControlTab>("overview");
   const [isLoading, setIsLoading] = useState(true);
   const [accessDenied, setAccessDenied] = useState(false);
@@ -249,7 +250,7 @@ export default function MissionControlPage() {
   const [workflow, setWorkflow] = useState<WorkflowData>(defaultWorkflow);
   const [system, setSystem] = useState<SystemData>(defaultSystem);
 
-  const fetchMissionControl = async () => {
+  const fetchMissionControl = useCallback(async () => {
     if (!isLoaded) return;
     try {
       setIsLoading(true);
@@ -297,12 +298,13 @@ export default function MissionControlPage() {
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [getToken, isLoaded]);
 
   useEffect(() => {
+    if (!isLoaded || hasAutoFetchedRef.current) return;
+    hasAutoFetchedRef.current = true;
     void fetchMissionControl();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isLoaded]);
+  }, [fetchMissionControl, isLoaded]);
 
   const topKpis = useMemo(() => {
     return [
