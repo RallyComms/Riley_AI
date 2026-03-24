@@ -1691,6 +1691,30 @@ class GraphService:
             print(f"Error searching campaigns in graph: {e}")
             return ""
 
+    async def get_campaign_names_by_ids(self, campaign_ids: List[str]) -> Dict[str, str]:
+        """Resolve campaign ids to human-readable campaign names."""
+        normalized_ids = [
+            str(campaign_id or "").strip()
+            for campaign_id in campaign_ids
+            if str(campaign_id or "").strip()
+        ]
+        if not normalized_ids:
+            return {}
+        async with self._driver.session() as session:
+            query = """
+            MATCH (c:Campaign)
+            WHERE c.id IN $campaign_ids
+            RETURN c.id as id, c.name as name
+            """
+            result = await session.run(query, campaign_ids=normalized_ids)
+            mapping: Dict[str, str] = {}
+            async for record in result:
+                campaign_id = str(record.get("id") or "").strip()
+                campaign_name = str(record.get("name") or "").strip()
+                if campaign_id:
+                    mapping[campaign_id] = campaign_name or campaign_id
+            return mapping
+
     async def clear_chat_history(self, session_id: str, tenant_id: str, user_id: str) -> None:
         """Clear all messages for a chat session.
         

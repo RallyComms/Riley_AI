@@ -1472,6 +1472,88 @@ class VectorService:
                 points=promoted_chunks,
             )
 
+    async def _delete_chunk_points_for_parent(
+        self,
+        *,
+        collection_name: str,
+        parent_file_id: str,
+    ) -> int:
+        """Delete chunk points associated with a parent file id."""
+        chunk_filter = Filter(
+            must=[
+                FieldCondition(
+                    key="parent_file_id",
+                    match=MatchValue(value=parent_file_id),
+                ),
+                FieldCondition(
+                    key="record_type",
+                    match=MatchValue(value="chunk"),
+                ),
+            ]
+        )
+        try:
+            points, _ = await self._client.scroll(
+                collection_name=collection_name,
+                scroll_filter=chunk_filter,
+                limit=5000,
+                with_payload=False,
+                with_vectors=False,
+            )
+        except Exception as exc:
+            if not self._is_missing_payload_index_error(exc, "record_type"):
+                raise
+            fallback_filter = Filter(
+                must=[
+                    FieldCondition(
+                        key="parent_file_id",
+                        match=MatchValue(value=parent_file_id),
+                    )
+                ]
+            )
+            points, _ = await self._client.scroll(
+                collection_name=collection_name,
+                scroll_filter=fallback_filter,
+                limit=5000,
+                with_payload=True,
+                with_vectors=False,
+            )
+            points = [
+                point for point in points
+                if (point.payload or {}).get("record_type") == "chunk"
+            ]
+        if not points:
+            return 0
+        point_ids = [str(point.id) for point in points]
+        await self._client.delete(
+            collection_name=collection_name,
+            points_selector=models.PointIdsList(points=point_ids),
+        )
+        return len(point_ids)
+
+    async def remove_from_global_archive(self, file_id: str) -> bool:
+        """Remove a promoted file (and global chunk copies) from Tier 1 only."""
+        settings = get_settings()
+        points = await self._client.retrieve(
+            collection_name=settings.QDRANT_COLLECTION_TIER_1,
+            ids=[file_id],
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not points:
+            return False
+        payload = points[0].payload or {}
+        if not bool(payload.get("is_global")):
+            return False
+        await self._client.delete(
+            collection_name=settings.QDRANT_COLLECTION_TIER_1,
+            points_selector=models.PointIdsList(points=[file_id]),
+        )
+        await self._delete_chunk_points_for_parent(
+            collection_name=settings.QDRANT_COLLECTION_TIER_1,
+            parent_file_id=file_id,
+        )
+        return True
+
     async def delete_tenant_data(self, tenant_id: str) -> List[str]:
         """Delete all data for a tenant from Qdrant and return list of file URLs.
         

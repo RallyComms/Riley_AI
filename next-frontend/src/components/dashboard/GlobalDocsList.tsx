@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { useAuth } from "@clerk/nextjs";
-import { FileText, FileType2, Table, Presentation, Image as ImageIcon, Search, Eye, Trophy } from "lucide-react";
+import { FileText, FileType2, Table, Presentation, Image as ImageIcon, Search, Eye, Trophy, Trash2, AlertTriangle } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { Asset, AssetTag } from "@app/lib/types";
@@ -19,6 +19,7 @@ interface GlobalFile {
   is_golden?: boolean;
   client_id?: string; // Original campaign ID
   source_campaign_id?: string;
+  origin_campaign_name?: string;
   preview_url?: string | null;
   preview_type?: string | null;
   preview_status?: "complete" | "failed" | "processing" | "queued" | null;
@@ -52,15 +53,6 @@ function getFileIcon(type: string) {
   }
 }
 
-// Helper to format campaign name from ID
-function formatCampaignName(campaignId: string | undefined): string {
-  if (!campaignId) return "Unknown Campaign";
-  return campaignId
-    .split("-")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-}
-
 function hasValidGlobalRecord(file: GlobalFile): boolean {
   const name = String(file.name || "").trim().toLowerCase();
   const origin = String(file.source_campaign_id || file.client_id || "").trim().toLowerCase();
@@ -85,34 +77,38 @@ export function GlobalDocsList({ onViewDocument }: GlobalDocsListProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedFile, setSelectedFile] = useState<Asset | null>(null);
+  const [pendingActionFile, setPendingActionFile] = useState<GlobalFile | null>(null);
+  const [isSubmittingAction, setIsSubmittingAction] = useState(false);
+
+  const fetchGlobalFiles = async () => {
+    try {
+      setIsLoading(true);
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication token not available");
+      }
+
+      const data = await apiFetch<{ files: GlobalFile[] }>(
+        `/api/v1/list?tenant_id=global`,
+        {
+          token,
+          method: "GET",
+        }
+      );
+      const incoming = data.files || [];
+      setFiles(incoming.filter(hasValidGlobalRecord));
+    } catch (error) {
+      console.error("Error fetching global files:", error);
+      setFiles([]);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
   // Fetch global files
   useEffect(() => {
-    const fetchGlobalFiles = async () => {
-      try {
-        const token = await getToken();
-        if (!token) {
-          throw new Error("Authentication token not available");
-        }
-
-        const data = await apiFetch<{ files: GlobalFile[] }>(
-          `/api/v1/list?tenant_id=global`,
-          {
-            token,
-            method: "GET",
-          }
-        );
-        const incoming = data.files || [];
-        setFiles(incoming.filter(hasValidGlobalRecord));
-      } catch (error) {
-        console.error("Error fetching global files:", error);
-        setFiles([]);
-      } finally {
-        setIsLoading(false);
-      }
-    };
-
-    fetchGlobalFiles();
+    void fetchGlobalFiles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getToken]);
 
   // Filter files by search query
@@ -162,6 +158,32 @@ export function GlobalDocsList({ onViewDocument }: GlobalDocsListProps) {
       onViewDocument(asset);
     } else {
       setSelectedFile(asset);
+    }
+  };
+
+  const handleFirmDocumentAction = async (mode: "archive_only" | "delete_everywhere") => {
+    if (!pendingActionFile || isSubmittingAction) return;
+    try {
+      setIsSubmittingAction(true);
+      const token = await getToken();
+      if (!token) {
+        throw new Error("Authentication token not available");
+      }
+      await apiFetch(
+        `/api/v1/files/${encodeURIComponent(pendingActionFile.id)}/firm-archive/remove?tenant_id=global`,
+        {
+          token,
+          method: "POST",
+          body: { mode },
+        }
+      );
+      setPendingActionFile(null);
+      await fetchGlobalFiles();
+    } catch (error) {
+      console.error("Failed to remove/delete firm document:", error);
+      alert("Failed to process document action. Please try again.");
+    } finally {
+      setIsSubmittingAction(false);
     }
   };
 
@@ -249,20 +271,30 @@ export function GlobalDocsList({ onViewDocument }: GlobalDocsListProps) {
                       {/* Origin Campaign */}
                       <td className="px-4 py-4">
                         <span className="text-sm text-zinc-400">
-                          {formatCampaignName(file.source_campaign_id || file.client_id)}
+                          {file.origin_campaign_name || "Unknown Campaign"}
                         </span>
                       </td>
 
                       {/* Action */}
                       <td className="px-4 py-4 text-right">
-                        <button
-                          type="button"
-                          onClick={() => handleView(file)}
-                          className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/50 px-3 py-1.5 text-sm font-medium text-zinc-300 hover:border-amber-400/50 hover:bg-amber-400/10 hover:text-amber-400 transition-colors"
-                        >
-                          <Eye className="h-4 w-4" />
-                          View
-                        </button>
+                        <div className="inline-flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleView(file)}
+                            className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/50 px-3 py-1.5 text-sm font-medium text-zinc-300 hover:border-amber-400/50 hover:bg-amber-400/10 hover:text-amber-400 transition-colors"
+                          >
+                            <Eye className="h-4 w-4" />
+                            View
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setPendingActionFile(file)}
+                            className="inline-flex items-center gap-2 rounded-lg border border-red-900/70 bg-red-950/30 px-3 py-1.5 text-sm font-medium text-red-300 hover:border-red-500/70 hover:bg-red-900/30 hover:text-red-200 transition-colors"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            Remove
+                          </button>
+                        </div>
                       </td>
                     </tr>
                   );
@@ -280,6 +312,62 @@ export function GlobalDocsList({ onViewDocument }: GlobalDocsListProps) {
           onClose={() => setSelectedFile(null)}
           variant="modal"
         />
+      )}
+
+      {/* Remove/Delete Modal */}
+      {pendingActionFile && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-lg rounded-xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl">
+            <div className="mb-4 flex items-start gap-3">
+              <div className="rounded-full border border-red-500/30 bg-red-500/10 p-2">
+                <AlertTriangle className="h-5 w-5 text-red-400" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-zinc-100">Remove or Delete Document</h3>
+                <p className="mt-1 text-sm text-zinc-400">
+                  <span className="font-medium text-zinc-200">{pendingActionFile.name}</span>
+                </p>
+              </div>
+            </div>
+            <p className="mb-4 text-sm text-zinc-300">
+              Choose one action. &quot;Delete everywhere&quot; is destructive and cannot be undone.
+            </p>
+            <div className="space-y-3">
+              <button
+                type="button"
+                disabled={isSubmittingAction}
+                onClick={() => void handleFirmDocumentAction("archive_only")}
+                className="w-full rounded-lg border border-amber-700/60 bg-amber-950/30 px-4 py-3 text-left text-sm text-amber-200 transition-colors hover:bg-amber-900/40 disabled:opacity-60"
+              >
+                <span className="block font-semibold">Remove from Firm Archive only</span>
+                <span className="block text-xs text-amber-300/90">
+                  Removes this document from Firm Documents, but keeps it in its original campaign.
+                </span>
+              </button>
+              <button
+                type="button"
+                disabled={isSubmittingAction}
+                onClick={() => void handleFirmDocumentAction("delete_everywhere")}
+                className="w-full rounded-lg border border-red-700/70 bg-red-950/40 px-4 py-3 text-left text-sm text-red-200 transition-colors hover:bg-red-900/50 disabled:opacity-60"
+              >
+                <span className="block font-semibold">Delete everywhere (destructive)</span>
+                <span className="block text-xs text-red-300/90">
+                  Removes from Firm Archive and permanently deletes the campaign file and underlying records.
+                </span>
+              </button>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                disabled={isSubmittingAction}
+                onClick={() => setPendingActionFile(null)}
+                className="rounded-lg border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800 disabled:opacity-60"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </>
   );

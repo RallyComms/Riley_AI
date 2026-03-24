@@ -1,7 +1,7 @@
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, Form, Query, Depends, Request, Header
 from pydantic import BaseModel
@@ -72,6 +72,7 @@ class FileListItem(BaseModel):
     is_golden: Optional[bool] = None
     client_id: Optional[str] = None
     source_campaign_id: Optional[str] = None
+    origin_campaign_name: Optional[str] = None
 
 
 class FileListResponse(BaseModel):
@@ -142,6 +143,10 @@ class AIEnabledRequest(BaseModel):
 class DeleteResponse(BaseModel):
     status: str
     message: str
+
+
+class FirmArchiveRemoveRequest(BaseModel):
+    mode: Literal["archive_only", "delete_everywhere"]
 
 
 async def _get_file_point_for_tenant(
@@ -378,7 +383,8 @@ async def get_tenant_files(
 @router.get("/list", response_model=FileListResponse)
 async def list_files(
     tenant_id: str = Query(..., description="Tenant/client ID to filter files, or 'global' for firm archive"),
-    current_user: Dict = Depends(verify_tenant_access)
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
 ) -> FileListResponse:
     """
     List files from Qdrant filtered by tenant_id (source of truth).
@@ -416,6 +422,14 @@ async def list_files(
                 collection_name=settings.QDRANT_COLLECTION_TIER_1,
                 limit=1000,
             )
+            origin_campaign_ids = sorted(
+                {
+                    _resolve_origin_campaign_id(file_data)
+                    for file_data in global_files
+                    if _resolve_origin_campaign_id(file_data)
+                }
+            )
+            campaign_name_map = await graph.get_campaign_names_by_ids(origin_campaign_ids)
             
             # Convert to FileListItem format
             for file_data in global_files:
@@ -446,6 +460,7 @@ async def list_files(
                     is_golden=bool(file_data.get("is_golden", False)),
                     client_id=origin_campaign_id,
                     source_campaign_id=origin_campaign_id,
+                    origin_campaign_name=campaign_name_map.get(origin_campaign_id) or origin_campaign_id,
                     ai_enabled=file_data.get("ai_enabled"),
                     ocr_enabled=file_data.get("ocr_enabled"),
                     ocr_status=file_data.get("ocr_status"),
@@ -515,6 +530,54 @@ async def list_files(
         ) from exc
     
     return FileListResponse(files=files)
+
+
+@router.post("/files/{file_id}/firm-archive/remove", response_model=DeleteResponse)
+async def remove_or_delete_firm_archive_file(
+    file_id: str,
+    request: FirmArchiveRemoveRequest,
+    tenant_id: str = Query("global", description="Must be global for Firm Archive actions."),
+    current_user: Dict = Depends(verify_tenant_access),
+) -> DeleteResponse:
+    """Remove a file from the Firm Archive only, or delete it everywhere."""
+    if tenant_id != "global":
+        raise HTTPException(status_code=400, detail="tenant_id must be 'global' for firm archive removal actions.")
+
+    settings = get_settings()
+    await _get_file_point_for_tenant(
+        file_id=file_id,
+        tenant_id="global",
+        collection_name=settings.QDRANT_COLLECTION_TIER_1,
+    )
+
+    removed_from_global = await vector_service.remove_from_global_archive(file_id)
+    if not removed_from_global:
+        raise HTTPException(status_code=404, detail=f"File {file_id} is not currently promoted in Firm Archive.")
+
+    if request.mode == "archive_only":
+        return DeleteResponse(
+            status="success",
+            message=f"File {file_id} removed from Firm Archive only. Source campaign document was kept.",
+        )
+
+    # delete_everywhere mode: remove source campaign file and underlying storage.
+    try:
+        await delete_file(
+            file_id=file_id,
+            collection_name=settings.QDRANT_COLLECTION_TIER_2,
+        )
+        source_deletion_note = "Source campaign document and storage were deleted."
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        source_deletion_note = "Global archive copy removed. Source campaign copy was already missing."
+
+    return DeleteResponse(
+        status="success",
+        message=(
+            f"File {file_id} deleted everywhere. Removed from Firm Archive. {source_deletion_note}"
+        ),
+    )
 
 
 @router.get("/files/global/audit", response_model=FirmDocumentsAuditResponse)
