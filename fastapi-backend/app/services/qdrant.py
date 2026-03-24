@@ -1083,34 +1083,46 @@ class VectorService:
             ],
         )
 
-        # Use scroll to get all matching points
-        try:
-            scroll_result = await self._client.scroll(
-                collection_name=collection_name,
-                scroll_filter=global_filter,
-                limit=limit,
-                with_payload=True,
-                with_vectors=False,  # Don't need vectors for listing
-            )
-            points = scroll_result[0]
-        except Exception as exc:
-            if not self._is_missing_payload_index_error(exc, "record_type"):
-                raise
-            legacy_filter = Filter(
-                must=global_filter.must or [],
-                should=global_filter.should or [],
-            )
-            scroll_result = await self._client.scroll(
-                collection_name=collection_name,
-                scroll_filter=legacy_filter,
-                limit=limit,
-                with_payload=True,
-                with_vectors=False,
-            )
-            points = [
-                point for point in scroll_result[0]
-                if (point.payload or {}).get("record_type") != "chunk"
-            ]
+        points: List[Any] = []
+        offset = None
+        page_size = 500
+        while True:
+            try:
+                scroll_result = await self._client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=global_filter,
+                    limit=page_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,  # Don't need vectors for listing
+                )
+                batch = scroll_result[0]
+            except Exception as exc:
+                if not self._is_missing_payload_index_error(exc, "record_type"):
+                    raise
+                legacy_filter = Filter(
+                    must=global_filter.must or [],
+                    should=global_filter.should or [],
+                )
+                scroll_result = await self._client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=legacy_filter,
+                    limit=page_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                batch = [
+                    point for point in scroll_result[0]
+                    if (point.payload or {}).get("record_type") != "chunk"
+                ]
+
+            if not batch:
+                break
+            points.extend(batch)
+            offset = scroll_result[1]
+            if offset is None:
+                break
 
         files = []
         for point in points:
@@ -1174,7 +1186,8 @@ class VectorService:
                 "analysis_appendix_covered": payload.get("analysis_appendix_covered"),
             })
 
-        return files
+        files.sort(key=lambda item: str(item.get("promoted_at") or ""), reverse=True)
+        return files[:limit]
 
     async def get_index_summary(
         self,
