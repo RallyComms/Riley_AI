@@ -6,6 +6,7 @@ It supports both CLERK_JWKS_URL and CLERK_ISSUER environment variables.
 
 import base64
 import json
+import uuid
 from typing import Dict, Optional
 
 import jwt
@@ -391,11 +392,63 @@ async def verify_tenant_access(
     _tenant_membership_cache[cache_key] = is_member
     
     if not is_member:
+        graph_for_analytics = getattr(request.app.state, "graph", None)
+        if graph_for_analytics is not None:
+            try:
+                await graph_for_analytics.append_analytics_event(
+                    event_id=f"auth_denied:{tenant_id}:{user_id}:{uuid.uuid4()}",
+                    source_event_type_raw="auth_tenant_access_denied",
+                    source_entity="AuthGuard",
+                    campaign_id=tenant_id,
+                    user_id=user_id,
+                    actor_user_id=user_id,
+                    status="denied",
+                    metadata={
+                        "reason": "not_campaign_member",
+                        "path": str(request.url.path),
+                        "method": request.method,
+                    },
+                )
+            except Exception:
+                pass
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Access denied to campaign {tenant_id}. You are not a member of this campaign."
         )
     
+    return user
+
+
+def _parse_allowlist(raw_value: Optional[str]) -> set[str]:
+    if not raw_value:
+        return set()
+    return {item.strip().lower() for item in raw_value.split(",") if item.strip()}
+
+
+async def verify_mission_control_admin(
+    user: Dict = Depends(verify_clerk_token),
+) -> Dict:
+    """Allow only invited admin users to access Mission Control APIs."""
+    settings = get_settings()
+    allowed_user_ids = _parse_allowlist(getattr(settings, "MISSION_CONTROL_ADMIN_USER_IDS", None))
+    allowed_emails = _parse_allowlist(getattr(settings, "MISSION_CONTROL_ADMIN_EMAILS", None))
+
+    user_id = str(user.get("id") or "").strip().lower()
+    email = str(user.get("email") or "").strip().lower()
+    raw = user.get("raw") or {}
+    primary_email = str(raw.get("email_address") or "").strip().lower()
+
+    is_allowed = False
+    if allowed_user_ids and user_id in allowed_user_ids:
+        is_allowed = True
+    if allowed_emails and (email in allowed_emails or primary_email in allowed_emails):
+        is_allowed = True
+
+    if not is_allowed:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Mission Control access denied.",
+        )
     return user
 
 

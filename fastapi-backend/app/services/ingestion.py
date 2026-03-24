@@ -2280,6 +2280,8 @@ async def process_upload(
             "url": file_url,
             "filename": filename,
             "type": file_type,
+            "preview_status": preview_status,
+            "preview_error": preview_error,
         }
     except HTTPException:
         raise

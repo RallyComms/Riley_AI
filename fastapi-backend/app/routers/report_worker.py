@@ -41,6 +41,21 @@ async def run_riley_report_worker(
         await run_report_job(report_job_id=payload.report_job_id, graph=graph)
         logger.info("report_worker_execution_completed report_job_id=%s", payload.report_job_id)
     except Exception as exc:
+        try:
+            await graph.append_analytics_event(
+                event_id=f"worker_failed:report:{payload.report_job_id}",
+                source_event_type_raw="worker_failed",
+                source_entity="ReportWorker",
+                object_id=payload.report_job_id,
+                status="failed",
+                metadata={
+                    "worker": "report_worker",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:240],
+                },
+            )
+        except Exception:
+            pass
         logger.exception(
             "riley_report_worker_request_failed report_job_id=%s error_type=%s error_message=%s",
             payload.report_job_id,

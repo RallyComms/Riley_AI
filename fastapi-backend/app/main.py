@@ -20,6 +20,7 @@ from app.routers import (
     campaign_intel_worker,
     deadline_reminder_worker,
     comparisons,
+    mission_control,
 )
 from app.dependencies.auth import verify_clerk_token
 from app.services.graph import GraphService
@@ -125,6 +126,8 @@ app.include_router(reports.router, prefix="/api/v1", dependencies=[Depends(verif
 app.include_router(campaign_intelligence.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # Riley comparison tables route (authenticated)
 app.include_router(comparisons.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
+# Mission Control admin analytics route (authenticated + admin-guarded at endpoint level)
+app.include_router(mission_control.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # Internal worker route for Cloud Tasks ingestion callbacks (token-protected, not Clerk-protected)
 app.include_router(ingestion_worker.router, prefix="/api/v1")
 # Internal worker route for Cloud Tasks report callbacks (token-protected, not Clerk-protected)

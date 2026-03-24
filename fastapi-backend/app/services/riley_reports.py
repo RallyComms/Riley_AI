@@ -1609,6 +1609,29 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                     failure.fallback_eligible,
                 )
                 if failure.fallback_eligible:
+                    try:
+                        await graph.append_analytics_event(
+                            event_id=f"report_fallback_triggered:{report_job_id}:{uuid.uuid4()}",
+                            source_event_type_raw="report_provider_fallback_triggered",
+                            source_entity="RileyReportJob",
+                            campaign_id=tenant_id,
+                            user_id=user_id,
+                            actor_user_id=user_id,
+                            object_id=report_job_id,
+                            status="triggered",
+                            provider="gemini",
+                            model=primary_model,
+                            metadata={
+                                "fallback_provider": "openai",
+                                "fallback_model": fallback_model,
+                                "failure_error_type": failure.error_type,
+                                "failure_http_status": failure.http_status,
+                                "failure_provider_error_code": failure.provider_error_code,
+                                "failure_provider_error_type": failure.provider_error_type,
+                            },
+                        )
+                    except Exception:
+                        pass
                     logger.warning(
                         "gemini_generation_fallback_to_openai subsystem=%s tenant_id=%s report_job_id=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s error_type=%s http_status=%s provider_error_code=%s provider_error_type=%s fallback_eligible=%s",
                         "report",
@@ -1641,6 +1664,27 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                             primary_model,
                             fallback_model,
                         )
+                        try:
+                            await graph.append_analytics_event(
+                                event_id=f"report_fallback_succeeded:{report_job_id}:{uuid.uuid4()}",
+                                source_event_type_raw="report_provider_fallback_succeeded",
+                                source_entity="RileyReportJob",
+                                campaign_id=tenant_id,
+                                user_id=user_id,
+                                actor_user_id=user_id,
+                                object_id=report_job_id,
+                                status="succeeded",
+                                provider="openai",
+                                model=fallback_model,
+                                metadata={
+                                    "primary_provider": "gemini",
+                                    "primary_model": primary_model,
+                                    "fallback_provider": "openai",
+                                    "fallback_model": fallback_model,
+                                },
+                            )
+                        except Exception:
+                            pass
                         logger.info(
                             "report_generation_completed report_job_id=%s tenant_id=%s attempt=%s/%s model=%s",
                             report_job_id,
@@ -1666,6 +1710,29 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                             fallback_failure.provider_error_code,
                             fallback_failure.provider_error_type,
                         )
+                        try:
+                            await graph.append_analytics_event(
+                                event_id=f"report_fallback_failed:{report_job_id}:{uuid.uuid4()}",
+                                source_event_type_raw="report_provider_fallback_failed",
+                                source_entity="RileyReportJob",
+                                campaign_id=tenant_id,
+                                user_id=user_id,
+                                actor_user_id=user_id,
+                                object_id=report_job_id,
+                                status="failed",
+                                provider="openai",
+                                model=fallback_model,
+                                metadata={
+                                    "primary_provider": "gemini",
+                                    "primary_model": primary_model,
+                                    "failure_error_type": fallback_failure.error_type,
+                                    "failure_http_status": fallback_failure.http_status,
+                                    "failure_provider_error_code": fallback_failure.provider_error_code,
+                                    "failure_provider_error_type": fallback_failure.provider_error_type,
+                                },
+                            )
+                        except Exception:
+                            pass
                         exc = fallback_exc
                 last_exc = exc
                 retryable = _is_retryable_report_error(exc) and attempt_idx < retry_attempts

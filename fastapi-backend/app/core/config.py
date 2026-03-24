@@ -144,6 +144,9 @@ class Settings(BaseSettings):
     
     # Clerk Backend API secret key (for user directory lookups)
     CLERK_SECRET_KEY: Optional[str] = None
+    # Mission Control admin allowlists (comma-separated values).
+    MISSION_CONTROL_ADMIN_USER_IDS: Optional[str] = None
+    MISSION_CONTROL_ADMIN_EMAILS: Optional[str] = None
 
     model_config = SettingsConfigDict(
         env_file=".env",

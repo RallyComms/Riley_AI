@@ -2701,11 +2701,22 @@ class GraphService:
             SET
                 d.reminder_10m_sent_at = datetime(),
                 d.reminder_10m_event_id = e.id
-            RETURN count(e) as emitted_count
+            RETURN
+                count(e) as emitted_count,
+                collect({
+                    event_id: e.id,
+                    campaign_id: d.campaign_id,
+                    user_id: CASE
+                        WHEN d.visibility = "personal" THEN coalesce(d.assigned_user_id, d.created_by)
+                        ELSE null
+                    END,
+                    deadline_id: d.id
+                }) as emitted_events
             """
             ten_min_result = await session.run(ten_min_query)
             ten_min_record = await ten_min_result.single()
             ten_min_count = int((ten_min_record or {}).get("emitted_count") or 0)
+            ten_min_events = list((ten_min_record or {}).get("emitted_events") or [])
 
             now_query = """
             MATCH (d:CampaignDeadline)
@@ -2731,11 +2742,53 @@ class GraphService:
             SET
                 d.reminder_now_sent_at = datetime(),
                 d.reminder_now_event_id = e.id
-            RETURN count(e) as emitted_count
+            RETURN
+                count(e) as emitted_count,
+                collect({
+                    event_id: e.id,
+                    campaign_id: d.campaign_id,
+                    user_id: CASE
+                        WHEN d.visibility = "personal" THEN coalesce(d.assigned_user_id, d.created_by)
+                        ELSE null
+                    END,
+                    deadline_id: d.id
+                }) as emitted_events
             """
             now_result = await session.run(now_query)
             now_record = await now_result.single()
             now_count = int((now_record or {}).get("emitted_count") or 0)
+            now_events = list((now_record or {}).get("emitted_events") or [])
+
+            for emitted in ten_min_events:
+                event_id = str(emitted.get("event_id") or "").strip()
+                if not event_id:
+                    continue
+                await self.append_analytics_event(
+                    event_id=event_id,
+                    source_event_type_raw="deadline_reminder_10m",
+                    source_entity="CampaignEvent",
+                    campaign_id=str(emitted.get("campaign_id") or "").strip() or None,
+                    user_id=str(emitted.get("user_id") or "").strip() or None,
+                    actor_user_id="system:deadline-reminder",
+                    object_id=str(emitted.get("deadline_id") or "").strip() or None,
+                    status="emitted",
+                    metadata={"reminder_type": "deadline_reminder_10m"},
+                )
+            for emitted in now_events:
+                event_id = str(emitted.get("event_id") or "").strip()
+                if not event_id:
+                    continue
+                await self.append_analytics_event(
+                    event_id=event_id,
+                    source_event_type_raw="deadline_happening_now",
+                    source_entity="CampaignEvent",
+                    campaign_id=str(emitted.get("campaign_id") or "").strip() or None,
+                    user_id=str(emitted.get("user_id") or "").strip() or None,
+                    actor_user_id="system:deadline-reminder",
+                    object_id=str(emitted.get("deadline_id") or "").strip() or None,
+                    status="emitted",
+                    metadata={"reminder_type": "deadline_happening_now"},
+                )
 
             return {
                 "deadline_reminder_10m": ten_min_count,

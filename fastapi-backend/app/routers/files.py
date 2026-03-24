@@ -899,7 +899,8 @@ async def upload_file(
     overwrite: bool = Query(False, description="Overwrite existing file if it exists"),
     batch_size: Optional[int] = Query(None, description="Optional client-declared upload batch size"),
     upload_batch_size: Optional[int] = Header(None, alias="X-Upload-Batch-Size"),
-    current_user: Dict = Depends(verify_tenant_access)
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
 ) -> UploadResponse:
     """
     Upload a file, process it, and index it in Qdrant.
@@ -973,6 +974,24 @@ async def upload_file(
             tags=tag_list,
             overwrite=overwrite,
         )
+        if str(result.get("preview_status") or "").strip().lower() == "failed":
+            try:
+                await graph.append_analytics_event(
+                    event_id=f"preview_generation_failed:{result.get('id')}:{datetime.now().isoformat()}",
+                    source_event_type_raw="preview_generation_failed",
+                    source_entity="FileUpload",
+                    campaign_id=tenant_id,
+                    user_id=user_id,
+                    actor_user_id=user_id,
+                    object_id=str(result.get("id") or "").strip() or None,
+                    status="failed",
+                    metadata={
+                        "filename": str(result.get("filename") or ""),
+                        "preview_error": str(result.get("preview_error") or "")[:500] or None,
+                    },
+                )
+            except Exception:
+                pass
         return UploadResponse(**result)
     except HTTPException:
         raise

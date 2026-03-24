@@ -42,6 +42,21 @@ async def run_deadline_reminder_worker(
         )
         return {"status": "ok", **summary}
     except Exception as exc:
+        try:
+            await graph.append_analytics_event(
+                event_id=f"worker_failed:deadline_reminder:{summary.get('total_emitted', 0) if isinstance(locals().get('summary'), dict) else 0}:{type(exc).__name__}",
+                source_event_type_raw="worker_failed",
+                source_entity="DeadlineReminderWorker",
+                actor_user_id="system:deadline-reminder",
+                status="failed",
+                metadata={
+                    "worker": "deadline_reminder_worker",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc)[:240],
+                },
+            )
+        except Exception:
+            pass
         logger.exception(
             "deadline_reminder_worker_failed error_type=%s error_message=%s",
             type(exc).__name__,
