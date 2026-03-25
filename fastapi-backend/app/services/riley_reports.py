@@ -3,6 +3,7 @@ import io
 import json
 import logging
 import re
+import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,10 +21,12 @@ from app.services.graph import GraphService
 from app.services.provider_fallback import (
     classify_gemini_generation_failure,
     classify_openai_generation_failure,
-    generate_text_with_gemini,
+    generate_text_with_gemini_with_usage,
 )
 from app.services.qdrant import vector_service
-from app.services.rerank import rerank_candidates
+from app.services.rerank import rerank_candidates_with_metrics
+from app.services.analytics_contract import infer_provider_from_model
+from app.services.pricing_registry import estimate_text_generation_cost
 from app.services.storage import StorageService
 from app.services.token_utils import estimate_tokens
 
@@ -509,10 +512,7 @@ def _validate_and_sanitize_quotes(
 
     sanitized = re.sub(r'(["“])([^"\n”]{3,})(["”])', _replace_invalid, response_text)
     if invalid_found:
-        sanitized = (
-            f"{sanitized}\n\n"
-            "Note: Quote not found in sources; re-run with more context."
-        )
+        logger.debug("report_quote_sanitization_removed_invalid_quotes")
     return sanitized
 
 
@@ -1145,7 +1145,9 @@ async def _embed_query_text(content: str) -> List[float]:
         raise RuntimeError(f"Query embedding failed: {exc}") from exc
 
 
-async def _call_openai_report_model(*, prompt: str, model_name: str, timeout_seconds: int) -> str:
+async def _call_openai_report_model(
+    *, prompt: str, model_name: str, timeout_seconds: int
+) -> Tuple[str, Dict[str, int]]:
     settings = get_settings()
     if not settings.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -1166,10 +1168,40 @@ async def _call_openai_report_model(*, prompt: str, model_name: str, timeout_sec
             json=payload,
         )
         response.raise_for_status()
-        text = _extract_openai_response_text(response.json())
+        response_payload = response.json()
+        text = _extract_openai_response_text(response_payload)
         if not text:
             raise RuntimeError("OpenAI report response did not contain text output")
-        return text
+        return text, _extract_openai_usage(response_payload)
+
+
+def _extract_openai_usage(response_json: Dict[str, Any]) -> Dict[str, int]:
+    usage = response_json.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    normalized_input = input_tokens if isinstance(input_tokens, (int, float)) else prompt_tokens
+    normalized_output = output_tokens if isinstance(output_tokens, (int, float)) else completion_tokens
+    total_tokens = usage.get("total_tokens")
+    parsed: Dict[str, int] = {}
+    if isinstance(prompt_tokens, (int, float)):
+        parsed["prompt_tokens"] = int(prompt_tokens)
+    if isinstance(completion_tokens, (int, float)):
+        parsed["completion_tokens"] = int(completion_tokens)
+    if isinstance(normalized_input, (int, float)):
+        parsed["input_tokens"] = int(normalized_input)
+    if isinstance(normalized_output, (int, float)):
+        parsed["output_tokens"] = int(normalized_output)
+    if isinstance(total_tokens, (int, float)):
+        parsed["total_tokens"] = int(total_tokens)
+    return parsed
+
+
+def _has_exact_usage(usage: Dict[str, Any]) -> bool:
+    return isinstance(usage.get("input_tokens"), int) and isinstance(usage.get("output_tokens"), int)
 
 
 def _is_retryable_report_error(exc: Exception) -> bool:
@@ -1338,11 +1370,52 @@ async def _retrieve_report_context(
 
     if settings.RERANK_ENABLED:
         combined = private_results + global_results
-        ranked_ids = await rerank_candidates(
+        rerank_result = await rerank_candidates_with_metrics(
             query=query_text,
             candidates=combined,
             top_k=rerank_top_k,
         )
+        ranked_ids = rerank_result.get("ranked_ids")
+        if graph:
+            try:
+                await graph.append_analytics_event(
+                    event_id=f"rerank:report:{tenant_id}:{int(time.time() * 1000)}",
+                    source_event_type_raw="rerank_completed"
+                    if rerank_result.get("status") == "succeeded"
+                    else "rerank_failed",
+                    source_entity="Reranker",
+                    campaign_id=tenant_id,
+                    object_id="report_context",
+                    status="succeeded"
+                    if rerank_result.get("status") == "succeeded"
+                    else "failed",
+                    provider=str(rerank_result.get("provider") or ""),
+                    model=str(rerank_result.get("model") or ""),
+                    latency_ms=int(rerank_result.get("latency_ms") or 0),
+                    cost_estimate_usd=(
+                        float(rerank_result.get("cost_estimate_usd"))
+                        if rerank_result.get("cost_estimate_usd") is not None
+                        else None
+                    ),
+                    pricing_version=str(rerank_result.get("pricing_version") or "cost-accounting-v1"),
+                    cost_confidence=str(rerank_result.get("cost_confidence") or "proxy_only"),
+                    metadata={
+                        "service": "rerank",
+                        "input_tokens": int(rerank_result.get("input_tokens") or rerank_result.get("estimated_input_tokens") or 0),
+                        "output_tokens": int(rerank_result.get("output_tokens") or 0),
+                        "total_tokens": int(
+                            rerank_result.get("total_tokens") or rerank_result.get("estimated_input_tokens") or 0
+                        ),
+                        "estimated_input_tokens": int(rerank_result.get("estimated_input_tokens") or 0),
+                        "candidate_count_in": int(rerank_result.get("candidate_count_in") or 0),
+                        "candidate_count_sent": int(rerank_result.get("candidate_count_sent") or 0),
+                        "candidate_count_out": int(rerank_result.get("candidate_count_out") or 0),
+                        "requests_count": 1,
+                        "error_type": rerank_result.get("error_type"),
+                    },
+                )
+            except Exception:
+                pass
         if ranked_ids:
             private_results, global_results = _apply_rerank_order(
                 private_results=private_results,
@@ -1375,7 +1448,9 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
     report_type = _normalize_report_type(str(job.get("report_type") or "strategy_memo"))
     title = str(job.get("title") or "Riley Strategy Report").strip() or "Riley Strategy Report"
     mode = _normalize_report_mode(str(job.get("mode") or "deep"))
-    primary_model = settings.RILEY_GEMINI_MODEL
+    primary_model = (
+        settings.RILEY_REPORT_DEEP_MODEL if mode == "deep" else settings.RILEY_REPORT_MODEL
+    )
     fallback_model = settings.RILEY_OPENAI_FALLBACK_MODEL
     generation_model_used = primary_model
 
@@ -1557,6 +1632,8 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
             used_fidelity_level = str(plan["fidelity"])
             used_context_strategy = str(plan["strategy"])
             used_attempt_count = attempt_idx + 1
+            prompt_tokens_estimate = estimate_tokens(prompt)
+            attempt_started = time.perf_counter()
 
             logger.info(
                 "report_generation_started report_job_id=%s tenant_id=%s report_type=%s model=%s deep_mode=%s "
@@ -1576,12 +1653,58 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                 used_fidelity_level,
             )
             try:
-                report_body = await generate_text_with_gemini(
+                report_body, gemini_usage = await generate_text_with_gemini_with_usage(
                     prompt=prompt,
                     model_name=primary_model,
                     timeout_seconds=timeout_seconds,
                 )
                 generation_model_used = primary_model
+                gemini_usage_exact = _has_exact_usage(gemini_usage)
+                output_tokens = int(gemini_usage.get("output_tokens") or estimate_tokens(report_body))
+                input_tokens = int(gemini_usage.get("input_tokens") or prompt_tokens_estimate)
+                total_tokens = int(gemini_usage.get("total_tokens") or (input_tokens + output_tokens))
+                attempt_cost = estimate_text_generation_cost(
+                    service="report_generation",
+                    provider="google_gemini",
+                    model=primary_model,
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    usage_is_exact=gemini_usage_exact,
+                )
+                try:
+                    await graph.append_analytics_event(
+                        event_id=f"report_generation_attempt:{report_job_id}:{attempt_idx + 1}:gemini",
+                        source_event_type_raw="report_generation_attempt_completed",
+                        source_entity="RileyReportJob",
+                        campaign_id=tenant_id,
+                        user_id=user_id,
+                        actor_user_id=user_id,
+                        object_id=report_job_id,
+                        status="succeeded",
+                        provider="google_gemini",
+                        model=primary_model,
+                        latency_ms=int((time.perf_counter() - attempt_started) * 1000),
+                        cost_estimate_usd=(
+                            float(attempt_cost["cost_estimate_usd"])
+                            if attempt_cost.get("cost_estimate_usd") is not None
+                            else None
+                        ),
+                        pricing_version=str(attempt_cost.get("pricing_version") or "cost-accounting-v1"),
+                        cost_confidence=str(attempt_cost.get("cost_confidence") or "estimated_units"),
+                        metadata={
+                            "service": "report_generation",
+                            "attempt_index": attempt_idx + 1,
+                            "input_tokens": input_tokens,
+                            "output_tokens": output_tokens,
+                            "total_tokens": total_tokens,
+                            "prompt_tokens": input_tokens,
+                            "completion_tokens": output_tokens,
+                            "requests_count": 1,
+                            "fidelity": used_fidelity_level,
+                        },
+                    )
+                except Exception:
+                    pass
                 logger.info(
                     "report_generation_completed report_job_id=%s tenant_id=%s attempt=%s/%s model=%s",
                     report_job_id,
@@ -1648,12 +1771,59 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                         True,
                     )
                     try:
-                        report_body = await _call_openai_report_model(
+                        report_body, openai_usage = await _call_openai_report_model(
                             prompt=prompt,
                             model_name=fallback_model,
                             timeout_seconds=timeout_seconds,
                         )
                         generation_model_used = fallback_model
+                        openai_usage_exact = _has_exact_usage(openai_usage)
+                        output_tokens = int(openai_usage.get("output_tokens") or estimate_tokens(report_body))
+                        input_tokens = int(openai_usage.get("input_tokens") or prompt_tokens_estimate)
+                        total_tokens = int(openai_usage.get("total_tokens") or (input_tokens + output_tokens))
+                        fallback_cost = estimate_text_generation_cost(
+                            service="report_generation",
+                            provider="openai",
+                            model=fallback_model,
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            usage_is_exact=openai_usage_exact,
+                        )
+                        try:
+                            await graph.append_analytics_event(
+                                event_id=f"report_generation_attempt:{report_job_id}:{attempt_idx + 1}:openai-fallback",
+                                source_event_type_raw="report_generation_attempt_completed",
+                                source_entity="RileyReportJob",
+                                campaign_id=tenant_id,
+                                user_id=user_id,
+                                actor_user_id=user_id,
+                                object_id=report_job_id,
+                                status="succeeded",
+                                provider="openai",
+                                model=fallback_model,
+                                latency_ms=int((time.perf_counter() - attempt_started) * 1000),
+                                cost_estimate_usd=(
+                                    float(fallback_cost["cost_estimate_usd"])
+                                    if fallback_cost.get("cost_estimate_usd") is not None
+                                    else None
+                                ),
+                                pricing_version=str(fallback_cost.get("pricing_version") or "cost-accounting-v1"),
+                                cost_confidence=str(fallback_cost.get("cost_confidence") or "estimated_units"),
+                                metadata={
+                                    "service": "report_generation",
+                                    "attempt_index": attempt_idx + 1,
+                                    "input_tokens": input_tokens,
+                                    "output_tokens": output_tokens,
+                                    "total_tokens": total_tokens,
+                                    "prompt_tokens": int(openai_usage.get("prompt_tokens") or input_tokens),
+                                    "completion_tokens": int(openai_usage.get("completion_tokens") or output_tokens),
+                                    "requests_count": 1,
+                                    "fidelity": used_fidelity_level,
+                                    "fallback": True,
+                                },
+                            )
+                        except Exception:
+                            pass
                         logger.info(
                             "provider_fallback_succeeded subsystem=%s tenant_id=%s report_job_id=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s",
                             "report",
@@ -1734,6 +1904,49 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                         except Exception:
                             pass
                         exc = fallback_exc
+                failure_provider = infer_provider_from_model(generation_model_used) or "unknown"
+                failure_cost = estimate_text_generation_cost(
+                    service="report_generation",
+                    provider=failure_provider,
+                    model=generation_model_used,
+                    input_tokens=prompt_tokens_estimate,
+                    output_tokens=0,
+                )
+                try:
+                    await graph.append_analytics_event(
+                        event_id=f"report_generation_attempt:{report_job_id}:{attempt_idx + 1}:failed:{type(exc).__name__}",
+                        source_event_type_raw="report_generation_attempt_completed",
+                        source_entity="RileyReportJob",
+                        campaign_id=tenant_id,
+                        user_id=user_id,
+                        actor_user_id=user_id,
+                        object_id=report_job_id,
+                        status="failed",
+                        provider=failure_provider,
+                        model=generation_model_used,
+                        latency_ms=int((time.perf_counter() - attempt_started) * 1000),
+                        cost_estimate_usd=(
+                            float(failure_cost["cost_estimate_usd"])
+                            if failure_cost.get("cost_estimate_usd") is not None
+                            else None
+                        ),
+                        pricing_version=str(failure_cost.get("pricing_version") or "cost-accounting-v1"),
+                        cost_confidence=str(failure_cost.get("cost_confidence") or "estimated_units"),
+                        metadata={
+                            "service": "report_generation",
+                            "attempt_index": attempt_idx + 1,
+                            "input_tokens": prompt_tokens_estimate,
+                            "output_tokens": 0,
+                            "total_tokens": prompt_tokens_estimate,
+                            "prompt_tokens": prompt_tokens_estimate,
+                            "completion_tokens": 0,
+                            "requests_count": 1,
+                            "error_type": type(exc).__name__,
+                            "fidelity": used_fidelity_level,
+                        },
+                    )
+                except Exception:
+                    pass
                 last_exc = exc
                 retryable = _is_retryable_report_error(exc) and attempt_idx < retry_attempts
                 logger.warning(

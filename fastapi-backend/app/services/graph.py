@@ -74,6 +74,8 @@ class GraphService:
         status: Optional[str] = None,
         latency_ms: Optional[int] = None,
         cost_estimate_usd: Optional[float] = None,
+        pricing_version: Optional[str] = None,
+        cost_confidence: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Append/merge a normalized analytics event contract row."""
@@ -113,6 +115,30 @@ class GraphService:
         if target_object_id is None and metadata_obj.get("request_id"):
             target_object_id = str(metadata_obj.get("request_id") or "").strip() or None
         resolved_provider = provider or infer_provider_from_model(model)
+        input_tokens: Optional[int] = None
+        output_tokens: Optional[int] = None
+        total_tokens: Optional[int] = None
+
+        def _coerce_int(value: Any) -> Optional[int]:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return None
+                try:
+                    return int(float(text))
+                except Exception:
+                    return None
+            return None
+
+        input_tokens = _coerce_int(metadata_obj.get("input_tokens"))
+        output_tokens = _coerce_int(metadata_obj.get("output_tokens"))
+        total_tokens = _coerce_int(metadata_obj.get("total_tokens"))
+        if total_tokens is None and input_tokens is not None and output_tokens is not None:
+            total_tokens = input_tokens + output_tokens
 
         async with self._driver.session() as session:
             query = """
@@ -134,6 +160,11 @@ class GraphService:
                 e.status = $status,
                 e.latency_ms = $latency_ms,
                 e.cost_estimate_usd = $cost_estimate_usd,
+                e.input_tokens = $input_tokens,
+                e.output_tokens = $output_tokens,
+                e.total_tokens = $total_tokens,
+                e.pricing_version = $pricing_version,
+                e.cost_confidence = $cost_confidence,
                 e.source_entity = $source_entity,
                 e.metadata_json = $metadata_json,
                 e.updated_at = datetime()
@@ -155,6 +186,11 @@ class GraphService:
                 status=status,
                 latency_ms=latency_ms,
                 cost_estimate_usd=cost_estimate_usd,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                pricing_version=pricing_version,
+                cost_confidence=cost_confidence,
                 source_entity=source_entity,
                 metadata_json=safe_metadata_json(metadata_obj),
             )

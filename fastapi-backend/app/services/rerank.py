@@ -6,6 +6,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import get_settings
+from app.services.pricing_registry import estimate_single_unit_cost
 from app.services.token_utils import estimate_tokens, truncate_text_to_token_budget
 
 try:
@@ -312,11 +313,27 @@ def _extract_ranked_ids_from_response(
     return ranked_ids, len(ranked_ids)
 
 
-async def rerank_candidates(query: str, candidates: List[Dict[str, Any]], top_k: int) -> Optional[List[str]]:
-    """Rerank candidates with an LLM; returns ranked candidate IDs or None on failure."""
+async def rerank_candidates_with_metrics(
+    query: str, candidates: List[Dict[str, Any]], top_k: int
+) -> Dict[str, Any]:
+    """Rerank candidates and return ranking + usage/cost telemetry."""
     settings = get_settings()
     if not settings.RERANK_ENABLED or not candidates:
-        return None
+        return {
+            "ranked_ids": None,
+            "status": "disabled_or_empty",
+            "provider": (settings.RERANK_PROVIDER or "gemini").strip().lower(),
+            "model": settings.RERANK_MODEL,
+            "candidate_count_in": len(candidates),
+            "candidate_count_sent": 0,
+            "candidate_count_out": 0,
+            "estimated_input_tokens": 0,
+            "latency_ms": 0,
+            "cost_estimate_usd": 0.0,
+            "pricing_version": "cost-accounting-v1",
+            "cost_confidence": "proxy_only",
+            "error_type": None,
+        }
 
     provider = (settings.RERANK_PROVIDER or "gemini").strip().lower()
     input_candidates = candidates[:MAX_RERANK_CANDIDATE_COUNT_IN]
@@ -336,6 +353,13 @@ async def rerank_candidates(query: str, candidates: List[Dict[str, Any]], top_k:
         max_candidates_sent=MAX_RERANK_CANDIDATE_COUNT_SENT,
     )
     if not prepared_candidates:
+        unit_cost = estimate_single_unit_cost(
+            service="rerank",
+            provider=provider,
+            model=settings.RERANK_MODEL,
+            unit_type="input_token_1k",
+            quantity=0,
+        )
         logger.warning(
             "reranker_failed provider=%s model=%s candidate_count_in=%s candidate_count_sent=%s estimated_input_tokens=%s latency_ms=%s fallback_used=%s error_type=%s",
             provider,
@@ -347,7 +371,21 @@ async def rerank_candidates(query: str, candidates: List[Dict[str, Any]], top_k:
             True,
             "InputBudgetExceeded",
         )
-        return None
+        return {
+            "ranked_ids": None,
+            "status": "failed",
+            "provider": provider,
+            "model": settings.RERANK_MODEL,
+            "candidate_count_in": len(input_candidates),
+            "candidate_count_sent": 0,
+            "candidate_count_out": 0,
+            "estimated_input_tokens": 0,
+            "latency_ms": 0,
+            "cost_estimate_usd": unit_cost.get("cost_estimate_usd"),
+            "pricing_version": unit_cost.get("pricing_version"),
+            "cost_confidence": unit_cost.get("cost_confidence"),
+            "error_type": "InputBudgetExceeded",
+        }
     candidate_ids = {candidate["id"] for candidate in prepared_candidates}
 
     prompt = _build_prompt(query=query, prepared_candidates=prepared_candidates, top_k=top_k)
@@ -372,7 +410,28 @@ async def rerank_candidates(query: str, candidates: List[Dict[str, Any]], top_k:
             )
         else:
             logger.warning("reranker_provider_unsupported provider=%s; using fallback order", provider)
-            return None
+            unit_cost = estimate_single_unit_cost(
+                service="rerank",
+                provider=provider,
+                model=settings.RERANK_MODEL,
+                unit_type="input_token_1k",
+                quantity=estimated_input_tokens,
+            )
+            return {
+                "ranked_ids": None,
+                "status": "failed",
+                "provider": provider,
+                "model": settings.RERANK_MODEL,
+                "candidate_count_in": len(input_candidates),
+                "candidate_count_sent": len(prepared_candidates),
+                "candidate_count_out": 0,
+                "estimated_input_tokens": estimated_input_tokens,
+                "latency_ms": 0,
+                "cost_estimate_usd": unit_cost.get("cost_estimate_usd"),
+                "pricing_version": unit_cost.get("pricing_version"),
+                "cost_confidence": unit_cost.get("cost_confidence"),
+                "error_type": "UnsupportedProvider",
+            }
 
         raw = await asyncio.wait_for(
             asyncio.to_thread(runner),
@@ -399,7 +458,28 @@ async def rerank_candidates(query: str, candidates: List[Dict[str, Any]], top_k:
             elapsed_ms,
             False,
         )
-        return ranked_ids[:top_k]
+        unit_cost = estimate_single_unit_cost(
+            service="rerank",
+            provider=provider,
+            model=settings.RERANK_MODEL,
+            unit_type="input_token_1k",
+            quantity=estimated_input_tokens,
+        )
+        return {
+            "ranked_ids": ranked_ids[:top_k],
+            "status": "succeeded",
+            "provider": provider,
+            "model": settings.RERANK_MODEL,
+            "candidate_count_in": len(input_candidates),
+            "candidate_count_sent": len(prepared_candidates),
+            "candidate_count_out": candidate_count_out,
+            "estimated_input_tokens": estimated_input_tokens,
+            "latency_ms": elapsed_ms,
+            "cost_estimate_usd": unit_cost.get("cost_estimate_usd"),
+            "pricing_version": unit_cost.get("pricing_version"),
+            "cost_confidence": unit_cost.get("cost_confidence"),
+            "error_type": None,
+        }
     except Exception as exc:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         logger.warning(
@@ -413,4 +493,32 @@ async def rerank_candidates(query: str, candidates: List[Dict[str, Any]], top_k:
             True,
             type(exc).__name__,
         )
-        return None
+        unit_cost = estimate_single_unit_cost(
+            service="rerank",
+            provider=provider,
+            model=settings.RERANK_MODEL,
+            unit_type="input_token_1k",
+            quantity=estimated_input_tokens,
+        )
+        return {
+            "ranked_ids": None,
+            "status": "failed",
+            "provider": provider,
+            "model": settings.RERANK_MODEL,
+            "candidate_count_in": len(input_candidates),
+            "candidate_count_sent": len(prepared_candidates),
+            "candidate_count_out": 0,
+            "estimated_input_tokens": estimated_input_tokens,
+            "latency_ms": elapsed_ms,
+            "cost_estimate_usd": unit_cost.get("cost_estimate_usd"),
+            "pricing_version": unit_cost.get("pricing_version"),
+            "cost_confidence": unit_cost.get("cost_confidence"),
+            "error_type": type(exc).__name__,
+        }
+
+
+async def rerank_candidates(query: str, candidates: List[Dict[str, Any]], top_k: int) -> Optional[List[str]]:
+    """Backward-compatible wrapper that returns only ranked IDs."""
+    result = await rerank_candidates_with_metrics(query=query, candidates=candidates, top_k=top_k)
+    ranked_ids = result.get("ranked_ids")
+    return ranked_ids if isinstance(ranked_ids, list) and ranked_ids else None

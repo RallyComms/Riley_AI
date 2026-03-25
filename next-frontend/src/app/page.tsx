@@ -250,9 +250,7 @@ export default function Dashboard() {
   };
 
   const handleArchive = (campaignId: string) => {
-    console.log("archive_parent_handler_called", { campaignId });
     const campaign = directoryCampaigns.find((c) => c.campaignId === campaignId);
-    console.log("archive_modal_state_set", { campaignId });
     setArchiveTarget({
       id: campaignId,
       name: campaign?.name || "this campaign",
@@ -261,44 +259,27 @@ export default function Dashboard() {
 
   const handleConfirmArchive = async () => {
     if (!archiveTarget) return;
-    console.log("archive_confirm_clicked", { campaignId: archiveTarget.id });
     setIsArchiving(true);
     try {
       const token = await getToken();
       if (!token) {
         throw new Error("No authentication token available");
       }
-      const response = await apiFetch(`/api/v1/campaigns/${encodeURIComponent(archiveTarget.id)}/archive`, {
+      await apiFetch(`/api/v1/campaigns/${encodeURIComponent(archiveTarget.id)}/archive`, {
         token,
         method: "PATCH",
-      });
-      console.log("archive_confirm_patch_result", {
-        campaignId: archiveTarget.id,
-        ok: true,
-        response,
       });
       setCampaigns((prev) => prev.filter((c) => c.campaignId !== archiveTarget.id));
       setDirectoryCampaigns((prev) => prev.filter((c) => c.campaignId !== archiveTarget.id));
       setCampaignsVersion((prev) => prev + 1);
       setArchiveTarget(null);
     } catch (err) {
-      console.log("archive_confirm_patch_result", {
-        campaignId: archiveTarget.id,
-        ok: false,
-        error: err instanceof Error ? err.message : String(err),
-      });
       console.error("Archive campaign error:", err);
       alert(`Failed to archive campaign: ${err instanceof Error ? err.message : "Unknown error"}`);
     } finally {
       setIsArchiving(false);
     }
   };
-
-  useEffect(() => {
-    if (archiveTarget) {
-      console.log("archive_modal_rendered", { campaignId: archiveTarget.id });
-    }
-  }, [archiveTarget]);
 
   const handleRestore = (campaignId: string) => {
     // Restore functionality removed - campaigns are managed by backend

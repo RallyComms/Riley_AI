@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Depends, Request
@@ -18,10 +19,13 @@ from app.services.graph import GraphService
 from app.services.provider_fallback import (
     classify_gemini_generation_failure,
     classify_openai_generation_failure,
-    generate_text_with_gemini,
+    generate_text_with_gemini_with_usage,
 )
 from app.services.qdrant import vector_service
-from app.services.rerank import rerank_candidates
+from app.services.rerank import rerank_candidates_with_metrics
+from app.services.analytics_contract import infer_provider_from_model
+from app.services.pricing_registry import estimate_text_generation_cost
+from app.services.token_utils import estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -593,10 +597,7 @@ def _validate_and_sanitize_quotes(
 
     sanitized = re.sub(r'(["“])([^"\n”]{3,})(["”])', _replace_invalid, response_text)
     if invalid_found:
-        sanitized = (
-            f"{sanitized}\n\n"
-            "Note: Quote not found in sources; re-run with more context."
-        )
+        logger.debug("chat_quote_sanitization_removed_invalid_quotes")
     return sanitized
 
 
@@ -627,7 +628,34 @@ def _extract_openai_response_text(response_json: Dict[str, Any]) -> str:
     return ""
 
 
-async def _generate_riley_answer_openai(*, prompt: str, model_name: str, timeout_seconds: int) -> str:
+def _extract_openai_usage(response_json: Dict[str, Any]) -> Dict[str, int]:
+    usage = response_json.get("usage")
+    if not isinstance(usage, dict):
+        return {}
+    prompt_tokens = usage.get("prompt_tokens")
+    completion_tokens = usage.get("completion_tokens")
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    normalized_input = input_tokens if isinstance(input_tokens, (int, float)) else prompt_tokens
+    normalized_output = output_tokens if isinstance(output_tokens, (int, float)) else completion_tokens
+    total_tokens = usage.get("total_tokens")
+    parsed: Dict[str, int] = {}
+    if isinstance(prompt_tokens, (int, float)):
+        parsed["prompt_tokens"] = int(prompt_tokens)
+    if isinstance(completion_tokens, (int, float)):
+        parsed["completion_tokens"] = int(completion_tokens)
+    if isinstance(normalized_input, (int, float)):
+        parsed["input_tokens"] = int(normalized_input)
+    if isinstance(normalized_output, (int, float)):
+        parsed["output_tokens"] = int(normalized_output)
+    if isinstance(total_tokens, (int, float)):
+        parsed["total_tokens"] = int(total_tokens)
+    return parsed
+
+
+async def _generate_riley_answer_openai(
+    *, prompt: str, model_name: str, timeout_seconds: int
+) -> tuple[str, Dict[str, int]]:
     try:
         import httpx  # type: ignore
     except ImportError as exc:
@@ -652,10 +680,11 @@ async def _generate_riley_answer_openai(*, prompt: str, model_name: str, timeout
             json=payload,
         )
         response.raise_for_status()
-        text = _extract_openai_response_text(response.json())
+        response_payload = response.json()
+        text = _extract_openai_response_text(response_payload)
         if not text:
             raise RuntimeError("OpenAI response did not contain text output")
-        return text
+        return text, _extract_openai_usage(response_payload)
 
 
 def _candidate_id(result: Dict[str, Any]) -> str:
@@ -668,6 +697,10 @@ def _candidate_id(result: Dict[str, Any]) -> str:
     if parent is not None and idx is not None:
         return f"{parent}::chunk::{idx}"
     return str(result.get("id", ""))
+
+
+def _has_exact_usage(usage: Dict[str, Any]) -> bool:
+    return isinstance(usage.get("input_tokens"), int) and isinstance(usage.get("output_tokens"), int)
 
 
 def _apply_rerank_order(
@@ -1034,11 +1067,55 @@ async def chat(
     # Step B2: Optional LLM reranking over hybrid candidates.
     if settings.RERANK_ENABLED:
         combined_candidates = private_results + global_results
-        ranked_ids = await rerank_candidates(
+        rerank_result = await rerank_candidates_with_metrics(
             query=request.query,
             candidates=combined_candidates,
             top_k=rerank_top_k,
         )
+        ranked_ids = rerank_result.get("ranked_ids")
+        if graph:
+            try:
+                user_id = current_user.get("id", "unknown")
+                await graph.append_analytics_event(
+                    event_id=f"rerank:{request.tenant_id}:{request.session_id or 'ad-hoc'}:{int(time.time() * 1000)}",
+                    source_event_type_raw="rerank_completed"
+                    if rerank_result.get("status") == "succeeded"
+                    else "rerank_failed",
+                    source_entity="Reranker",
+                    campaign_id=request.tenant_id,
+                    user_id=user_id,
+                    actor_user_id=user_id,
+                    object_id=request.session_id,
+                    status="succeeded"
+                    if rerank_result.get("status") == "succeeded"
+                    else "failed",
+                    provider=str(rerank_result.get("provider") or ""),
+                    model=str(rerank_result.get("model") or ""),
+                    latency_ms=int(rerank_result.get("latency_ms") or 0),
+                    cost_estimate_usd=(
+                        float(rerank_result.get("cost_estimate_usd"))
+                        if rerank_result.get("cost_estimate_usd") is not None
+                        else None
+                    ),
+                    pricing_version=str(rerank_result.get("pricing_version") or "cost-accounting-v1"),
+                    cost_confidence=str(rerank_result.get("cost_confidence") or "proxy_only"),
+                    metadata={
+                        "service": "rerank",
+                        "input_tokens": int(rerank_result.get("input_tokens") or rerank_result.get("estimated_input_tokens") or 0),
+                        "output_tokens": int(rerank_result.get("output_tokens") or 0),
+                        "total_tokens": int(
+                            rerank_result.get("total_tokens") or rerank_result.get("estimated_input_tokens") or 0
+                        ),
+                        "estimated_input_tokens": int(rerank_result.get("estimated_input_tokens") or 0),
+                        "candidate_count_in": int(rerank_result.get("candidate_count_in") or 0),
+                        "candidate_count_sent": int(rerank_result.get("candidate_count_sent") or 0),
+                        "candidate_count_out": int(rerank_result.get("candidate_count_out") or 0),
+                        "requests_count": 1,
+                        "error_type": rerank_result.get("error_type"),
+                    },
+                )
+            except Exception:
+                pass
         if ranked_ids:
             private_results, global_results = _apply_rerank_order(
                 private_results=private_results,
@@ -1255,17 +1332,37 @@ Context Data:
     system_prompt += f"\nUser Question: {request.query}"
 
     # Step F: Generate response using Riley primary provider (Gemini) with OpenAI fallback.
-    primary_model = settings.RILEY_GEMINI_MODEL
+    use_deep_model = bool(deep or request.mode == "deep")
+    primary_model = _get_riley_model_name(deep=use_deep_model)
     fallback_model = settings.RILEY_OPENAI_FALLBACK_MODEL
     response_text: Optional[str] = None
     last_error: Optional[Exception] = None
     generation_model_used = primary_model
+    generation_started = time.perf_counter()
+    generation_usage: Dict[str, int] = {}
+    generation_usage_is_exact = False
     try:
-        response_text = await generate_text_with_gemini(
+        response_text, gemini_usage = await generate_text_with_gemini_with_usage(
             prompt=system_prompt,
             model_name=primary_model,
             timeout_seconds=max(5, int(settings.RILEY_TIMEOUT_SECONDS)),
         )
+        gemini_usage_exact = _has_exact_usage(gemini_usage)
+        generation_usage = {
+            "input_tokens": int(gemini_usage.get("input_tokens") or estimate_tokens(system_prompt)),
+            "output_tokens": int(gemini_usage.get("output_tokens") or estimate_tokens(response_text)),
+            "total_tokens": int(
+                gemini_usage.get("total_tokens")
+                or (
+                    int(gemini_usage.get("input_tokens") or estimate_tokens(system_prompt))
+                    + int(gemini_usage.get("output_tokens") or estimate_tokens(response_text))
+                )
+            ),
+        }
+        if gemini_usage_exact and "prompt_tokens" not in generation_usage:
+            generation_usage["prompt_tokens"] = int(generation_usage["input_tokens"])
+            generation_usage["completion_tokens"] = int(generation_usage["output_tokens"])
+        generation_usage_is_exact = gemini_usage_exact
         generation_model_used = primary_model
     except Exception as exc:
         last_error = exc
@@ -1300,11 +1397,27 @@ Context Data:
                 True,
             )
             try:
-                response_text = await _generate_riley_answer_openai(
+                response_text, openai_usage = await _generate_riley_answer_openai(
                     prompt=system_prompt,
                     model_name=fallback_model,
                     timeout_seconds=max(5, int(settings.RILEY_TIMEOUT_SECONDS)),
                 )
+                generation_usage = {
+                    "input_tokens": int(openai_usage.get("input_tokens") or estimate_tokens(system_prompt)),
+                    "output_tokens": int(openai_usage.get("output_tokens") or estimate_tokens(response_text)),
+                    "total_tokens": int(
+                        openai_usage.get("total_tokens")
+                        or (
+                            int(openai_usage.get("input_tokens") or estimate_tokens(system_prompt))
+                            + int(openai_usage.get("output_tokens") or estimate_tokens(response_text))
+                        )
+                    ),
+                }
+                if isinstance(openai_usage.get("prompt_tokens"), int):
+                    generation_usage["prompt_tokens"] = int(openai_usage["prompt_tokens"])
+                if isinstance(openai_usage.get("completion_tokens"), int):
+                    generation_usage["completion_tokens"] = int(openai_usage["completion_tokens"])
+                generation_usage_is_exact = _has_exact_usage(openai_usage)
                 generation_model_used = fallback_model
                 logger.info(
                     "provider_fallback_succeeded subsystem=%s tenant_id=%s primary_provider=%s fallback_provider=%s primary_model=%s fallback_model=%s",
@@ -1344,6 +1457,62 @@ Context Data:
             status_code=503,
             detail="Riley is temporarily unavailable. Please try again in a moment.",
         ) from last_error
+
+    if not generation_usage:
+        input_tokens = estimate_tokens(system_prompt)
+        output_tokens = estimate_tokens(response_text)
+        generation_usage = {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
+    generation_latency_ms = int((time.perf_counter() - generation_started) * 1000)
+    generation_provider = infer_provider_from_model(generation_model_used) or "unknown"
+    cost_meta = estimate_text_generation_cost(
+        service="chat_generation",
+        provider=generation_provider,
+        model=generation_model_used,
+        input_tokens=int(generation_usage.get("input_tokens") or 0),
+        output_tokens=int(generation_usage.get("output_tokens") or 0),
+        usage_is_exact=generation_usage_is_exact,
+    )
+    if graph:
+        try:
+            user_id = current_user.get("id", "unknown")
+            await graph.append_analytics_event(
+                event_id=f"chat_generation:{request.session_id or 'ad-hoc'}:{int(time.time() * 1000)}",
+                source_event_type_raw="chat_generation_completed",
+                source_entity="ChatGeneration",
+                campaign_id=request.tenant_id,
+                user_id=user_id,
+                actor_user_id=user_id,
+                object_id=request.session_id,
+                status="succeeded",
+                provider=generation_provider,
+                model=generation_model_used,
+                latency_ms=generation_latency_ms,
+                cost_estimate_usd=(
+                    float(cost_meta["cost_estimate_usd"])
+                    if cost_meta.get("cost_estimate_usd") is not None
+                    else None
+                ),
+                pricing_version=str(cost_meta.get("pricing_version") or "cost-accounting-v1"),
+                cost_confidence=str(cost_meta.get("cost_confidence") or "proxy_only"),
+                metadata={
+                    "service": "chat_generation",
+                    "input_tokens": int(generation_usage.get("input_tokens") or 0),
+                    "output_tokens": int(generation_usage.get("output_tokens") or 0),
+                    "total_tokens": int(generation_usage.get("total_tokens") or 0),
+                    "prompt_tokens": int(generation_usage.get("prompt_tokens") or generation_usage.get("input_tokens") or 0),
+                    "completion_tokens": int(
+                        generation_usage.get("completion_tokens") or generation_usage.get("output_tokens") or 0
+                    ),
+                    "requests_count": 1,
+                    "used_fallback_model": generation_model_used == fallback_model,
+                },
+            )
+        except Exception:
+            pass
 
     response_text = _validate_and_sanitize_quotes(response_text, private_results, global_results)
 

@@ -129,12 +129,6 @@ export function CampaignBucketCard({
   const handleArchiveClick = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    console.log("archive_button_clicked", { campaignId: campaignId ?? null });
-    console.log("archive_onArchive_invoking", {
-      campaignId: campaignId ?? null,
-      hasOnArchive: typeof onArchive === "function",
-      onArchiveType: typeof onArchive,
-    });
     if (onArchive && campaignId) {
       onArchive(campaignId);
     }

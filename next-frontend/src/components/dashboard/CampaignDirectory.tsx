@@ -201,7 +201,6 @@ export function CampaignDirectory({
   };
 
   const handleArchiveCampaign = (campaignId: string) => {
-    console.log("archive_parent_handler_called", { campaignId, source: "CampaignDirectory" });
     if (onArchive) {
       onArchive(campaignId);
     }

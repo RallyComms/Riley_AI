@@ -13,6 +13,7 @@ from google.cloud import tasks_v2
 from qdrant_client.http.models import FieldCondition, Filter, MatchValue
 
 from app.core.config import get_settings
+from app.services.genai_client import get_genai_client
 from app.services.graph import GraphService
 from app.services.qdrant import vector_service
 
@@ -268,6 +269,58 @@ async def _call_openai_document_intel(
         response.raise_for_status()
         raw_text = _extract_openai_output_text(response.json())
     return _extract_json_object(raw_text)
+
+
+async def _call_gemini_document_intel(
+    *,
+    prompt: str,
+    model_name: str,
+    timeout_seconds: int,
+) -> Dict[str, Any]:
+    def _run_sync() -> Dict[str, Any]:
+        client = get_genai_client()
+        response = client.models.generate_content(model=model_name, contents=prompt)
+
+        text = getattr(response, "text", None)
+        if isinstance(text, str) and text.strip():
+            return _extract_json_object(text)
+
+        candidates = getattr(response, "candidates", None)
+        if isinstance(candidates, list):
+            for candidate in candidates:
+                content = getattr(candidate, "content", None)
+                parts = getattr(content, "parts", None) if content is not None else None
+                if not isinstance(parts, list):
+                    continue
+                for part in parts:
+                    part_text = getattr(part, "text", None)
+                    if isinstance(part_text, str) and part_text.strip():
+                        return _extract_json_object(part_text)
+
+        raise RuntimeError("Document intelligence Gemini response did not contain text output")
+
+    timeout = max(10, int(timeout_seconds))
+    return await asyncio.wait_for(run_in_threadpool(_run_sync), timeout=timeout)
+
+
+async def _call_document_intel_model(
+    *,
+    prompt: str,
+    model_name: str,
+    timeout_seconds: int,
+) -> Dict[str, Any]:
+    normalized_model = (model_name or "").strip().lower()
+    if normalized_model.startswith("gemini"):
+        return await _call_gemini_document_intel(
+            prompt=prompt,
+            model_name=model_name,
+            timeout_seconds=timeout_seconds,
+        )
+    return await _call_openai_document_intel(
+        prompt=prompt,
+        model_name=model_name,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 async def _load_document_context(
@@ -1574,6 +1627,10 @@ async def run_document_intelligence_job(
     graph: Optional[GraphService],
 ) -> None:
     settings = get_settings()
+    doc_intel_band_model = settings.RILEY_DOC_INTEL_MODEL
+    doc_intel_synthesis_model = str(
+        getattr(settings, "RILEY_DOC_INTEL_SYNTHESIS_MODEL", settings.RILEY_DOC_INTEL_MODEL)
+    )
     started_at = datetime.now().isoformat()
     await vector_service.client.set_payload(
         collection_name=collection_name,
@@ -1677,9 +1734,9 @@ async def run_document_intelligence_job(
                         context_text=context_text,
                     )
                     try:
-                        raw = await _call_openai_document_intel(
+                        raw = await _call_document_intel_model(
                             prompt=prompt,
-                            model_name=settings.RILEY_DOC_INTEL_MODEL,
+                            model_name=doc_intel_band_model,
                             timeout_seconds=timeout_seconds,
                         )
                         normalized = _normalize_analysis(raw)
@@ -1807,9 +1864,9 @@ async def run_document_intelligence_job(
             max_timeout_used = max(max_timeout_used, synth_timeout)
             for synth_attempt in range(min(4, max_attempts)):
                 try:
-                    synth_output = await _call_openai_document_intel(
+                    synth_output = await _call_document_intel_model(
                         prompt=synth_prompt,
-                        model_name=settings.RILEY_DOC_INTEL_MODEL,
+                        model_name=doc_intel_synthesis_model,
                         timeout_seconds=synth_timeout,
                     )
                     total_retry_count += synth_attempt
@@ -1892,7 +1949,8 @@ async def run_document_intelligence_job(
                     "analysis_status": "complete",
                     "analysis_completed_at": completed_at,
                     "analysis_error": None,
-                    "analysis_model": settings.RILEY_DOC_INTEL_MODEL,
+                    "analysis_model": doc_intel_band_model,
+                    "analysis_synthesis_model": doc_intel_synthesis_model,
                     "analysis_job_status": "complete",
                     "analysis_job_completed_at": completed_at,
                     "analysis_execution_mode": "multi_pass",
@@ -2049,9 +2107,9 @@ async def run_document_intelligence_job(
                 context_text=context_text,
             )
             try:
-                raw_output = await _call_openai_document_intel(
+                raw_output = await _call_document_intel_model(
                     prompt=prompt,
-                    model_name=settings.RILEY_DOC_INTEL_MODEL,
+                    model_name=doc_intel_band_model,
                     timeout_seconds=used_timeout_seconds,
                 )
                 attempt_count_used = attempt_idx + 1
@@ -2100,7 +2158,7 @@ async def run_document_intelligence_job(
                 "analysis_status": "complete",
                 "analysis_completed_at": completed_at,
                 "analysis_error": None,
-                "analysis_model": settings.RILEY_DOC_INTEL_MODEL,
+                "analysis_model": doc_intel_band_model,
                 "analysis_job_status": "complete",
                 "analysis_job_completed_at": completed_at,
                 "analysis_execution_mode": "single_pass",

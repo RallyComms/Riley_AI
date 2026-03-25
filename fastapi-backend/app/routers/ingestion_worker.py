@@ -7,6 +7,9 @@ from pydantic import BaseModel
 
 from app.core.config import get_settings
 from app.services.ingestion import run_ingestion_job
+from app.services.analytics_contract import infer_provider_from_model
+from app.services.pricing_registry import estimate_single_unit_cost
+from app.services.qdrant import vector_service
 
 
 router = APIRouter()
@@ -42,6 +45,64 @@ async def run_ingestion_worker(
             file_id=payload.file_id,
             collection_name=payload.collection_name,
         )
+        graph = getattr(request.app.state, "graph", None)
+        if graph is not None:
+            try:
+                settings = get_settings()
+                point_records = await vector_service.client.retrieve(
+                    collection_name=payload.collection_name,
+                    ids=[payload.file_id],
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                point_payload = (point_records[0].payload or {}) if point_records else {}
+                embedding_model = str(point_payload.get("embedding_model") or settings.EMBEDDING_MODEL)
+                embedding_tokens = int(point_payload.get("embedding_tokens_estimate") or 0)
+                embedded_cost = point_payload.get("embedding_cost_estimate_usd")
+                pricing_meta = estimate_single_unit_cost(
+                    service="embedding",
+                    provider=infer_provider_from_model(embedding_model) or "google_gemini",
+                    model=embedding_model,
+                    unit_type="input_token_1k",
+                    quantity=embedding_tokens,
+                )
+                await graph.append_analytics_event(
+                    event_id=f"embedding_indexing_completed:{payload.file_id}:{payload.job_id}",
+                    source_event_type_raw="embedding_indexing_completed",
+                    source_entity="IngestionWorker",
+                    campaign_id=(
+                        point_payload.get("client_id")
+                        or ("global" if bool(point_payload.get("is_global")) else None)
+                    ),
+                    object_id=payload.file_id,
+                    status=str(point_payload.get("ingestion_status") or "unknown"),
+                    provider=infer_provider_from_model(embedding_model) or "google_gemini",
+                    model=embedding_model,
+                    latency_ms=int(point_payload.get("processing_duration_ms") or 0),
+                    cost_estimate_usd=(
+                        float(embedded_cost)
+                        if embedded_cost is not None
+                        else (
+                            float(pricing_meta["cost_estimate_usd"])
+                            if pricing_meta.get("cost_estimate_usd") is not None
+                            else None
+                        )
+                    ),
+                    pricing_version=str(pricing_meta.get("pricing_version") or "cost-accounting-v1"),
+                    cost_confidence="estimated_units",
+                    metadata={
+                        "service": "embedding",
+                        "input_tokens": embedding_tokens,
+                        "output_tokens": 0,
+                        "total_tokens": embedding_tokens,
+                        "requests_count": max(1, int(point_payload.get("chunk_count") or 0)),
+                        "chunk_count": int(point_payload.get("chunk_count") or 0),
+                        "file_id": payload.file_id,
+                        "job_id": payload.job_id,
+                    },
+                )
+            except Exception:
+                pass
     except Exception as exc:
         graph = getattr(request.app.state, "graph", None)
         if graph is not None:

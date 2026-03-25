@@ -1,12 +1,12 @@
 import asyncio
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 
 from app.services.genai_client import get_genai_client
 
 
 @dataclass
-class OpenAIFailureDetails:
+class ProviderFailureDetails:
     fallback_eligible: bool
     error_type: str
     http_status: Optional[int] = None
@@ -15,8 +15,8 @@ class OpenAIFailureDetails:
     response_body_excerpt: Optional[str] = None
 
 
-def classify_openai_generation_failure(exc: Exception, *, response_excerpt_limit: int = 1200) -> OpenAIFailureDetails:
-    details = OpenAIFailureDetails(
+def classify_openai_generation_failure(exc: Exception, *, response_excerpt_limit: int = 1200) -> ProviderFailureDetails:
+    details = ProviderFailureDetails(
         fallback_eligible=False,
         error_type=type(exc).__name__,
     )
@@ -133,14 +133,95 @@ def classify_openai_generation_failure(exc: Exception, *, response_excerpt_limit
     return details
 
 
+def classify_gemini_generation_failure(exc: Exception) -> ProviderFailureDetails:
+    details = ProviderFailureDetails(
+        fallback_eligible=False,
+        error_type=type(exc).__name__,
+    )
+
+    provider_failure_hints = (
+        "rate limit",
+        "quota",
+        "overloaded",
+        "unavailable",
+        "gateway",
+        "upstream",
+        "timeout",
+        "temporarily",
+        "resource exhausted",
+        "service unavailable",
+        "deadline exceeded",
+    )
+
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        details.fallback_eligible = True
+        return details
+
+    # Best-effort extraction for HTTP-like status fields across SDK exceptions.
+    status_candidate = getattr(exc, "status_code", None)
+    if status_candidate is None:
+        status_candidate = getattr(exc, "code", None)
+    if status_candidate is not None:
+        try:
+            details.http_status = int(getattr(status_candidate, "value", status_candidate))
+        except Exception:
+            details.http_status = None
+
+    # Google API Core exception classes (if available in runtime).
+    try:
+        from google.api_core import exceptions as gexc  # type: ignore
+
+        fallback_types = tuple(
+            cls
+            for cls in (
+                getattr(gexc, "TooManyRequests", None),
+                getattr(gexc, "ResourceExhausted", None),
+                getattr(gexc, "ServiceUnavailable", None),
+                getattr(gexc, "DeadlineExceeded", None),
+                getattr(gexc, "GatewayTimeout", None),
+                getattr(gexc, "InternalServerError", None),
+                getattr(gexc, "BadGateway", None),
+            )
+            if cls is not None
+        )
+        if fallback_types and isinstance(exc, fallback_types):
+            details.fallback_eligible = True
+    except Exception:
+        pass
+
+    message_blob = str(exc or "").lower()
+    if message_blob and any(hint in message_blob for hint in provider_failure_hints):
+        details.fallback_eligible = True
+
+    if details.http_status == 429 or (details.http_status is not None and details.http_status >= 500):
+        details.fallback_eligible = True
+
+    # Network transport issues should be treated as provider-class failures.
+    if isinstance(exc, (ConnectionError, OSError)):
+        details.fallback_eligible = True
+
+    return details
+
+
 async def generate_text_with_gemini(*, prompt: str, model_name: str, timeout_seconds: int) -> str:
-    def _generate_sync() -> str:
+    text, _ = await generate_text_with_gemini_with_usage(
+        prompt=prompt,
+        model_name=model_name,
+        timeout_seconds=timeout_seconds,
+    )
+    return text
+
+
+async def generate_text_with_gemini_with_usage(
+    *, prompt: str, model_name: str, timeout_seconds: int
+) -> Tuple[str, Dict[str, Any]]:
+    def _generate_sync() -> Tuple[str, Dict[str, Any]]:
         client = get_genai_client()
         response = client.models.generate_content(model=model_name, contents=prompt)
 
         text = getattr(response, "text", None)
         if isinstance(text, str) and text.strip():
-            return text.strip()
+            return text.strip(), _extract_gemini_usage(response)
 
         candidates = getattr(response, "candidates", None)
         if isinstance(candidates, list):
@@ -152,9 +233,39 @@ async def generate_text_with_gemini(*, prompt: str, model_name: str, timeout_sec
                 for part in parts:
                     part_text = getattr(part, "text", None)
                     if isinstance(part_text, str) and part_text.strip():
-                        return part_text.strip()
+                        usage = _extract_gemini_usage(response)
+                        return part_text.strip(), usage
 
         raise RuntimeError("Gemini response did not contain text output")
 
     timeout = max(5, int(timeout_seconds))
     return await asyncio.wait_for(asyncio.to_thread(_generate_sync), timeout=timeout)
+
+
+def _extract_gemini_usage(response: Any) -> Dict[str, Any]:
+    usage_obj = getattr(response, "usage_metadata", None) or getattr(response, "usage", None)
+    if usage_obj is None:
+        return {}
+
+    def _usage_field(*names: str) -> Optional[int]:
+        for name in names:
+            value = getattr(usage_obj, name, None)
+            if value is None and isinstance(usage_obj, dict):
+                value = usage_obj.get(name)
+            if isinstance(value, (int, float)):
+                return int(value)
+        return None
+
+    input_tokens = _usage_field("prompt_token_count", "input_token_count", "prompt_tokens")
+    output_tokens = _usage_field("candidates_token_count", "output_token_count", "completion_tokens")
+    total_tokens = _usage_field("total_token_count", "total_tokens")
+    usage: Dict[str, Any] = {}
+    if input_tokens is not None:
+        usage["input_tokens"] = int(input_tokens)
+        usage["prompt_tokens"] = int(input_tokens)
+    if output_tokens is not None:
+        usage["output_tokens"] = int(output_tokens)
+        usage["completion_tokens"] = int(output_tokens)
+    if total_tokens is not None:
+        usage["total_tokens"] = int(total_tokens)
+    return usage
