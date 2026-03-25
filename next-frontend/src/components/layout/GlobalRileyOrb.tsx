@@ -32,6 +32,7 @@ const DEFAULT_POSITION = { x: 0, y: 0 }; // Relative to bottom-right corner
 
 export function GlobalRileyOrb() {
   const pathname = usePathname();
+  const isMissionControlRoute = pathname?.startsWith("/mission-control");
   const { user } = useUser();
   const { getToken, isLoaded } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(true);
@@ -45,9 +46,6 @@ export function GlobalRileyOrb() {
   
   // Position state - stored as offset from bottom-right corner
   const [position, setPosition] = useState<SavedPosition>(DEFAULT_POSITION);
-  if (pathname?.startsWith("/mission-control")) {
-    return null;
-  }
 
   
   // Motion values for dragging
@@ -81,6 +79,7 @@ export function GlobalRileyOrb() {
   useEffect(() => {
     let mounted = true;
     const fetchFeed = async () => {
+      if (isMissionControlRoute) return;
       if (!isLoaded || !user?.id) return;
       try {
         const token = await getToken();
@@ -109,7 +108,7 @@ export function GlobalRileyOrb() {
       mounted = false;
       clearInterval(interval);
     };
-  }, [getToken, isLoaded, user?.id]);
+  }, [getToken, isLoaded, isMissionControlRoute, user?.id]);
 
   const getEventVisual = (eventType: string) => {
     if (eventType === "access_request_created") {
@@ -248,6 +247,10 @@ export function GlobalRileyOrb() {
   const alertCount = notifications.length;
   const hasNewAlerts = notifications.some((n) => getEventVisual(n.type).critical);
   const constraints = getConstraints();
+
+  if (isMissionControlRoute) {
+    return null;
+  }
 
   return (
     <motion.div
