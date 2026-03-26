@@ -1028,12 +1028,17 @@ def _ocr_required_for_file(
 ) -> bool:
     """Decide whether OCR should run for multimodal ingestion."""
     ext = (file_type or "").lower()
+    ocr_capable_doc_types = {"pdf", "pptx", "ppt"}
     if ext in IMAGE_EXTENSIONS:
         return True
+    if ext in ocr_capable_doc_types and quality_status in {"ocr_needed", "low_text"}:
+        # P2 rule: low-text visual documents should always get an OCR attempt.
+        return True
     if quality_status == "ocr_needed":
+        # Safety net for any future OCR-capable file types.
         return True
     # Optional OCR for weak text on visual-heavy document types.
-    if ext in {"pdf", "pptx", "ppt"} and (
+    if ext in ocr_capable_doc_types and (
         len(cleaned_text) < max(600, MIN_EXTRACTED_CHARS * 3) or file_size > 250_000
     ):
         return True

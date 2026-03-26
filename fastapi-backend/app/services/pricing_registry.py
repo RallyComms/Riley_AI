@@ -110,6 +110,34 @@ DEFAULT_RULES: List[PricingRule] = [
         unit_type="output_token_1k",
         unit_price_usd=0.008,
     ),
+    PricingRule(
+        service="ocr",
+        provider="google_cloud_vision",
+        model="document_text_detection",
+        unit_type="request",
+        unit_price_usd=0.0015,
+    ),
+    PricingRule(
+        service="ocr",
+        provider="google_cloud_vision",
+        model="document_text_detection",
+        unit_type="page",
+        unit_price_usd=0.0015,
+    ),
+    PricingRule(
+        service="storage_artifact",
+        provider="gcs",
+        model="standard_storage",
+        unit_type="gb_month",
+        unit_price_usd=0.02,
+    ),
+    PricingRule(
+        service="worker_runtime",
+        provider="cloud_run",
+        model="default_worker_profile",
+        unit_type="duration_ms",
+        unit_price_usd=0.000000025,
+    ),
 ]
 
 
@@ -246,4 +274,52 @@ def estimate_single_unit_cost(
         "cost_estimate_usd": round(value * rule.unit_price_usd, 6),
         "pricing_version": rule.pricing_version,
         "cost_confidence": "estimated_units",
+    }
+
+
+def estimate_storage_cost(
+    *,
+    bytes_stored: int,
+    retention_days: int = 30,
+    provider: str = "gcs",
+    model: str = "standard_storage",
+    occurred_at: Optional[str] = None,
+) -> Dict[str, Optional[float] | str]:
+    gb = max(0, int(bytes_stored)) / float(1024 ** 3)
+    months = max(0.0, float(retention_days) / 30.0)
+    return estimate_single_unit_cost(
+        service="storage_artifact",
+        provider=provider,
+        model=model,
+        unit_type="gb_month",
+        quantity=gb * months,
+        occurred_at=occurred_at,
+    )
+
+
+def estimate_worker_runtime_cost(
+    *,
+    duration_ms: int,
+    provider: str = "cloud_run",
+    model: str = "default_worker_profile",
+    occurred_at: Optional[str] = None,
+) -> Dict[str, Optional[float] | str]:
+    rule = resolve_unit_price(
+        service="worker_runtime",
+        provider=provider,
+        model=model,
+        unit_type="duration_ms",
+        occurred_at=occurred_at,
+    )
+    if not rule:
+        return {
+            "cost_estimate_usd": None,
+            "pricing_version": PRICING_VERSION,
+            "cost_confidence": "proxy_only",
+        }
+    value = max(0, int(duration_ms))
+    return {
+        "cost_estimate_usd": round(value * rule.unit_price_usd, 6),
+        "pricing_version": rule.pricing_version,
+        "cost_confidence": "proxy_only",
     }

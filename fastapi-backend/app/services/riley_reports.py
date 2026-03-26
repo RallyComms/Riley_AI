@@ -26,7 +26,7 @@ from app.services.provider_fallback import (
 from app.services.qdrant import vector_service
 from app.services.rerank import rerank_candidates_with_metrics
 from app.services.analytics_contract import infer_provider_from_model
-from app.services.pricing_registry import estimate_text_generation_cost
+from app.services.pricing_registry import estimate_storage_cost, estimate_text_generation_cost
 from app.services.storage import StorageService
 from app.services.token_utils import estimate_tokens
 
@@ -950,6 +950,38 @@ async def _persist_report_docx_artifact(
         tenant_id,
         object_name,
     )
+    if graph:
+        try:
+            storage_cost = estimate_storage_cost(bytes_stored=len(docx_bytes), retention_days=30)
+            await graph.append_analytics_event(
+                event_id=f"storage_artifact_written:report:{report_job_id}:{generated_at}",
+                source_event_type_raw="storage_artifact_written",
+                source_entity="RileyReportJob",
+                campaign_id=tenant_id,
+                user_id=user_id,
+                actor_user_id=user_id,
+                object_id=report_job_id,
+                status="succeeded",
+                provider="gcs",
+                model="standard_storage",
+                cost_estimate_usd=(
+                    float(storage_cost["cost_estimate_usd"])
+                    if storage_cost.get("cost_estimate_usd") is not None
+                    else None
+                ),
+                pricing_version=str(storage_cost.get("pricing_version") or "cost-accounting-v1"),
+                cost_confidence=str(storage_cost.get("cost_confidence") or "estimated_units"),
+                metadata={
+                    "service": "storage_artifact",
+                    "bytes_stored": len(docx_bytes),
+                    "gb_month_assumed": round(len(docx_bytes) / float(1024 ** 3), 9),
+                    "retention_days_assumed": 30,
+                    "requests_count": 1,
+                    "object_name": object_name,
+                },
+            )
+        except Exception:
+            pass
 
     output_file_id = str(uuid.uuid4())
     payload: Dict[str, Any] = {

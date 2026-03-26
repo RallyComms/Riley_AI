@@ -12,6 +12,7 @@ from app.dependencies.auth import verify_clerk_token, verify_tenant_access, chec
 from app.dependencies.graph_dep import get_graph
 from app.services.ocr import run_ocr, is_image_ext
 from app.services.graph import GraphService
+from app.services.pricing_registry import estimate_single_unit_cost, estimate_storage_cost
 from app.services.qdrant import vector_service
 from app.services.ingestion import process_upload, delete_file, untag_file, _generate_embedding
 from app.services.storage import StorageService
@@ -974,6 +975,50 @@ async def upload_file(
             tags=tag_list,
             overwrite=overwrite,
         )
+        try:
+            target_collection = (
+                settings.QDRANT_COLLECTION_TIER_1
+                if tenant_id == "global"
+                else settings.QDRANT_COLLECTION_TIER_2
+            )
+            uploaded_id = str(result.get("id") or "")
+            uploaded_records = await vector_service.client.retrieve(
+                collection_name=target_collection,
+                ids=[uploaded_id],
+                with_payload=True,
+                with_vectors=False,
+            )
+            uploaded_payload = (uploaded_records[0].payload or {}) if uploaded_records else {}
+            bytes_stored = int(uploaded_payload.get("size_bytes") or 0)
+            storage_cost = estimate_storage_cost(bytes_stored=bytes_stored, retention_days=30)
+            await graph.append_analytics_event(
+                event_id=f"storage_artifact_written:file_upload:{uploaded_id}:{datetime.now().isoformat()}",
+                source_event_type_raw="storage_artifact_written",
+                source_entity="FileUpload",
+                campaign_id=tenant_id,
+                user_id=user_id,
+                actor_user_id=user_id,
+                object_id=uploaded_id or None,
+                status="succeeded",
+                provider="gcs",
+                model="standard_storage",
+                cost_estimate_usd=(
+                    float(storage_cost["cost_estimate_usd"])
+                    if storage_cost.get("cost_estimate_usd") is not None
+                    else None
+                ),
+                pricing_version=str(storage_cost.get("pricing_version") or "cost-accounting-v1"),
+                cost_confidence=str(storage_cost.get("cost_confidence") or "estimated_units"),
+                metadata={
+                    "service": "storage_artifact",
+                    "bytes_stored": bytes_stored,
+                    "gb_month_assumed": round(bytes_stored / float(1024 ** 3), 9),
+                    "retention_days_assumed": 30,
+                    "requests_count": 1,
+                },
+            )
+        except Exception:
+            pass
         if str(result.get("preview_status") or "").strip().lower() == "failed":
             try:
                 await graph.append_analytics_event(
@@ -1534,7 +1579,8 @@ async def request_ocr(
     file_id: str,
     collection: str = Query(..., description="Collection name: 'tier_1' or 'tier_2'"),
     tenant_id: str = Query(..., description="Tenant/client ID that owns this file"),
-    current_user: Dict = Depends(verify_tenant_access)
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
 ) -> OCRResponse:
     """
     Request OCR processing for an image file.
@@ -1678,6 +1724,45 @@ async def request_ocr(
                 collection_name=collection_name,
                 points=[updated_point]
             )
+            try:
+                pages_processed = 1
+                requests_count = 1
+                ocr_cost = estimate_single_unit_cost(
+                    service="ocr",
+                    provider="google_cloud_vision",
+                    model="document_text_detection",
+                    unit_type="request",
+                    quantity=requests_count,
+                )
+                user_id = current_user.get("id", "unknown")
+                await graph.append_analytics_event(
+                    event_id=f"ocr_completed:{file_id}:{ocr_extracted_at}",
+                    source_event_type_raw="ocr_completed",
+                    source_entity="FileOCR",
+                    campaign_id=tenant_id,
+                    user_id=user_id,
+                    actor_user_id=user_id,
+                    object_id=file_id,
+                    status="succeeded",
+                    provider="google_cloud_vision",
+                    model="document_text_detection",
+                    cost_estimate_usd=(
+                        float(ocr_cost["cost_estimate_usd"])
+                        if ocr_cost.get("cost_estimate_usd") is not None
+                        else None
+                    ),
+                    pricing_version=str(ocr_cost.get("pricing_version") or "cost-accounting-v1"),
+                    cost_confidence="estimated_units",
+                    metadata={
+                        "service": "ocr",
+                        "images_processed": 1,
+                        "pages_processed": pages_processed,
+                        "requests_count": requests_count,
+                        "ocr_confidence": ocr_result.get("confidence"),
+                    },
+                )
+            except Exception:
+                pass
             
             return OCRResponse(
                 status="success",

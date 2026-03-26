@@ -1,5 +1,6 @@
 import hmac
 import logging
+import time
 from typing import Dict, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
@@ -8,7 +9,7 @@ from pydantic import BaseModel
 from app.core.config import get_settings
 from app.services.ingestion import run_ingestion_job
 from app.services.analytics_contract import infer_provider_from_model
-from app.services.pricing_registry import estimate_single_unit_cost
+from app.services.pricing_registry import estimate_single_unit_cost, estimate_worker_runtime_cost
 from app.services.qdrant import vector_service
 
 
@@ -29,6 +30,7 @@ async def run_ingestion_worker(
     x_ingestion_worker_token: Optional[str] = Header(None),
 ) -> Dict[str, str]:
     """Cloud Tasks worker endpoint for durable ingestion execution."""
+    started = time.perf_counter()
     settings = get_settings()
     expected_token = settings.INGESTION_WORKER_TOKEN
     if not expected_token:
@@ -98,6 +100,83 @@ async def run_ingestion_worker(
                         "requests_count": max(1, int(point_payload.get("chunk_count") or 0)),
                         "chunk_count": int(point_payload.get("chunk_count") or 0),
                         "file_id": payload.file_id,
+                        "job_id": payload.job_id,
+                    },
+                )
+                if bool(point_payload.get("ocr_enabled")) and str(point_payload.get("ocr_status") or "").lower() == "complete":
+                    file_type = str(point_payload.get("file_type") or point_payload.get("type") or "").lower()
+                    ingestion_decision = point_payload.get("ingestion_decision") if isinstance(point_payload.get("ingestion_decision"), dict) else {}
+                    pages_processed = int(
+                        ingestion_decision.get("nonempty_page_count")
+                        or ingestion_decision.get("total_page_count")
+                        or 0
+                    )
+                    images_processed = 1 if file_type in {"png", "jpg", "jpeg", "webp", "tiff"} else 0
+                    ocr_quantity = pages_processed if pages_processed > 0 else max(1, images_processed)
+                    ocr_unit_type = "page" if pages_processed > 0 else "request"
+                    ocr_cost = estimate_single_unit_cost(
+                        service="ocr",
+                        provider="google_cloud_vision",
+                        model="document_text_detection",
+                        unit_type=ocr_unit_type,
+                        quantity=ocr_quantity,
+                    )
+                    await graph.append_analytics_event(
+                        event_id=f"ocr_completed:ingestion:{payload.file_id}:{payload.job_id}",
+                        source_event_type_raw="ocr_completed",
+                        source_entity="IngestionWorker",
+                        campaign_id=(
+                            point_payload.get("client_id")
+                            or ("global" if bool(point_payload.get("is_global")) else None)
+                        ),
+                        object_id=payload.file_id,
+                        status="succeeded",
+                        provider="google_cloud_vision",
+                        model="document_text_detection",
+                        cost_estimate_usd=(
+                            float(ocr_cost["cost_estimate_usd"])
+                            if ocr_cost.get("cost_estimate_usd") is not None
+                            else None
+                        ),
+                        pricing_version=str(ocr_cost.get("pricing_version") or "cost-accounting-v1"),
+                        cost_confidence="estimated_units",
+                        metadata={
+                            "service": "ocr",
+                            "pages_processed": pages_processed,
+                            "images_processed": images_processed,
+                            "requests_count": 1,
+                            "ocr_confidence": point_payload.get("ocr_confidence"),
+                            "file_id": payload.file_id,
+                            "job_id": payload.job_id,
+                        },
+                    )
+            except Exception:
+                pass
+        if graph is not None:
+            try:
+                duration_ms = int((time.perf_counter() - started) * 1000)
+                runtime_cost = estimate_worker_runtime_cost(duration_ms=duration_ms)
+                await graph.append_analytics_event(
+                    event_id=f"worker_runtime_completed:ingestion:{payload.job_id}:{payload.file_id}",
+                    source_event_type_raw="worker_runtime_completed",
+                    source_entity="IngestionWorker",
+                    object_id=payload.job_id,
+                    status="succeeded",
+                    provider="cloud_run",
+                    model="default_worker_profile",
+                    latency_ms=duration_ms,
+                    cost_estimate_usd=(
+                        float(runtime_cost["cost_estimate_usd"])
+                        if runtime_cost.get("cost_estimate_usd") is not None
+                        else None
+                    ),
+                    pricing_version=str(runtime_cost.get("pricing_version") or "cost-accounting-v1"),
+                    cost_confidence="proxy_only",
+                    metadata={
+                        "service": "worker_runtime",
+                        "duration_ms": duration_ms,
+                        "worker": "ingestion_worker",
+                        "requests_count": 1,
                         "job_id": payload.job_id,
                     },
                 )
