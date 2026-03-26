@@ -147,6 +147,49 @@ def _failure_type_label(event_type: str) -> str:
     return mapping.get(value, value.replace("_", " ").title() if value else "Unknown Failure")
 
 
+def _failure_classification(*, event_type: str, worker_name: str, detail: str, metadata: Dict[str, Any]) -> str:
+    event = str(event_type or "").strip().lower()
+    worker = str(worker_name or "").strip().lower()
+    detail_text = str(detail or "").strip().lower()
+    error_type = str(metadata.get("error_type") or "").strip().lower()
+    if (
+        "neo4j" in detail_text
+        or ":7687" in detail_text
+        or "failed to write data to connection" in detail_text
+        or "connection refused" in detail_text
+        or "connection reset" in detail_text
+        or "temporarily unavailable" in detail_text
+        or "timed out" in detail_text
+        or "service unavailable" in detail_text
+    ):
+        return "Database Connectivity"
+    if event == "auth_tenant_access_denied":
+        return "Auth Failure"
+    if "timeout" in error_type or "timeout" in detail_text:
+        return "Worker Timeout"
+    if "permission" in detail_text or "unauthorized" in detail_text or "forbidden" in detail_text:
+        return "Authorization"
+    if "deadline_reminder" in worker or "deadlinereminderworker" in worker:
+        return "Worker Execution"
+    if event in {"worker_failed", "ingestion_failed", "preview_generation_failed"}:
+        return "Worker Execution"
+    return "Platform Error"
+
+
+def _failure_scope_campaign_name(campaign_name: Optional[str], campaign_id: Optional[str]) -> str:
+    cid = str(campaign_id or "").strip()
+    if not cid or cid.lower() in {"unknown_campaign", "global"}:
+        return "System / Platform"
+    return _safe_campaign_name(campaign_name, campaign_id)
+
+
+def _failure_scope_campaign_secondary(campaign_id: Optional[str]) -> str:
+    cid = str(campaign_id or "").strip()
+    if not cid or cid.lower() in {"unknown_campaign", "global"}:
+        return ""
+    return _safe_campaign_secondary(campaign_id)
+
+
 def _metadata_json_to_dict(value: Any) -> Dict[str, Any]:
     if isinstance(value, dict):
         return value
@@ -233,15 +276,16 @@ async def mission_control_overview(
     activity_metrics = await _single_value(
         graph,
         """
-        MATCH (e:AnalyticsEvent)
-        WHERE e.occurred_at >= $window_start_iso
+        MATCH (r:AnalyticsDailySystemRollup)
+        WHERE r.event_date >= $window_start_day
         RETURN
-          sum(CASE WHEN (e.feature_area = "chat" OR e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]) THEN 1 ELSE 0 END) as chats,
-          count(DISTINCT CASE WHEN e.source_entity = "RileyReportJob" AND e.object_id IS NOT NULL THEN e.object_id ELSE NULL END) as reports,
-          avg(CASE WHEN e.feature_area = "chat" AND e.latency_ms IS NOT NULL THEN toFloat(e.latency_ms) ELSE NULL END) as avg_chat_latency_ms,
-          count(DISTINCT CASE WHEN e.source_entity = "RileyReportJob" AND e.status = "failed" AND e.object_id IS NOT NULL THEN e.object_id ELSE NULL END) as failed_reports
+          coalesce(sum(toInteger(r.chat_events)), 0) as chats,
+          coalesce(sum(toInteger(r.report_events)), 0) as reports,
+          coalesce(sum(toInteger(r.report_failures)), 0) as failed_reports,
+          coalesce(sum(toFloat(r.latency_sum_ms)), 0.0) as latency_sum_ms,
+          coalesce(sum(toInteger(r.latency_count)), 0) as latency_count
         """,
-        window_start_iso=window_start_iso,
+        window_start_day=window_start_day,
     )
     report_success = await _single_value(
         graph,
@@ -251,12 +295,15 @@ async def mission_control_overview(
           AND e.source_entity = "RileyReportJob"
           AND e.status IN ["complete", "failed"]
           AND e.object_id IS NOT NULL
-        WITH e.object_id as report_job_id, e.status as status, datetime(e.occurred_at) as ts
-        ORDER BY report_job_id, ts DESC
-        WITH report_job_id, collect(status)[0] as latest_status
+        WITH e.object_id as report_job_id, max(e.occurred_at) as latest_occurred_at
+        MATCH (latest:AnalyticsEvent)
+        WHERE latest.object_id = report_job_id
+          AND latest.occurred_at = latest_occurred_at
+          AND latest.source_entity = "RileyReportJob"
+          AND latest.status IN ["complete", "failed"]
         RETURN
-          count(report_job_id) as total,
-          sum(CASE WHEN latest_status = "complete" THEN 1 ELSE 0 END) as success
+          count(DISTINCT report_job_id) as total,
+          count(DISTINCT CASE WHEN latest.status = "complete" THEN report_job_id ELSE NULL END) as success
         """,
         window_start_iso=window_start_iso,
     )
@@ -288,50 +335,34 @@ async def mission_control_overview(
         RETURN count(d) as value
         """,
     )
-    failed_reports_24h = await _single_value(
-        graph,
-        """
-        MATCH (e:AnalyticsEvent)
-        WHERE e.occurred_at >= $window_start_iso
-          AND e.source_entity = "RileyReportJob"
-          AND e.status = "failed"
-          AND e.object_id IS NOT NULL
-        RETURN count(DISTINCT e.object_id) as value
-        """,
-        window_start_iso=window_start_iso,
-    )
     trend_rows = await _rows(
         graph,
         """
-        MATCH (e:AnalyticsEvent)
-        WHERE e.occurred_at >= $window_start_iso
-        WITH date(datetime(e.occurred_at)) as d, e
+        MATCH (r:AnalyticsDailySystemRollup)
+        WHERE r.event_date >= $window_start_day
         RETURN
-          toString(d) as day,
-          sum(CASE WHEN (e.feature_area = "chat" OR e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]) THEN 1 ELSE 0 END) as chats,
-          sum(CASE WHEN e.source_entity = "RileyReportJob" AND e.object_id IS NOT NULL THEN 1 ELSE 0 END) as reports,
-          round(sum(coalesce(toFloat(e.cost_estimate_usd), 0.0)), 4) as cost,
-          sum(CASE WHEN (e.source_event_type_raw = "worker_failed")
-                       OR (e.source_event_type_raw = "ingestion_failed")
-                       OR (e.source_event_type_raw = "preview_generation_failed")
-                       OR (e.source_entity = "RileyReportJob" AND e.status = "failed")
-                   THEN 1 ELSE 0 END) as failures
+          r.event_date as day,
+          coalesce(toInteger(r.chat_events), 0) as chats,
+          coalesce(toInteger(r.report_events), 0) as reports,
+          round(coalesce(toFloat(r.total_cost_estimate_usd), 0.0), 4) as cost,
+          coalesce(toInteger(r.failure_events), 0) as failures
         ORDER BY day ASC
         """,
-        window_start_iso=window_start_iso,
+        window_start_day=window_start_day,
     )
     campaign_usage_rows = await _rows(
         graph,
         """
-        MATCH (e:AnalyticsEvent)
-        WHERE e.occurred_at >= $window_start_iso
-          AND e.campaign_id IS NOT NULL
-          AND trim(e.campaign_id) <> ""
-          AND e.campaign_id <> "global"
-        WITH e.campaign_id as campaign_id,
-             sum(CASE WHEN (e.feature_area = "chat" OR e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]) THEN 1 ELSE 0 END) as chats,
-             sum(CASE WHEN e.source_entity = "RileyReportJob" AND e.object_id IS NOT NULL THEN 1 ELSE 0 END) as reports,
-             round(sum(coalesce(toFloat(e.cost_estimate_usd), 0.0)), 4) as cost
+        MATCH (r:AnalyticsDailyCampaignRollup)
+        WHERE r.event_date >= $window_start_day
+          AND r.campaign_id IS NOT NULL
+          AND trim(r.campaign_id) <> ""
+          AND r.campaign_id <> "global"
+          AND r.campaign_id <> "unknown_campaign"
+        WITH r.campaign_id as campaign_id,
+             coalesce(sum(toInteger(r.chat_events)), 0) as chats,
+             coalesce(sum(toInteger(r.report_events)), 0) as reports,
+             round(coalesce(sum(toFloat(r.total_cost_estimate_usd)), 0.0), 4) as cost
         ORDER BY (chats + reports) DESC, cost DESC
         LIMIT 25
         OPTIONAL MATCH (c:Campaign)
@@ -343,20 +374,20 @@ async def mission_control_overview(
           reports,
           cost
         """,
-        window_start_iso=window_start_iso,
+        window_start_day=window_start_day,
     )
     user_usage_rows = await _rows(
         graph,
         """
-        MATCH (e:AnalyticsEvent)
-        WHERE e.occurred_at >= $window_start_iso
-          AND coalesce(e.actor_user_id, "") <> "system:deadline-reminder"
-        WITH coalesce(e.user_id, e.actor_user_id, "") as user_id, e
+        MATCH (r:AnalyticsDailyUserRollup)
+        WHERE r.event_date >= $window_start_day
+          AND coalesce(r.user_id, "") <> "system:deadline-reminder"
+          AND coalesce(r.user_id, "") <> "unknown_user"
+        WITH coalesce(r.user_id, "") as user_id,
+             coalesce(sum(toInteger(r.chat_events)), 0) as chats,
+             coalesce(sum(toInteger(r.report_events)), 0) as reports,
+             round(coalesce(sum(toFloat(r.total_cost_estimate_usd)), 0.0), 4) as cost
         WHERE trim(user_id) <> ""
-        WITH user_id,
-             sum(CASE WHEN (e.feature_area = "chat" OR e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]) THEN 1 ELSE 0 END) as chats,
-             sum(CASE WHEN e.source_entity = "RileyReportJob" AND e.object_id IS NOT NULL THEN 1 ELSE 0 END) as reports,
-             round(sum(coalesce(toFloat(e.cost_estimate_usd), 0.0)), 4) as cost
         ORDER BY (chats + reports) DESC, cost DESC
         LIMIT 25
         OPTIONAL MATCH (u:User {id: user_id})
@@ -375,7 +406,7 @@ async def mission_control_overview(
           reports,
           cost
         """,
-        window_start_iso=window_start_iso,
+        window_start_day=window_start_day,
     )
 
     now = datetime.now(timezone.utc)
@@ -389,19 +420,25 @@ async def mission_control_overview(
     total_reports = int(report_success.get("total") or 0)
     successful_reports = int(report_success.get("success") or 0)
     report_success_rate = round((successful_reports / total_reports) * 100.0, 2) if total_reports else 0.0
+    latency_count = int(activity_metrics.get("latency_count") or 0)
+    avg_response_latency_ms = (
+        round(float(activity_metrics.get("latency_sum_ms") or 0.0) / float(latency_count), 2)
+        if latency_count
+        else 0.0
+    )
 
     return {
         "active_users_7d": int(active_users.get("value") or 0),
         "active_campaigns_7d": int(active_campaigns.get("value") or 0),
         "chats_today": int(activity_metrics.get("chats") or 0),
         "reports_today": int(activity_metrics.get("reports") or 0),
-        "avg_response_latency_ms": round(float(activity_metrics.get("avg_chat_latency_ms") or 0.0), 2),
+        "avg_response_latency_ms": avg_response_latency_ms,
         "report_success_rate": report_success_rate,
         "current_month_estimated_cost": round(current_month_estimated_cost, 2),
         "forecast_month_end_cost": forecast_month_end_cost,
         "pending_access_requests": int(pending_access_requests.get("value") or 0),
         "overdue_deadlines": int(overdue_deadlines.get("value") or 0),
-        "failed_reports_24h": int(failed_reports_24h.get("value") or int(activity_metrics.get("failed_reports") or 0)),
+        "failed_reports_24h": int(activity_metrics.get("failed_reports") or 0),
         "timeframe": window["timeframe"],
         "timeframe_label": window["label"],
         "timeseries_30d": [
@@ -765,13 +802,13 @@ async def mission_control_cost_summary(
     activity_counts = await _single_value(
         graph,
         """
-        MATCH (e:AnalyticsEvent)
-        WHERE e.occurred_at >= $window_start_iso
+        MATCH (r:AnalyticsDailySystemRollup)
+        WHERE r.event_date >= $window_start_day
         RETURN
-          sum(CASE WHEN (e.feature_area = "chat" OR e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]) THEN 1 ELSE 0 END) as chats,
-          count(DISTINCT CASE WHEN e.source_entity = "RileyReportJob" AND e.object_id IS NOT NULL THEN e.object_id ELSE NULL END) as reports
+          coalesce(sum(toInteger(r.chat_events)), 0) as chats,
+          coalesce(sum(toInteger(r.report_events)), 0) as reports
         """,
-        window_start_iso=window_start_iso,
+        window_start_day=window_start_day,
     )
     window_cost = round(float(totals.get("window_cost") or 0.0), 2)
     current_month_cost = round(float(month_to_date_cost.get("value") or 0.0), 2)
@@ -856,35 +893,64 @@ async def mission_control_adoption_summary(
     graph: GraphService = Depends(get_graph),
 ) -> Dict[str, Any]:
     window = _resolve_timeframe(timeframe)
+    await _maybe_schedule_rollup_refresh(graph)
+    window_start_day = _window_start_day(int(window["window_days"]))
     metrics = await _single_value(
         graph,
         """
-        MATCH (e:AnalyticsEvent)
-        WHERE datetime(e.occurred_at) >= datetime() - duration({hours: $window_hours})
-          AND coalesce(e.actor_user_id, "") <> "system:deadline-reminder"
-        WITH e, date(datetime(e.occurred_at)) as d
+        CALL {
+          MATCH (r:AnalyticsDailySystemRollup)
+          WHERE r.event_date >= $window_start_day
+          RETURN coalesce(sum(toInteger(r.event_count)), 0) as events_30d
+        }
+        CALL {
+          MATCH (r:AnalyticsDailyCampaignRollup)
+          WHERE r.event_date >= $window_start_day
+            AND r.campaign_id IS NOT NULL
+            AND trim(r.campaign_id) <> ""
+            AND r.campaign_id <> "global"
+            AND r.campaign_id <> "unknown_campaign"
+          RETURN count(DISTINCT r.campaign_id) as unique_campaigns_30d
+        }
+        CALL {
+          MATCH (r:AnalyticsDailyUserRollup)
+          WHERE r.event_date >= $window_start_day
+            AND r.user_id IS NOT NULL
+            AND trim(r.user_id) <> ""
+            AND r.user_id <> "system:deadline-reminder"
+            AND r.user_id <> "unknown_user"
+          RETURN
+            count(DISTINCT r.user_id) as unique_users_30d,
+            count(DISTINCT CASE WHEN coalesce(toInteger(r.chat_events), 0) > 0 THEN r.user_id ELSE NULL END) as chat_users_30d,
+            count(DISTINCT CASE WHEN coalesce(toInteger(r.report_events), 0) > 0 THEN r.user_id ELSE NULL END) as report_users_30d
+        }
         RETURN
-          count(e) as events_30d,
-          count(DISTINCT coalesce(e.user_id, e.actor_user_id, "")) as unique_users_30d,
-          count(DISTINCT CASE
-            WHEN coalesce(e.campaign_id, "") IN ["", "global", "unknown_campaign"] THEN NULL
-            ELSE coalesce(e.campaign_id, "")
-          END) as unique_campaigns_30d,
-          count(DISTINCT CASE WHEN e.feature_area = "chat" THEN coalesce(e.user_id, e.actor_user_id, "") END) as chat_users_30d,
-          count(DISTINCT CASE WHEN e.source_entity = "RileyReportJob" THEN coalesce(e.user_id, e.actor_user_id, "") END) as report_users_30d
+          events_30d,
+          unique_users_30d,
+          unique_campaigns_30d,
+          chat_users_30d,
+          report_users_30d
         """,
-        window_hours=window["window_hours"],
+        window_start_day=window_start_day,
     )
     user_rows = await _rows(
         graph,
         """
-        MATCH (e:AnalyticsEvent)
-        WHERE datetime(e.occurred_at) >= datetime() - duration({hours: $window_hours})
-          AND coalesce(e.actor_user_id, "") <> "system:deadline-reminder"
-        WITH coalesce(e.user_id, e.actor_user_id, "") as user_id, collect(e) as events
+        MATCH (r:AnalyticsDailyUserRollup)
+        WHERE r.event_date >= $window_start_day
+          AND r.user_id IS NOT NULL
+          AND trim(r.user_id) <> ""
+          AND r.user_id <> "system:deadline-reminder"
+          AND r.user_id <> "unknown_user"
+        WITH r.user_id as user_id,
+             coalesce(sum(toInteger(r.event_count)), 0) as events,
+             coalesce(sum(toInteger(r.chat_events)), 0) as chats,
+             coalesce(sum(toInteger(r.report_events)), 0) as reports
         WHERE trim(user_id) <> ""
+        ORDER BY events DESC
+        LIMIT 25
         OPTIONAL MATCH (u:User {id: user_id})
-        WITH user_id, events, u,
+        WITH user_id, events, chats, reports, u,
              CASE
                  WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
                  ELSE split(u.email, "@")[0]
@@ -895,13 +961,11 @@ async def mission_control_adoption_summary(
           coalesce(u.username, "") as username,
           coalesce(u.email, "") as email,
           coalesce(email_prefix, "") as email_prefix,
-          size(events) as events,
-          size([ev IN events WHERE ev.feature_area = "chat" OR ev.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]]) as chats,
-          size([ev IN events WHERE ev.source_entity = "RileyReportJob" AND ev.object_id IS NOT NULL]) as reports
-        ORDER BY events DESC
-        LIMIT 25
+          events,
+          chats,
+          reports
         """,
-        window_hours=window["window_hours"],
+        window_start_day=window_start_day,
     )
     return {
         "timeframe": window["timeframe"],
@@ -985,6 +1049,7 @@ async def mission_control_workflow_health_summary(
         RETURN
           ar.id as request_id,
           ar.campaign_id as campaign_id,
+          ar.status as status,
           coalesce(c.name, c.title, "") as campaign_name,
           ar.user_id as user_id,
           coalesce(u.display_name, "") as user_display_name,
@@ -1070,6 +1135,7 @@ async def mission_control_workflow_health_summary(
             {
                 "request_id": row.get("request_id"),
                 "campaign_id": row.get("campaign_id"),
+                "status": row.get("status") or "pending",
                 "campaign_name": _safe_campaign_name(row.get("campaign_name"), row.get("campaign_id")),
                 "campaign_secondary": _safe_campaign_secondary(row.get("campaign_id")),
                 "user_id": row.get("user_id"),
@@ -1214,14 +1280,22 @@ async def mission_control_system_health_summary(
             or str(metadata.get("error_type") or "").strip()
             or str(metadata.get("failure_reason") or "").strip()
         )
+        detail_message = " ".join(detail_message.split())[:220]
+        failure_class = _failure_classification(
+            event_type=str(row.get("type") or ""),
+            worker_name=worker_name,
+            detail=detail_message,
+            metadata=metadata,
+        )
         enriched_failures.append(
             {
                 "type": row.get("type") or "unknown",
                 "failure_label": _failure_type_label(str(row.get("type") or "")),
+                "failure_class": failure_class,
                 "occurred_at": row.get("occurred_at"),
                 "campaign_id": row.get("campaign_id"),
-                "campaign_name": _safe_campaign_name(row.get("campaign_name"), row.get("campaign_id")),
-                "campaign_secondary": _safe_campaign_secondary(row.get("campaign_id")),
+                "campaign_name": _failure_scope_campaign_name(row.get("campaign_name"), row.get("campaign_id")),
+                "campaign_secondary": _failure_scope_campaign_secondary(row.get("campaign_id")),
                 "object_id": object_id,
                 "status": row.get("status"),
                 "worker_name": worker_name,

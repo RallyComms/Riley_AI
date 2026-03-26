@@ -134,6 +134,7 @@ type WorkflowData = {
     user_label?: string;
     user_secondary?: string;
     created_at: string;
+    status?: string;
   }>;
   overdue_deadline_list: Array<{
     deadline_id: string;
@@ -169,6 +170,7 @@ type SystemData = {
   recent_failures: Array<{
     type: string;
     failure_label?: string;
+    failure_class?: string;
     worker_name?: string;
     occurred_at: string;
     campaign_id: string;
@@ -523,6 +525,7 @@ function normalizeWorkflow(raw: unknown): WorkflowData {
         user_label: asString(item.user_label, asString(item.user_id, "unknown")),
         user_secondary: asString(item.user_secondary, ""),
         created_at: asString(item.created_at, ""),
+        status: asString(item.status, "pending"),
       };
     }),
     overdue_deadline_list: overdueRows.map((row, idx) => {
@@ -571,6 +574,7 @@ function normalizeSystem(raw: unknown): SystemData {
       return {
         type: asString(item.type, "unknown"),
         failure_label: asString(item.failure_label, asString(item.type, "Unknown Failure")),
+        failure_class: asString(item.failure_class, ""),
         worker_name: asString(item.worker_name, ""),
         occurred_at: asString(item.occurred_at, ""),
         campaign_id: asString(item.campaign_id, ""),
@@ -606,13 +610,47 @@ function renderUserLabel(userLabel: string, userId: string, _secondary?: string)
   return asString(userLabel, asString(userId, "unknown_user"));
 }
 
+type TabLoadingState = Record<MissionControlTab, boolean>;
+
+const defaultTabLoadingState: TabLoadingState = {
+  overview: false,
+  performance: false,
+  cost: false,
+  system: false,
+  adoption: false,
+  workflow: false,
+};
+
+function getMissionControlCacheKey(tab: MissionControlTab, timeframe: MissionControlTimeframe): string {
+  return `${tab}:${timeframe}`;
+}
+
+function getMissionControlEndpoint(tab: MissionControlTab): string {
+  switch (tab) {
+    case "overview":
+      return "/api/v1/mission-control/overview";
+    case "performance":
+      return "/api/v1/mission-control/riley-performance";
+    case "cost":
+      return "/api/v1/mission-control/cost-summary";
+    case "system":
+      return "/api/v1/mission-control/system-health-summary";
+    case "adoption":
+      return "/api/v1/mission-control/adoption-summary";
+    case "workflow":
+      return "/api/v1/mission-control/workflow-health-summary";
+    default:
+      return "/api/v1/mission-control/overview";
+  }
+}
+
 export default function MissionControlPage() {
   const { getToken, isLoaded } = useAuth();
-  const hasAutoFetchedRef = useRef(false);
   const [activeTab, setActiveTab] = useState<MissionControlTab>("overview");
   const [timeframe, setTimeframe] = useState<MissionControlTimeframe>("30d");
-  const [overviewDrilldown, setOverviewDrilldown] = useState<"campaigns" | "users">("campaigns");
-  const [isLoading, setIsLoading] = useState(true);
+  const [overviewDrilldown, setOverviewDrilldown] = useState<"campaigns" | "users" | "join_requests">("campaigns");
+  const [initialPageLoading, setInitialPageLoading] = useState(true);
+  const [tabLoading, setTabLoading] = useState<TabLoadingState>(defaultTabLoadingState);
   const [accessDenied, setAccessDenied] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -622,70 +660,181 @@ export default function MissionControlPage() {
   const [adoption, setAdoption] = useState<AdoptionData>(defaultAdoption);
   const [workflow, setWorkflow] = useState<WorkflowData>(defaultWorkflow);
   const [system, setSystem] = useState<SystemData>(defaultSystem);
+  const cacheRef = useRef<Map<string, unknown>>(new Map());
+  const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const activeTabRef = useRef<MissionControlTab>(activeTab);
+  const timeframeRef = useRef<MissionControlTimeframe>(timeframe);
 
   const timeframeLabel = useMemo(
     () => timeframeOptions.find((option) => option.value === timeframe)?.label || "Last 30d",
     [timeframe]
   );
 
-  const fetchMissionControl = useCallback(async () => {
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  useEffect(() => {
+    timeframeRef.current = timeframe;
+  }, [timeframe]);
+
+  const setTabLoadingValue = useCallback((tab: MissionControlTab, loading: boolean) => {
+    setTabLoading((prev) => (prev[tab] === loading ? prev : { ...prev, [tab]: loading }));
+  }, []);
+
+  const applyTabPayload = useCallback((tab: MissionControlTab, payload: unknown) => {
+    switch (tab) {
+      case "overview":
+        setOverview(payload as OverviewData);
+        break;
+      case "performance":
+        setPerformance(payload as PerformanceData);
+        break;
+      case "cost":
+        setCost(payload as CostData);
+        break;
+      case "adoption":
+        setAdoption(payload as AdoptionData);
+        break;
+      case "workflow":
+        setWorkflow(payload as WorkflowData);
+        break;
+      case "system":
+        setSystem(payload as SystemData);
+        break;
+      default:
+        break;
+    }
+  }, []);
+
+  const normalizeTabPayload = useCallback((tab: MissionControlTab, payload: unknown): unknown => {
+    switch (tab) {
+      case "overview":
+        return normalizeOverview(payload as OverviewData);
+      case "performance":
+        return normalizePerformance(payload as PerformanceData);
+      case "cost":
+        return normalizeCost(payload as CostData);
+      case "adoption":
+        return normalizeAdoption(payload as AdoptionData);
+      case "workflow":
+        return normalizeWorkflow(payload as WorkflowData);
+      case "system":
+        return normalizeSystem(payload as SystemData);
+      default:
+        return payload;
+    }
+  }, []);
+
+  const abortAllInFlightRequests = useCallback(() => {
+    abortControllersRef.current.forEach((controller) => controller.abort());
+    abortControllersRef.current.clear();
+  }, []);
+
+  const fetchMissionControlTab = useCallback(async (
+    tab: MissionControlTab,
+    options?: { force?: boolean; background?: boolean }
+  ) => {
     if (!isLoaded) return;
+    const requestedTimeframe = timeframeRef.current;
+    const force = Boolean(options?.force);
+    const background = Boolean(options?.background);
+    const cacheKey = getMissionControlCacheKey(tab, requestedTimeframe);
+    if (!force) {
+      const cached = cacheRef.current.get(cacheKey);
+      if (cached) {
+        applyTabPayload(tab, cached);
+        if (tab === "overview") {
+          setInitialPageLoading(false);
+        }
+        return;
+      }
+    }
+
+    const requestKey = cacheKey;
+    if (!force && abortControllersRef.current.has(requestKey)) {
+      return;
+    }
+    const existingController = abortControllersRef.current.get(requestKey);
+    if (existingController) {
+      existingController.abort();
+      abortControllersRef.current.delete(requestKey);
+    }
+
+    const controller = new AbortController();
+    abortControllersRef.current.set(requestKey, controller);
     try {
-      setIsLoading(true);
-      setError(null);
-      setAccessDenied(false);
+      if (!background) {
+        setTabLoadingValue(tab, true);
+        setError(null);
+      }
       const token = await getToken();
       if (!token) {
         throw new Error("Authentication required.");
       }
 
-      const query = `?timeframe=${encodeURIComponent(timeframe)}`;
-      const settled = await Promise.allSettled([
-        apiFetch<OverviewData>(`/api/v1/mission-control/overview${query}`, { token, method: "GET" }),
-        apiFetch<PerformanceData>(`/api/v1/mission-control/riley-performance${query}`, { token, method: "GET" }),
-        apiFetch<CostData>(`/api/v1/mission-control/cost-summary${query}`, { token, method: "GET" }),
-        apiFetch<AdoptionData>(`/api/v1/mission-control/adoption-summary${query}`, { token, method: "GET" }),
-        apiFetch<WorkflowData>(`/api/v1/mission-control/workflow-health-summary${query}`, { token, method: "GET" }),
-        apiFetch<SystemData>(`/api/v1/mission-control/system-health-summary${query}`, { token, method: "GET" }),
-      ]);
-
-      const denied = settled.some(
-        (result) => result.status === "rejected" && result.reason instanceof ApiRequestError && result.reason.status === 403
+      const query = `?timeframe=${encodeURIComponent(requestedTimeframe)}`;
+      const payload = await apiFetch(
+        `${getMissionControlEndpoint(tab)}${query}`,
+        { token, method: "GET", signal: controller.signal }
       );
-      if (denied) {
-        setAccessDenied(true);
+
+      if (controller.signal.aborted) {
+        return;
+      }
+      if (abortControllersRef.current.get(requestKey) !== controller) {
         return;
       }
 
-      const getValue = <T,>(index: number, fallback: T): T => {
-        const result = settled[index];
-        return result.status === "fulfilled" ? (result.value as T) : fallback;
-      };
+      const normalizedPayload = normalizeTabPayload(tab, payload);
+      cacheRef.current.set(cacheKey, normalizedPayload);
 
-      setOverview(normalizeOverview(getValue(0, defaultOverview)));
-      setPerformance(normalizePerformance(getValue(1, defaultPerformance)));
-      setCost(normalizeCost(getValue(2, defaultCost)));
-      setAdoption(normalizeAdoption(getValue(3, defaultAdoption)));
-      setWorkflow(normalizeWorkflow(getValue(4, defaultWorkflow)));
-      setSystem(normalizeSystem(getValue(5, defaultSystem)));
+      if (timeframeRef.current === requestedTimeframe) {
+        applyTabPayload(tab, normalizedPayload);
+        setAccessDenied(false);
+      }
     } catch (err) {
+      if (controller.signal.aborted) {
+        return;
+      }
       if (err instanceof ApiRequestError && err.status === 403) {
         setAccessDenied(true);
         return;
       }
-      setError(err instanceof Error ? err.message : "Failed to load Mission Control.");
+      if (!background && activeTabRef.current === tab && timeframeRef.current === requestedTimeframe) {
+        setError(err instanceof Error ? err.message : "Failed to load Mission Control.");
+      }
     } finally {
-      setIsLoading(false);
+      if (abortControllersRef.current.get(requestKey) === controller) {
+        abortControllersRef.current.delete(requestKey);
+      }
+      if (!background) {
+        setTabLoadingValue(tab, false);
+      }
+      if (tab === "overview") {
+        setInitialPageLoading(false);
+      }
     }
-  }, [getToken, isLoaded, timeframe]);
+  }, [applyTabPayload, getToken, isLoaded, normalizeTabPayload, setTabLoadingValue]);
 
   useEffect(() => {
     if (!isLoaded) return;
-    if (!hasAutoFetchedRef.current) {
-      hasAutoFetchedRef.current = true;
+    abortAllInFlightRequests();
+    void fetchMissionControlTab(activeTab);
+    return () => {
+      abortAllInFlightRequests();
+    };
+  }, [abortAllInFlightRequests, activeTab, fetchMissionControlTab, isLoaded, timeframe]);
+
+  useEffect(() => {
+    if (!isLoaded) return;
+    const overviewKey = getMissionControlCacheKey("overview", timeframe);
+    const costKey = getMissionControlCacheKey("cost", timeframe);
+    if (!cacheRef.current.has(overviewKey) || cacheRef.current.has(costKey)) {
+      return;
     }
-    void fetchMissionControl();
-  }, [fetchMissionControl, isLoaded, timeframe]);
+    void fetchMissionControlTab("cost", { background: true });
+  }, [fetchMissionControlTab, isLoaded, timeframe]);
 
   const topKpis = useMemo(() => {
     return [
@@ -711,6 +860,9 @@ export default function MissionControlPage() {
       { label: "Month Est. Cost", value: `$${asNumber(overview.current_month_estimated_cost).toFixed(2)}`, icon: DollarSign },
     ];
   }, [overview, timeframeLabel]);
+
+  const activeTabLoading = tabLoading[activeTab];
+  const activeTabLabel = tabs.find((tab) => tab.id === activeTab)?.label || "Active tab";
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
@@ -738,7 +890,7 @@ export default function MissionControlPage() {
             </div>
             <button
               type="button"
-              onClick={() => void fetchMissionControl()}
+              onClick={() => void fetchMissionControlTab(activeTab, { force: true })}
               className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
             >
               Refresh
@@ -753,7 +905,7 @@ export default function MissionControlPage() {
           </div>
         </header>
 
-        {isLoading ? (
+        {initialPageLoading ? (
           <div className="rounded-2xl border border-slate-200 bg-white p-10 text-center text-slate-600">Loading Mission Control...</div>
         ) : accessDenied ? (
           <div className="rounded-2xl border border-rose-200 bg-rose-50 p-10 text-center">
@@ -801,7 +953,10 @@ export default function MissionControlPage() {
               </div>
 
               <div className="rounded-xl border border-slate-100 bg-slate-50 p-5">
-                <p className="mb-3 text-xs font-medium uppercase tracking-wide text-slate-500">Timeframe: {timeframeLabel}</p>
+                <div className="mb-3 flex items-center justify-between">
+                  <p className="text-xs font-medium uppercase tracking-wide text-slate-500">Timeframe: {timeframeLabel}</p>
+                  {activeTabLoading ? <p className="text-xs text-slate-500">Updating {activeTabLabel}...</p> : null}
+                </div>
                 {activeTab === "overview" && (
                   <div className="space-y-5">
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -809,7 +964,14 @@ export default function MissionControlPage() {
                       <Metric label={`Reports (${timeframeLabel})`} value={overview.reports_today} />
                       <Metric label="Avg Response Latency (ms)" value={overview.avg_response_latency_ms} />
                       <Metric label="Forecast Month-End Cost" value={`$${asNumber(overview.forecast_month_end_cost).toFixed(2)}`} />
-                      <Metric label="Pending Access Requests" value={overview.pending_access_requests} />
+                      <Metric
+                        label="Pending Campaign Join Requests"
+                        value={overview.pending_access_requests}
+                        onClick={() => {
+                          setOverviewDrilldown("join_requests");
+                          void fetchMissionControlTab("workflow");
+                        }}
+                      />
                       <Metric label="Overdue Deadlines" value={overview.overdue_deadlines} />
                       <Metric label={`Failed Reports (${timeframeLabel})`} value={overview.failed_reports_24h} />
                     </div>
@@ -847,6 +1009,16 @@ export default function MissionControlPage() {
                         >
                           User Drilldown
                         </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOverviewDrilldown("join_requests");
+                            void fetchMissionControlTab("workflow");
+                          }}
+                          className={`rounded px-3 py-1 text-sm ${overviewDrilldown === "join_requests" ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-700"}`}
+                        >
+                          Join Requests
+                        </button>
                       </div>
                       {overviewDrilldown === "campaigns" ? (
                         <SimpleTable
@@ -859,7 +1031,7 @@ export default function MissionControlPage() {
                             `$${asNumber(row.cost).toFixed(2)}`,
                           ])}
                         />
-                      ) : (
+                      ) : overviewDrilldown === "users" ? (
                         <SimpleTable
                           emptyLabel="No user drilldown data."
                           columns={["User", "Chats", "Reports", "Cost"]}
@@ -868,6 +1040,19 @@ export default function MissionControlPage() {
                             String(row.chats),
                             String(row.reports),
                             `$${asNumber(row.cost).toFixed(2)}`,
+                          ])}
+                        />
+                      ) : tabLoading.workflow ? (
+                        <p className="text-sm text-slate-500">Loading pending join requests...</p>
+                      ) : (
+                        <SimpleTable
+                          emptyLabel="No pending campaign join requests."
+                          columns={["Requester", "Campaign", "Requested At", "Status"]}
+                          rows={workflow.pending_access_request_list.map((row) => [
+                            renderUserLabel(asString(row.user_label, row.user_id), row.user_id, row.user_secondary),
+                            renderCampaignLabel(row.campaign_name, row.campaign_id, row.campaign_secondary),
+                            safeDateTime(row.created_at),
+                            asString(row.status, "pending"),
                           ])}
                         />
                       )}
@@ -1038,7 +1223,9 @@ export default function MissionControlPage() {
                         emptyLabel="No recent failures."
                         columns={["Failure", "Worker", "Campaign", "Object/Job", "Status", "Timestamp", "Detail"]}
                         rows={system.recent_failures.map((row) => [
-                          asString(row.failure_label, row.type),
+                          row.failure_class
+                            ? `${asString(row.failure_label, row.type)} (${row.failure_class})`
+                            : asString(row.failure_label, row.type),
                           row.worker_name || "-",
                           renderCampaignLabel(row.campaign_name, row.campaign_id, row.campaign_secondary),
                           row.object_id || "-",
@@ -1143,13 +1330,21 @@ export default function MissionControlPage() {
   );
 }
 
-function Metric({ label, value }: { label: string; value: unknown }) {
+function Metric({ label, value, onClick }: { label: string; value: unknown; onClick?: () => void }) {
   const safeValue = normalizeMetricValue(value);
-  return (
+  const content = (
     <div className="rounded-lg border border-slate-200 bg-white p-4">
       <p className="text-xs font-medium uppercase tracking-wide text-slate-500">{label}</p>
       <p className="mt-1 text-xl font-semibold text-slate-900">{safeValue}</p>
     </div>
+  );
+  if (!onClick) {
+    return content;
+  }
+  return (
+    <button type="button" onClick={onClick} className="w-full text-left">
+      {content}
+    </button>
   );
 }
 

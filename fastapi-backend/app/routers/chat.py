@@ -54,7 +54,8 @@ router = APIRouter()
 class ChatRequest(BaseModel):
     query: str = Field(..., max_length=2000, description="User query text (max 2000 characters)")
     tenant_id: str = Field(..., max_length=50, description="Tenant/client identifier (max 50 characters)")
-    mode: Literal["fast", "deep"] = "fast"  # UI retrieval depth mode
+    # Accept legacy "normal" mode from older frontend builds and treat it as "fast".
+    mode: Literal["fast", "deep", "normal"] = "fast"
     session_id: Optional[str] = Field(None, description="Optional session ID for chat memory")
     user_display_name: Optional[str] = Field(None, description="User's display name for personalization (username, firstName, or email)")
 
@@ -771,10 +772,11 @@ async def chat(
     print(f"Chat request: user_id={user_id}, tenant_id={request.tenant_id}")
     
     settings = get_settings()
+    normalized_mode: Literal["fast", "deep"] = "deep" if request.mode == "deep" else "fast"
     rerank_candidates_limit = max(1, int(settings.RERANK_CANDIDATES))
     rerank_top_k = max(1, int(settings.RERANK_TOP_K))
-    target_private_limit = 40 if request.mode == "deep" else 10
-    target_global_limit = 20 if request.mode == "deep" else 5
+    target_private_limit = 40 if normalized_mode == "deep" else 10
+    target_global_limit = 20 if normalized_mode == "deep" else 5
     if deep:
         target_private_limit = max(target_private_limit, 80)
         target_global_limit = max(target_global_limit, 40)
@@ -782,7 +784,7 @@ async def chat(
         rerank_top_k = max(rerank_top_k, 20)
     if request.tenant_id == "global":
         target_private_limit = 0
-        target_global_limit = 40 if request.mode == "deep" else 20
+        target_global_limit = 40 if normalized_mode == "deep" else 20
         if deep:
             target_global_limit = max(target_global_limit, 80)
 
@@ -823,7 +825,7 @@ async def chat(
                 ],
             )
 
-            vector_limit = max(40 if request.mode == "deep" else 20, rerank_candidates_limit) if settings.RERANK_ENABLED else (40 if request.mode == "deep" else 20)
+            vector_limit = max(40 if normalized_mode == "deep" else 20, rerank_candidates_limit) if settings.RERANK_ENABLED else (40 if normalized_mode == "deep" else 20)
             if settings.HYBRID_SEARCH_ENABLED:
                 vector_task = vector_service.hybrid_search_research(
                     collection_name=settings.QDRANT_COLLECTION_TIER_1,
@@ -1332,7 +1334,7 @@ Context Data:
     system_prompt += f"\nUser Question: {request.query}"
 
     # Step F: Generate response using Riley primary provider (Gemini) with OpenAI fallback.
-    use_deep_model = bool(deep or request.mode == "deep")
+    use_deep_model = bool(deep or normalized_mode == "deep")
     primary_model = _get_riley_model_name(deep=use_deep_model)
     fallback_model = settings.RILEY_OPENAI_FALLBACK_MODEL
     response_text: Optional[str] = None

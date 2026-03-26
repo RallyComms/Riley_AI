@@ -1,4 +1,5 @@
 import uuid
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -14,6 +15,8 @@ from app.services.analytics_contract import (
     resolve_riley_display_identity,
     safe_metadata_json,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class GraphService:
@@ -40,6 +43,64 @@ class GraphService:
         """Close the Neo4j driver connection."""
         if self._driver:
             await self._driver.close()
+
+    async def ensure_mission_control_schema(self) -> None:
+        """Create high-value indexes/constraints for Mission Control analytics paths."""
+        statements = [
+            # AnalyticsEvent write/read keys
+            """
+            CREATE CONSTRAINT analytics_event_event_id_unique IF NOT EXISTS
+            FOR (e:AnalyticsEvent) REQUIRE e.event_id IS UNIQUE
+            """,
+            """
+            CREATE INDEX analytics_event_occurred_at_idx IF NOT EXISTS
+            FOR (e:AnalyticsEvent) ON (e.occurred_at)
+            """,
+            """
+            CREATE INDEX analytics_event_campaign_id_idx IF NOT EXISTS
+            FOR (e:AnalyticsEvent) ON (e.campaign_id)
+            """,
+            """
+            CREATE INDEX analytics_event_user_id_idx IF NOT EXISTS
+            FOR (e:AnalyticsEvent) ON (e.user_id)
+            """,
+            """
+            CREATE INDEX analytics_event_actor_user_id_idx IF NOT EXISTS
+            FOR (e:AnalyticsEvent) ON (e.actor_user_id)
+            """,
+            """
+            CREATE INDEX analytics_event_source_entity_idx IF NOT EXISTS
+            FOR (e:AnalyticsEvent) ON (e.source_entity)
+            """,
+            """
+            CREATE INDEX analytics_event_source_event_type_raw_idx IF NOT EXISTS
+            FOR (e:AnalyticsEvent) ON (e.source_event_type_raw)
+            """,
+            # Rollup keys used by Mission Control queries
+            """
+            CREATE CONSTRAINT analytics_daily_system_rollup_event_date_unique IF NOT EXISTS
+            FOR (r:AnalyticsDailySystemRollup) REQUIRE r.event_date IS UNIQUE
+            """,
+            """
+            CREATE CONSTRAINT analytics_daily_campaign_rollup_key_unique IF NOT EXISTS
+            FOR (r:AnalyticsDailyCampaignRollup) REQUIRE (r.event_date, r.campaign_id) IS UNIQUE
+            """,
+            """
+            CREATE CONSTRAINT analytics_daily_user_rollup_key_unique IF NOT EXISTS
+            FOR (r:AnalyticsDailyUserRollup) REQUIRE (r.event_date, r.campaign_id, r.user_id) IS UNIQUE
+            """,
+            """
+            CREATE CONSTRAINT analytics_daily_provider_rollup_key_unique IF NOT EXISTS
+            FOR (r:AnalyticsDailyProviderRollup) REQUIRE (r.event_date, r.provider, r.model) IS UNIQUE
+            """,
+        ]
+        async with self._driver.session() as session:
+            for statement in statements:
+                try:
+                    result = await session.run(statement)
+                    await result.consume()
+                except Exception:
+                    logger.exception("mission_control_schema_statement_failed")
 
     async def _label_exists(self, label: str) -> bool:
         """Return True if the Neo4j label exists in current DB."""
@@ -258,6 +319,13 @@ class GraphService:
                 coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as total_cost_estimate_usd,
                 coalesce(sum(CASE WHEN e.latency_ms IS NOT NULL THEN toFloat(e.latency_ms) ELSE 0.0 END), 0.0) as latency_sum_ms,
                 sum(CASE WHEN e.latency_ms IS NOT NULL THEN 1 ELSE 0 END) as latency_count,
+                sum(CASE WHEN (e.feature_area = "chat" OR e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]) THEN 1 ELSE 0 END) as chat_events,
+                sum(CASE WHEN e.source_entity = "RileyReportJob" AND e.object_id IS NOT NULL THEN 1 ELSE 0 END) as report_events,
+                sum(CASE WHEN (e.source_event_type_raw = "worker_failed")
+                              OR (e.source_event_type_raw = "ingestion_failed")
+                              OR (e.source_event_type_raw = "preview_generation_failed")
+                              OR (e.source_entity = "RileyReportJob" AND e.status = "failed")
+                         THEN 1 ELSE 0 END) as failure_events,
                 sum(CASE WHEN e.source_event_type_raw = "report_provider_fallback_triggered" THEN 1 ELSE 0 END) as provider_fallback_triggered,
                 sum(CASE WHEN e.source_event_type_raw = "report_provider_fallback_succeeded" THEN 1 ELSE 0 END) as provider_fallback_successes,
                 sum(CASE WHEN e.source_event_type_raw = "report_provider_fallback_failed" THEN 1 ELSE 0 END) as provider_fallback_failures,
@@ -272,6 +340,9 @@ class GraphService:
                 r.total_cost_estimate_usd = total_cost_estimate_usd,
                 r.latency_sum_ms = latency_sum_ms,
                 r.latency_count = latency_count,
+                r.chat_events = chat_events,
+                r.report_events = report_events,
+                r.failure_events = failure_events,
                 r.provider_fallback_triggered = provider_fallback_triggered,
                 r.provider_fallback_successes = provider_fallback_successes,
                 r.provider_fallback_failures = provider_fallback_failures,
