@@ -14,7 +14,11 @@ type MissionControlTab =
   | "adoption"
   | "workflow";
 
+type MissionControlTimeframe = "24h" | "7d" | "30d";
+
 type OverviewData = {
+  timeframe?: MissionControlTimeframe;
+  timeframe_label?: string;
   active_users_7d: number;
   active_campaigns_7d: number;
   chats_today: number;
@@ -27,11 +31,27 @@ type OverviewData = {
   overdue_deadlines: number;
   failed_reports_24h: number;
   timeseries_30d: Array<{ day: string; chats: number; reports: number; cost: number; failures: number }>;
-  campaign_usage_7d: Array<{ campaign_id: string; campaign_name: string; chats: number; reports: number; cost: number }>;
-  user_usage_7d: Array<{ user_id: string; chats: number; reports: number; cost: number }>;
+  campaign_usage_7d: Array<{
+    campaign_id: string;
+    campaign_name: string;
+    campaign_secondary?: string;
+    chats: number;
+    reports: number;
+    cost: number;
+  }>;
+  user_usage_7d: Array<{
+    user_id: string;
+    user_label?: string;
+    user_secondary?: string;
+    chats: number;
+    reports: number;
+    cost: number;
+  }>;
 };
 
 type PerformanceData = {
+  timeframe?: MissionControlTimeframe;
+  timeframe_label?: string;
   avg_latency_ms_7d: number;
   p95_latency_ms_7d: number;
   provider_fallback_successes_7d: number;
@@ -43,6 +63,7 @@ type PerformanceData = {
   campaign_performance_7d: Array<{
     campaign_id: string;
     campaign_name: string;
+    campaign_secondary?: string;
     avg_latency_ms: number;
     p95_latency_ms: number;
     chats: number;
@@ -58,27 +79,40 @@ type PerformanceData = {
 };
 
 type CostData = {
+  timeframe?: MissionControlTimeframe;
+  timeframe_label?: string;
   month_estimated_cost: number;
   last_7d_estimated_cost: number;
   provider_cost_30d: Array<{ provider: string; cost: number }>;
   cost_per_chat: number;
   cost_per_report: number;
-  cost_by_campaign_30d: Array<{ campaign_id: string; campaign_name: string; cost: number }>;
-  cost_by_user_30d: Array<{ user_id: string; cost: number }>;
+  cost_by_campaign_30d: Array<{ campaign_id: string; campaign_name: string; campaign_secondary?: string; cost: number }>;
+  cost_by_user_30d: Array<{ user_id: string; user_label?: string; user_secondary?: string; cost: number }>;
   cost_trend_30d: Array<{ day: string; cost: number }>;
   projected_monthly_curve: Array<{ day: number; projected_cost: number }>;
 };
 
 type AdoptionData = {
+  timeframe?: MissionControlTimeframe;
+  timeframe_label?: string;
   events_30d: number;
   unique_users_30d: number;
   unique_campaigns_30d: number;
   chat_users_30d: number;
   report_users_30d: number;
-  user_activity_30d: Array<{ user_id: string; events: number; chats: number; reports: number }>;
+  user_activity_30d: Array<{
+    user_id: string;
+    user_label?: string;
+    user_secondary?: string;
+    events: number;
+    chats: number;
+    reports: number;
+  }>;
 };
 
 type WorkflowData = {
+  timeframe?: MissionControlTimeframe;
+  timeframe_label?: string;
   access_requests_24h: number;
   access_decisions_24h: number;
   deadline_reminders_24h: number;
@@ -89,39 +123,54 @@ type WorkflowData = {
     request_id: string;
     campaign_id: string;
     campaign_name: string;
+    campaign_secondary?: string;
     user_id: string;
+    user_label?: string;
+    user_secondary?: string;
     created_at: string;
   }>;
   overdue_deadline_list: Array<{
     deadline_id: string;
     campaign_id: string;
     campaign_name: string;
+    campaign_secondary?: string;
     title: string;
     due_at: string;
     assigned_user_id: string;
+    assigned_user_label?: string;
+    assigned_user_secondary?: string;
   }>;
   stale_assignment_list: Array<{
     deadline_id: string;
     campaign_id: string;
     campaign_name: string;
+    campaign_secondary?: string;
     title: string;
     due_at: string;
     assigned_user_id: string;
+    assigned_user_label?: string;
+    assigned_user_secondary?: string;
   }>;
 };
 
 type SystemData = {
+  timeframe?: MissionControlTimeframe;
+  timeframe_label?: string;
   auth_denied_24h: number;
   worker_failures_24h: number;
   report_failures_24h: number;
   ingestion_failures_24h: number;
   recent_failures: Array<{
     type: string;
+    failure_label?: string;
+    worker_name?: string;
     occurred_at: string;
     campaign_id: string;
     campaign_name: string;
+    campaign_secondary?: string;
     object_id: string;
     status: string;
+    detail?: string;
   }>;
 };
 
@@ -134,6 +183,12 @@ const tabs: Array<{ id: MissionControlTab; label: string }> = [
   { id: "system", label: "System Health" },
   { id: "adoption", label: "Adoption & Engagement" },
   { id: "workflow", label: "Workflow Health" },
+];
+
+const timeframeOptions: Array<{ value: MissionControlTimeframe; label: string }> = [
+  { value: "24h", label: "Today / Last 24h" },
+  { value: "7d", label: "Last 7d" },
+  { value: "30d", label: "Last 30d" },
 ];
 
 const defaultOverview: OverviewData = {
@@ -242,6 +297,8 @@ function normalizeOverview(raw: unknown): OverviewData {
   const campaignRows = asArray(src.campaign_usage_7d);
   const userRows = asArray(src.user_usage_7d);
   return {
+    timeframe: asString(src.timeframe, "30d") as MissionControlTimeframe,
+    timeframe_label: asString(src.timeframe_label, ""),
     active_users_7d: asNumber(src.active_users_7d),
     active_campaigns_7d: asNumber(src.active_campaigns_7d),
     chats_today: asNumber(src.chats_today),
@@ -267,7 +324,8 @@ function normalizeOverview(raw: unknown): OverviewData {
       const item = asRecord(row);
       return {
         campaign_id: asString(item.campaign_id, `campaign_${idx + 1}`),
-        campaign_name: asString(item.campaign_name, asString(item.campaign_id, `Campaign ${idx + 1}`)),
+        campaign_name: asString(item.campaign_name, "Unresolved Campaign"),
+        campaign_secondary: asString(item.campaign_secondary, ""),
         chats: asNumber(item.chats),
         reports: asNumber(item.reports),
         cost: asNumber(item.cost),
@@ -277,6 +335,8 @@ function normalizeOverview(raw: unknown): OverviewData {
       const item = asRecord(row);
       return {
         user_id: asString(item.user_id, `user_${idx + 1}`),
+        user_label: asString(item.user_label, asString(item.user_id, `user_${idx + 1}`)),
+        user_secondary: asString(item.user_secondary, ""),
         chats: asNumber(item.chats),
         reports: asNumber(item.reports),
         cost: asNumber(item.cost),
@@ -292,6 +352,8 @@ function normalizePerformance(raw: unknown): PerformanceData {
   const byCampaign = asArray(src.campaign_performance_7d);
   const byProvider = asArray(src.provider_breakdown_7d);
   return {
+    timeframe: asString(src.timeframe, "30d") as MissionControlTimeframe,
+    timeframe_label: asString(src.timeframe_label, ""),
     avg_latency_ms_7d: asNumber(src.avg_latency_ms_7d),
     p95_latency_ms_7d: asNumber(src.p95_latency_ms_7d),
     provider_fallback_successes_7d: asNumber(src.provider_fallback_successes_7d),
@@ -316,7 +378,8 @@ function normalizePerformance(raw: unknown): PerformanceData {
       const item = asRecord(row);
       return {
         campaign_id: asString(item.campaign_id, `campaign_${idx + 1}`),
-        campaign_name: asString(item.campaign_name, asString(item.campaign_id, `Campaign ${idx + 1}`)),
+        campaign_name: asString(item.campaign_name, "Unresolved Campaign"),
+        campaign_secondary: asString(item.campaign_secondary, ""),
         avg_latency_ms: asNumber(item.avg_latency_ms),
         p95_latency_ms: asNumber(item.p95_latency_ms),
         chats: asNumber(item.chats),
@@ -344,6 +407,8 @@ function normalizeCost(raw: unknown): CostData {
   const trendRows = asArray(src.cost_trend_30d);
   const projectionRows = asArray(src.projected_monthly_curve);
   return {
+    timeframe: asString(src.timeframe, "30d") as MissionControlTimeframe,
+    timeframe_label: asString(src.timeframe_label, ""),
     month_estimated_cost: asNumber(src.month_estimated_cost),
     last_7d_estimated_cost: asNumber(src.last_7d_estimated_cost),
     provider_cost_30d: rows.map((row, idx) => {
@@ -359,7 +424,8 @@ function normalizeCost(raw: unknown): CostData {
       const item = asRecord(row);
       return {
         campaign_id: asString(item.campaign_id, `campaign_${idx + 1}`),
-        campaign_name: asString(item.campaign_name, asString(item.campaign_id, `Campaign ${idx + 1}`)),
+        campaign_name: asString(item.campaign_name, "Unresolved Campaign"),
+        campaign_secondary: asString(item.campaign_secondary, ""),
         cost: asNumber(item.cost),
       };
     }),
@@ -367,6 +433,8 @@ function normalizeCost(raw: unknown): CostData {
       const item = asRecord(row);
       return {
         user_id: asString(item.user_id, `user_${idx + 1}`),
+        user_label: asString(item.user_label, asString(item.user_id, `user_${idx + 1}`)),
+        user_secondary: asString(item.user_secondary, ""),
         cost: asNumber(item.cost),
       };
     }),
@@ -391,6 +459,8 @@ function normalizeAdoption(raw: unknown): AdoptionData {
   const src = asRecord(raw);
   const userRows = asArray(src.user_activity_30d);
   return {
+    timeframe: asString(src.timeframe, "30d") as MissionControlTimeframe,
+    timeframe_label: asString(src.timeframe_label, ""),
     events_30d: asNumber(src.events_30d),
     unique_users_30d: asNumber(src.unique_users_30d),
     unique_campaigns_30d: asNumber(src.unique_campaigns_30d),
@@ -400,6 +470,8 @@ function normalizeAdoption(raw: unknown): AdoptionData {
       const item = asRecord(row);
       return {
         user_id: asString(item.user_id, `user_${idx + 1}`),
+        user_label: asString(item.user_label, asString(item.user_id, `user_${idx + 1}`)),
+        user_secondary: asString(item.user_secondary, ""),
         events: asNumber(item.events),
         chats: asNumber(item.chats),
         reports: asNumber(item.reports),
@@ -414,6 +486,8 @@ function normalizeWorkflow(raw: unknown): WorkflowData {
   const overdueRows = asArray(src.overdue_deadline_list);
   const staleRows = asArray(src.stale_assignment_list);
   return {
+    timeframe: asString(src.timeframe, "30d") as MissionControlTimeframe,
+    timeframe_label: asString(src.timeframe_label, ""),
     access_requests_24h: asNumber(src.access_requests_24h),
     access_decisions_24h: asNumber(src.access_decisions_24h),
     deadline_reminders_24h: asNumber(src.deadline_reminders_24h),
@@ -425,8 +499,11 @@ function normalizeWorkflow(raw: unknown): WorkflowData {
       return {
         request_id: asString(item.request_id, `request_${idx + 1}`),
         campaign_id: asString(item.campaign_id, ""),
-        campaign_name: asString(item.campaign_name, asString(item.campaign_id, "Unknown campaign")),
+        campaign_name: asString(item.campaign_name, "Unresolved Campaign"),
+        campaign_secondary: asString(item.campaign_secondary, ""),
         user_id: asString(item.user_id, "unknown"),
+        user_label: asString(item.user_label, asString(item.user_id, "unknown")),
+        user_secondary: asString(item.user_secondary, ""),
         created_at: asString(item.created_at, ""),
       };
     }),
@@ -435,10 +512,13 @@ function normalizeWorkflow(raw: unknown): WorkflowData {
       return {
         deadline_id: asString(item.deadline_id, `deadline_${idx + 1}`),
         campaign_id: asString(item.campaign_id, ""),
-        campaign_name: asString(item.campaign_name, asString(item.campaign_id, "Unknown campaign")),
+        campaign_name: asString(item.campaign_name, "Unresolved Campaign"),
+        campaign_secondary: asString(item.campaign_secondary, ""),
         title: asString(item.title, "Untitled deadline"),
         due_at: asString(item.due_at, ""),
         assigned_user_id: asString(item.assigned_user_id, ""),
+        assigned_user_label: asString(item.assigned_user_label, asString(item.assigned_user_id, "")),
+        assigned_user_secondary: asString(item.assigned_user_secondary, ""),
       };
     }),
     stale_assignment_list: staleRows.map((row, idx) => {
@@ -446,10 +526,13 @@ function normalizeWorkflow(raw: unknown): WorkflowData {
       return {
         deadline_id: asString(item.deadline_id, `stale_${idx + 1}`),
         campaign_id: asString(item.campaign_id, ""),
-        campaign_name: asString(item.campaign_name, asString(item.campaign_id, "Unknown campaign")),
+        campaign_name: asString(item.campaign_name, "Unresolved Campaign"),
+        campaign_secondary: asString(item.campaign_secondary, ""),
         title: asString(item.title, "Untitled assignment"),
         due_at: asString(item.due_at, ""),
         assigned_user_id: asString(item.assigned_user_id, ""),
+        assigned_user_label: asString(item.assigned_user_label, asString(item.assigned_user_id, "")),
+        assigned_user_secondary: asString(item.assigned_user_secondary, ""),
       };
     }),
   };
@@ -459,6 +542,8 @@ function normalizeSystem(raw: unknown): SystemData {
   const src = asRecord(raw);
   const failures = asArray(src.recent_failures);
   return {
+    timeframe: asString(src.timeframe, "30d") as MissionControlTimeframe,
+    timeframe_label: asString(src.timeframe_label, ""),
     auth_denied_24h: asNumber(src.auth_denied_24h),
     worker_failures_24h: asNumber(src.worker_failures_24h),
     report_failures_24h: asNumber(src.report_failures_24h),
@@ -467,11 +552,15 @@ function normalizeSystem(raw: unknown): SystemData {
       const item = asRecord(row);
       return {
         type: asString(item.type, "unknown"),
+        failure_label: asString(item.failure_label, asString(item.type, "Unknown Failure")),
+        worker_name: asString(item.worker_name, ""),
         occurred_at: asString(item.occurred_at, ""),
         campaign_id: asString(item.campaign_id, ""),
-        campaign_name: asString(item.campaign_name, asString(item.campaign_id, "")),
+        campaign_name: asString(item.campaign_name, "Unresolved Campaign"),
+        campaign_secondary: asString(item.campaign_secondary, ""),
         object_id: asString(item.object_id, ""),
         status: asString(item.status, ""),
+        detail: asString(item.detail, ""),
       };
     }),
   };
@@ -491,10 +580,39 @@ function safeDateTime(value: string): string {
   return d.toLocaleString();
 }
 
+function withSecondary(primary: string, secondary?: string): string {
+  const main = asString(primary, "-");
+  const detail = asString(secondary, "");
+  if (!detail) return main;
+  return `${main} (${detail})`;
+}
+
+function renderCampaignLabel(name: string, campaignId: string, secondary?: string): string {
+  const fallbackName = asString(name, "Unresolved Campaign");
+  const detail = asString(secondary, "");
+  if (detail) {
+    return withSecondary(fallbackName, detail);
+  }
+  const id = asString(campaignId, "");
+  if (id && id !== fallbackName && id.toLowerCase() !== "unknown_campaign") {
+    return withSecondary(fallbackName, id);
+  }
+  return fallbackName;
+}
+
+function renderUserLabel(userLabel: string, userId: string, secondary?: string): string {
+  const label = asString(userLabel, asString(userId, "unknown_user"));
+  const detail = asString(secondary, "");
+  if (detail) return withSecondary(label, detail);
+  if (label !== userId) return withSecondary(label, userId);
+  return label;
+}
+
 export default function MissionControlPage() {
   const { getToken, isLoaded } = useAuth();
   const hasAutoFetchedRef = useRef(false);
   const [activeTab, setActiveTab] = useState<MissionControlTab>("overview");
+  const [timeframe, setTimeframe] = useState<MissionControlTimeframe>("30d");
   const [overviewDrilldown, setOverviewDrilldown] = useState<"campaigns" | "users">("campaigns");
   const [isLoading, setIsLoading] = useState(true);
   const [accessDenied, setAccessDenied] = useState(false);
@@ -507,6 +625,11 @@ export default function MissionControlPage() {
   const [workflow, setWorkflow] = useState<WorkflowData>(defaultWorkflow);
   const [system, setSystem] = useState<SystemData>(defaultSystem);
 
+  const timeframeLabel = useMemo(
+    () => timeframeOptions.find((option) => option.value === timeframe)?.label || "Last 30d",
+    [timeframe]
+  );
+
   const fetchMissionControl = useCallback(async () => {
     if (!isLoaded) return;
     try {
@@ -518,13 +641,14 @@ export default function MissionControlPage() {
         throw new Error("Authentication required.");
       }
 
+      const query = `?timeframe=${encodeURIComponent(timeframe)}`;
       const settled = await Promise.allSettled([
-        apiFetch<OverviewData>("/api/v1/mission-control/overview", { token, method: "GET" }),
-        apiFetch<PerformanceData>("/api/v1/mission-control/riley-performance", { token, method: "GET" }),
-        apiFetch<CostData>("/api/v1/mission-control/cost-summary", { token, method: "GET" }),
-        apiFetch<AdoptionData>("/api/v1/mission-control/adoption-summary", { token, method: "GET" }),
-        apiFetch<WorkflowData>("/api/v1/mission-control/workflow-health-summary", { token, method: "GET" }),
-        apiFetch<SystemData>("/api/v1/mission-control/system-health-summary", { token, method: "GET" }),
+        apiFetch<OverviewData>(`/api/v1/mission-control/overview${query}`, { token, method: "GET" }),
+        apiFetch<PerformanceData>(`/api/v1/mission-control/riley-performance${query}`, { token, method: "GET" }),
+        apiFetch<CostData>(`/api/v1/mission-control/cost-summary${query}`, { token, method: "GET" }),
+        apiFetch<AdoptionData>(`/api/v1/mission-control/adoption-summary${query}`, { token, method: "GET" }),
+        apiFetch<WorkflowData>(`/api/v1/mission-control/workflow-health-summary${query}`, { token, method: "GET" }),
+        apiFetch<SystemData>(`/api/v1/mission-control/system-health-summary${query}`, { token, method: "GET" }),
       ]);
 
       const denied = settled.some(
@@ -555,18 +679,20 @@ export default function MissionControlPage() {
     } finally {
       setIsLoading(false);
     }
-  }, [getToken, isLoaded]);
+  }, [getToken, isLoaded, timeframe]);
 
   useEffect(() => {
-    if (!isLoaded || hasAutoFetchedRef.current) return;
-    hasAutoFetchedRef.current = true;
+    if (!isLoaded) return;
+    if (!hasAutoFetchedRef.current) {
+      hasAutoFetchedRef.current = true;
+    }
     void fetchMissionControl();
-  }, [fetchMissionControl, isLoaded]);
+  }, [fetchMissionControl, isLoaded, timeframe]);
 
   const topKpis = useMemo(() => {
     return [
       {
-        label: "Active Users (7d)",
+        label: `Active Users (${timeframeLabel})`,
         value: String(overview.active_users_7d),
         icon: Users,
         onClick: () => {
@@ -575,7 +701,7 @@ export default function MissionControlPage() {
         },
       },
       {
-        label: "Active Campaigns (7d)",
+        label: `Active Campaigns (${timeframeLabel})`,
         value: String(overview.active_campaigns_7d),
         icon: Activity,
         onClick: () => {
@@ -586,7 +712,7 @@ export default function MissionControlPage() {
       { label: "Report Success Rate", value: `${overview.report_success_rate}%`, icon: ShieldCheck },
       { label: "Month Est. Cost", value: `$${asNumber(overview.current_month_estimated_cost).toFixed(2)}`, icon: DollarSign },
     ];
-  }, [overview]);
+  }, [overview, timeframeLabel]);
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
@@ -598,6 +724,20 @@ export default function MissionControlPage() {
             <p className="mt-2 text-sm text-slate-600">Executive analytics and platform health for Riley.</p>
           </div>
           <div className="flex items-center gap-3">
+            <div className="rounded-lg border border-slate-300 bg-white p-1">
+              {timeframeOptions.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setTimeframe(option.value)}
+                  className={`rounded px-2 py-1 text-xs font-medium ${
+                    timeframe === option.value ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-100"
+                  }`}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
             <button
               type="button"
               onClick={() => void fetchMissionControl()}
@@ -663,28 +803,29 @@ export default function MissionControlPage() {
               </div>
 
               <div className="rounded-xl border border-slate-100 bg-slate-50 p-5">
+                <p className="mb-3 text-xs font-medium uppercase tracking-wide text-slate-500">Timeframe: {timeframeLabel}</p>
                 {activeTab === "overview" && (
                   <div className="space-y-5">
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                      <Metric label="Chats Today" value={overview.chats_today} />
-                      <Metric label="Reports Today" value={overview.reports_today} />
+                      <Metric label={`Chats (${timeframeLabel})`} value={overview.chats_today} />
+                      <Metric label={`Reports (${timeframeLabel})`} value={overview.reports_today} />
                       <Metric label="Avg Response Latency (ms)" value={overview.avg_response_latency_ms} />
                       <Metric label="Forecast Month-End Cost" value={`$${asNumber(overview.forecast_month_end_cost).toFixed(2)}`} />
                       <Metric label="Pending Access Requests" value={overview.pending_access_requests} />
                       <Metric label="Overdue Deadlines" value={overview.overdue_deadlines} />
-                      <Metric label="Failed Reports (24h)" value={overview.failed_reports_24h} />
+                      <Metric label={`Failed Reports (${timeframeLabel})`} value={overview.failed_reports_24h} />
                     </div>
 
                     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                       <LineChartCard
-                        title="Chats and Reports (30d)"
+                        title={`Chats and Reports (${timeframeLabel})`}
                         series={[
                           { name: "Chats", color: "#0f766e", points: overview.timeseries_30d.map((p) => ({ x: safeDateLabel(p.day), y: p.chats })) },
                           { name: "Reports", color: "#4338ca", points: overview.timeseries_30d.map((p) => ({ x: safeDateLabel(p.day), y: p.reports })) },
                         ]}
                       />
                       <LineChartCard
-                        title="Cost and Failures (30d)"
+                        title={`Cost and Failures (${timeframeLabel})`}
                         series={[
                           { name: "Cost ($)", color: "#b45309", points: overview.timeseries_30d.map((p) => ({ x: safeDateLabel(p.day), y: p.cost })) },
                           { name: "Failures", color: "#b91c1c", points: overview.timeseries_30d.map((p) => ({ x: safeDateLabel(p.day), y: p.failures })) },
@@ -714,7 +855,7 @@ export default function MissionControlPage() {
                           emptyLabel="No campaign drilldown data."
                           columns={["Campaign", "Chats", "Reports", "Cost"]}
                           rows={overview.campaign_usage_7d.map((row) => [
-                            row.campaign_name,
+                            renderCampaignLabel(row.campaign_name, row.campaign_id, row.campaign_secondary),
                             String(row.chats),
                             String(row.reports),
                             `$${asNumber(row.cost).toFixed(2)}`,
@@ -725,7 +866,7 @@ export default function MissionControlPage() {
                           emptyLabel="No user drilldown data."
                           columns={["User", "Chats", "Reports", "Cost"]}
                           rows={overview.user_usage_7d.map((row) => [
-                            row.user_id,
+                            renderUserLabel(asString(row.user_label, row.user_id), row.user_id, row.user_secondary),
                             String(row.chats),
                             String(row.reports),
                             `$${asNumber(row.cost).toFixed(2)}`,
@@ -739,16 +880,16 @@ export default function MissionControlPage() {
                 {activeTab === "performance" && (
                   <div className="space-y-5">
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                      <Metric label="Avg Latency (7d, ms)" value={performance.avg_latency_ms_7d} />
-                      <Metric label="P95 Latency (7d, ms)" value={performance.p95_latency_ms_7d} />
-                      <Metric label="Fallback Successes (7d)" value={performance.provider_fallback_successes_7d} />
-                      <Metric label="Fallback Failures (7d)" value={performance.provider_fallback_failures_7d} />
-                      <Metric label="Fallback Success Rate (7d)" value={`${performance.provider_fallback_success_rate_7d}%`} />
-                      <Metric label="Reranker Failures (7d)" value={performance.reranker_failures_7d} />
+                      <Metric label={`Avg Latency (${timeframeLabel}, ms)`} value={performance.avg_latency_ms_7d} />
+                      <Metric label={`P95 Latency (${timeframeLabel}, ms)`} value={performance.p95_latency_ms_7d} />
+                      <Metric label={`Fallback Successes (${timeframeLabel})`} value={performance.provider_fallback_successes_7d} />
+                      <Metric label={`Fallback Failures (${timeframeLabel})`} value={performance.provider_fallback_failures_7d} />
+                      <Metric label={`Fallback Success Rate (${timeframeLabel})`} value={`${performance.provider_fallback_success_rate_7d}%`} />
+                      <Metric label={`Reranker Failures (${timeframeLabel})`} value={performance.reranker_failures_7d} />
                     </div>
 
                     <LineChartCard
-                      title="Report Success vs Failure Trend (30d)"
+                      title={`Report Success vs Failure Trend (${timeframeLabel})`}
                       series={[
                         {
                           name: "Success",
@@ -772,12 +913,12 @@ export default function MissionControlPage() {
 
                     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                       <div className="rounded-lg border border-slate-200 bg-white p-4">
-                        <p className="mb-2 text-sm font-semibold">Performance by Campaign (7d)</p>
+                        <p className="mb-2 text-sm font-semibold">Performance by Campaign ({timeframeLabel})</p>
                         <SimpleTable
                           emptyLabel="No per-campaign performance data."
                           columns={["Campaign", "Avg Latency", "P95 Latency", "Chats", "Reports"]}
                           rows={performance.campaign_performance_7d.map((row) => [
-                            row.campaign_name,
+                            renderCampaignLabel(row.campaign_name, row.campaign_id, row.campaign_secondary),
                             `${row.avg_latency_ms} ms`,
                             `${row.p95_latency_ms} ms`,
                             String(row.chats),
@@ -811,14 +952,14 @@ export default function MissionControlPage() {
                 {activeTab === "cost" && (
                   <div className="space-y-4">
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-                      <Metric label="Month Estimated Cost" value={`$${asNumber(cost.month_estimated_cost).toFixed(2)}`} />
+                      <Metric label={`Cost (${timeframeLabel})`} value={`$${asNumber(cost.month_estimated_cost).toFixed(2)}`} />
                       <Metric label="Last 7d Estimated Cost" value={`$${asNumber(cost.last_7d_estimated_cost).toFixed(2)}`} />
                       <Metric label="Cost Per Chat" value={`$${asNumber(cost.cost_per_chat).toFixed(4)}`} />
                       <Metric label="Cost Per Report" value={`$${asNumber(cost.cost_per_report).toFixed(4)}`} />
                     </div>
                     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                       <LineChartCard
-                        title="Cost Trend (30d)"
+                        title={`Cost Trend (${timeframeLabel})`}
                         series={[
                           {
                             name: "Cost",
@@ -841,7 +982,7 @@ export default function MissionControlPage() {
                     <div className="rounded-lg border border-slate-200 bg-white p-4">
                       <div className="mb-2 flex items-center gap-2">
                         <BarChart3 className="h-4 w-4 text-slate-500" />
-                        <p className="text-sm font-semibold">Provider Cost Breakdown (30d)</p>
+                        <p className="text-sm font-semibold">Provider Cost Breakdown ({timeframeLabel})</p>
                       </div>
                       {cost.provider_cost_30d?.length ? (
                         <div className="space-y-2">
@@ -858,19 +999,25 @@ export default function MissionControlPage() {
                     </div>
                     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                       <div className="rounded-lg border border-slate-200 bg-white p-4">
-                        <p className="mb-2 text-sm font-semibold">Cost by Campaign (30d)</p>
+                        <p className="mb-2 text-sm font-semibold">Cost by Campaign ({timeframeLabel})</p>
                         <SimpleTable
                           emptyLabel="No campaign cost data."
                           columns={["Campaign", "Cost"]}
-                          rows={cost.cost_by_campaign_30d.map((row) => [row.campaign_name, `$${asNumber(row.cost).toFixed(2)}`])}
+                          rows={cost.cost_by_campaign_30d.map((row) => [
+                            renderCampaignLabel(row.campaign_name, row.campaign_id, row.campaign_secondary),
+                            `$${asNumber(row.cost).toFixed(2)}`,
+                          ])}
                         />
                       </div>
                       <div className="rounded-lg border border-slate-200 bg-white p-4">
-                        <p className="mb-2 text-sm font-semibold">Cost by User (30d)</p>
+                        <p className="mb-2 text-sm font-semibold">Cost by User ({timeframeLabel})</p>
                         <SimpleTable
                           emptyLabel="No user cost data."
                           columns={["User", "Cost"]}
-                          rows={cost.cost_by_user_30d.map((row) => [row.user_id, `$${asNumber(row.cost).toFixed(2)}`])}
+                          rows={cost.cost_by_user_30d.map((row) => [
+                            renderUserLabel(asString(row.user_label, row.user_id), row.user_id, row.user_secondary),
+                            `$${asNumber(row.cost).toFixed(2)}`,
+                          ])}
                         />
                       </div>
                     </div>
@@ -886,15 +1033,18 @@ export default function MissionControlPage() {
                       <Metric label="Ingestion Failures (24h)" value={system.ingestion_failures_24h} />
                     </div>
                     <div className="rounded-lg border border-slate-200 bg-white p-4">
-                      <p className="mb-2 text-sm font-semibold">Recent Failures (7d)</p>
+                      <p className="mb-2 text-sm font-semibold">Recent Failures ({timeframeLabel})</p>
                       <SimpleTable
                         emptyLabel="No recent failures."
-                        columns={["Type", "Timestamp", "Campaign", "Status"]}
+                        columns={["Failure", "Worker", "Campaign", "Object/Job", "Status", "Timestamp", "Detail"]}
                         rows={system.recent_failures.map((row) => [
-                          row.type,
-                          safeDateTime(row.occurred_at),
-                          row.campaign_name || row.campaign_id || "-",
+                          asString(row.failure_label, row.type),
+                          row.worker_name || "-",
+                          renderCampaignLabel(row.campaign_name, row.campaign_id, row.campaign_secondary),
+                          row.object_id || "-",
                           row.status || "-",
+                          safeDateTime(row.occurred_at),
+                          row.detail || "-",
                         ])}
                       />
                     </div>
@@ -912,12 +1062,12 @@ export default function MissionControlPage() {
                       <Metric label="Report Users (30d)" value={adoption.report_users_30d} />
                     </div>
                     <div className="rounded-lg border border-slate-200 bg-white p-4">
-                      <p className="mb-2 text-sm font-semibold">User Activity Drilldown (30d)</p>
+                      <p className="mb-2 text-sm font-semibold">User Activity Drilldown ({timeframeLabel})</p>
                       <SimpleTable
                         emptyLabel="No user activity data."
                         columns={["User", "Events", "Chats", "Reports"]}
                         rows={adoption.user_activity_30d.map((row) => [
-                          row.user_id,
+                          renderUserLabel(asString(row.user_label, row.user_id), row.user_id, row.user_secondary),
                           String(row.events),
                           String(row.chats),
                           String(row.reports),
@@ -931,10 +1081,10 @@ export default function MissionControlPage() {
                   <div className="space-y-3">
                     <p className="text-sm text-slate-600">Workflow health shell is active with core operational indicators.</p>
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                      <Metric label="Access Requests (24h)" value={workflow.access_requests_24h} />
-                      <Metric label="Access Decisions (24h)" value={workflow.access_decisions_24h} />
-                      <Metric label="Deadline Reminders (24h)" value={workflow.deadline_reminders_24h} />
-                      <Metric label="Preview Failures (24h)" value={workflow.preview_failures_24h} />
+                      <Metric label={`Access Requests (${timeframeLabel})`} value={workflow.access_requests_24h} />
+                      <Metric label={`Access Decisions (${timeframeLabel})`} value={workflow.access_decisions_24h} />
+                      <Metric label={`Deadline Reminders (${timeframeLabel})`} value={workflow.deadline_reminders_24h} />
+                      <Metric label={`Preview Failures (${timeframeLabel})`} value={workflow.preview_failures_24h} />
                       <Metric label="Pending Access Requests" value={workflow.pending_access_requests} />
                       <Metric label="Overdue Deadlines" value={workflow.overdue_deadlines} />
                     </div>
@@ -945,8 +1095,8 @@ export default function MissionControlPage() {
                           emptyLabel="No pending access requests."
                           columns={["Campaign", "User", "Created"]}
                           rows={workflow.pending_access_request_list.map((row) => [
-                            row.campaign_name,
-                            row.user_id,
+                            renderCampaignLabel(row.campaign_name, row.campaign_id, row.campaign_secondary),
+                            renderUserLabel(asString(row.user_label, row.user_id), row.user_id, row.user_secondary),
                             safeDateTime(row.created_at),
                           ])}
                         />
@@ -957,7 +1107,7 @@ export default function MissionControlPage() {
                           emptyLabel="No overdue deadlines."
                           columns={["Campaign", "Title", "Due"]}
                           rows={workflow.overdue_deadline_list.map((row) => [
-                            row.campaign_name,
+                            renderCampaignLabel(row.campaign_name, row.campaign_id, row.campaign_secondary),
                             row.title,
                             safeDateTime(row.due_at),
                           ])}
@@ -969,9 +1119,15 @@ export default function MissionControlPage() {
                           emptyLabel="No stale assignments."
                           columns={["Campaign", "Title", "Assignee"]}
                           rows={workflow.stale_assignment_list.map((row) => [
-                            row.campaign_name,
+                            renderCampaignLabel(row.campaign_name, row.campaign_id, row.campaign_secondary),
                             row.title,
-                            row.assigned_user_id || "-",
+                            row.assigned_user_id
+                              ? renderUserLabel(
+                                  asString(row.assigned_user_label, row.assigned_user_id),
+                                  row.assigned_user_id,
+                                  row.assigned_user_secondary
+                                )
+                              : "-",
                           ])}
                         />
                       </div>

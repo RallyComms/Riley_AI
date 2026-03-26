@@ -33,6 +33,8 @@ export function GlobalMenu() {
   const [isProfileSaving, setIsProfileSaving] = useState(false);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [canAccessMissionControl, setCanAccessMissionControl] = useState(false);
+  const [missionControlAccessChecked, setMissionControlAccessChecked] = useState(false);
+  const missionControlRetryCountRef = useRef(0);
   const menuRef = useRef<HTMLDivElement>(null);
   const { signOut } = useClerk();
   const { getToken, isLoaded } = useAuth();
@@ -69,28 +71,63 @@ export function GlobalMenu() {
   }, [getToken, isLoaded]);
 
   useEffect(() => {
+    missionControlRetryCountRef.current = 0;
+    setMissionControlAccessChecked(false);
+  }, [user?.id]);
+
+  useEffect(() => {
+    let cancelled = false;
     const checkMissionControlAccess = async () => {
       if (!isLoaded || !user?.id) {
-        setCanAccessMissionControl(false);
         return;
+      }
+      if (missionControlAccessChecked) {
+        return;
+      }
+      const cacheKey = `mission-control-access:${user.id}`;
+      if (typeof window !== "undefined") {
+        const cachedValue = window.sessionStorage.getItem(cacheKey);
+        if (cachedValue === "true") {
+          setCanAccessMissionControl(true);
+        } else if (cachedValue === "false") {
+          setCanAccessMissionControl(false);
+        }
       }
       try {
         const token = await getToken();
         if (!token) {
-          setCanAccessMissionControl(false);
           return;
         }
-        await apiFetch("/api/v1/mission-control/overview", {
+        const result = await apiFetch<{ allowed?: boolean }>("/api/v1/mission-control/access", {
           token,
           method: "GET",
         });
-        setCanAccessMissionControl(true);
+        if (cancelled) return;
+        const allowed = Boolean(result?.allowed);
+        setCanAccessMissionControl(allowed);
+        setMissionControlAccessChecked(true);
+        missionControlRetryCountRef.current = 0;
+        if (typeof window !== "undefined") {
+          window.sessionStorage.setItem(cacheKey, allowed ? "true" : "false");
+        }
       } catch {
-        setCanAccessMissionControl(false);
+        // Keep previous state to avoid hiding Mission Control on transient failures.
+        // Retry a few times while auth/network settles.
+        if (!cancelled && missionControlRetryCountRef.current < 3) {
+          missionControlRetryCountRef.current += 1;
+          window.setTimeout(() => {
+            if (!cancelled) {
+              void checkMissionControlAccess();
+            }
+          }, 1200);
+        }
       }
     };
     void checkMissionControlAccess();
-  }, [getToken, isLoaded, user?.id]);
+    return () => {
+      cancelled = true;
+    };
+  }, [getToken, isLoaded, missionControlAccessChecked, user?.id]);
 
   const handleSetStatus = async (nextStatus: "active" | "away" | "in_meeting") => {
     try {
