@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from neo4j import AsyncGraphDatabase
@@ -200,30 +200,40 @@ class GraphService:
         async with self._driver.session() as session:
             campaign_query = """
             MATCH (e:AnalyticsEvent)
-            WHERE date(datetime(e.occurred_at)) >= date() - duration({days: $days_back})
+            WHERE e.occurred_at >= $start_iso
             WITH
                 date(datetime(e.occurred_at)) as event_date,
                 coalesce(e.campaign_id, "unknown_campaign") as campaign_id,
                 count(e) as event_count,
                 count(DISTINCT coalesce(e.user_id, e.actor_user_id, "")) as active_users,
-                coalesce(sum(e.cost_estimate_usd), 0.0) as total_cost_estimate_usd
+                coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as total_cost_estimate_usd,
+                sum(CASE WHEN (e.feature_area = "chat" OR e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]) THEN 1 ELSE 0 END) as chat_events,
+                sum(CASE WHEN e.source_entity = "RileyReportJob" AND e.object_id IS NOT NULL THEN 1 ELSE 0 END) as report_events,
+                coalesce(sum(CASE WHEN e.latency_ms IS NOT NULL THEN toFloat(e.latency_ms) ELSE 0.0 END), 0.0) as latency_sum_ms,
+                sum(CASE WHEN e.latency_ms IS NOT NULL THEN 1 ELSE 0 END) as latency_count
             MERGE (r:AnalyticsDailyCampaignRollup {event_date: toString(event_date), campaign_id: campaign_id})
             SET
                 r.event_count = event_count,
                 r.active_users = active_users,
                 r.total_cost_estimate_usd = total_cost_estimate_usd,
+                r.chat_events = chat_events,
+                r.report_events = report_events,
+                r.latency_sum_ms = latency_sum_ms,
+                r.latency_count = latency_count,
                 r.updated_at = datetime()
             RETURN count(r) as count_rows
             """
             user_query = """
             MATCH (e:AnalyticsEvent)
-            WHERE date(datetime(e.occurred_at)) >= date() - duration({days: $days_back})
+            WHERE e.occurred_at >= $start_iso
             WITH
                 date(datetime(e.occurred_at)) as event_date,
                 coalesce(e.campaign_id, "unknown_campaign") as campaign_id,
                 coalesce(e.user_id, e.actor_user_id, "unknown_user") as user_id,
                 count(e) as event_count,
-                coalesce(sum(e.cost_estimate_usd), 0.0) as total_cost_estimate_usd
+                coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as total_cost_estimate_usd,
+                sum(CASE WHEN (e.feature_area = "chat" OR e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]) THEN 1 ELSE 0 END) as chat_events,
+                sum(CASE WHEN e.source_entity = "RileyReportJob" AND e.object_id IS NOT NULL THEN 1 ELSE 0 END) as report_events
             MERGE (r:AnalyticsDailyUserRollup {
                 event_date: toString(event_date),
                 campaign_id: campaign_id,
@@ -232,40 +242,61 @@ class GraphService:
             SET
                 r.event_count = event_count,
                 r.total_cost_estimate_usd = total_cost_estimate_usd,
+                r.chat_events = chat_events,
+                r.report_events = report_events,
                 r.updated_at = datetime()
             RETURN count(r) as count_rows
             """
             system_query = """
             MATCH (e:AnalyticsEvent)
-            WHERE date(datetime(e.occurred_at)) >= date() - duration({days: $days_back})
+            WHERE e.occurred_at >= $start_iso
             WITH
                 date(datetime(e.occurred_at)) as event_date,
                 count(e) as event_count,
                 count(DISTINCT coalesce(e.campaign_id, "unknown_campaign")) as active_campaigns,
                 count(DISTINCT coalesce(e.user_id, e.actor_user_id, "unknown_user")) as active_users,
-                coalesce(sum(e.cost_estimate_usd), 0.0) as total_cost_estimate_usd,
-                avg(toFloat(e.latency_ms)) as avg_latency_ms
+                coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as total_cost_estimate_usd,
+                coalesce(sum(CASE WHEN e.latency_ms IS NOT NULL THEN toFloat(e.latency_ms) ELSE 0.0 END), 0.0) as latency_sum_ms,
+                sum(CASE WHEN e.latency_ms IS NOT NULL THEN 1 ELSE 0 END) as latency_count,
+                sum(CASE WHEN e.source_event_type_raw = "report_provider_fallback_triggered" THEN 1 ELSE 0 END) as provider_fallback_triggered,
+                sum(CASE WHEN e.source_event_type_raw = "report_provider_fallback_succeeded" THEN 1 ELSE 0 END) as provider_fallback_successes,
+                sum(CASE WHEN e.source_event_type_raw = "report_provider_fallback_failed" THEN 1 ELSE 0 END) as provider_fallback_failures,
+                sum(CASE WHEN e.source_event_type_raw = "reranker_failed" THEN 1 ELSE 0 END) as reranker_failures,
+                sum(CASE WHEN e.source_entity = "RileyReportJob" AND e.status = "complete" AND e.object_id IS NOT NULL THEN 1 ELSE 0 END) as report_successes,
+                sum(CASE WHEN e.source_entity = "RileyReportJob" AND e.status = "failed" AND e.object_id IS NOT NULL THEN 1 ELSE 0 END) as report_failures
             MERGE (r:AnalyticsDailySystemRollup {event_date: toString(event_date)})
             SET
                 r.event_count = event_count,
                 r.active_campaigns = active_campaigns,
                 r.active_users = active_users,
                 r.total_cost_estimate_usd = total_cost_estimate_usd,
-                r.avg_latency_ms = avg_latency_ms,
+                r.latency_sum_ms = latency_sum_ms,
+                r.latency_count = latency_count,
+                r.provider_fallback_triggered = provider_fallback_triggered,
+                r.provider_fallback_successes = provider_fallback_successes,
+                r.provider_fallback_failures = provider_fallback_failures,
+                r.reranker_failures = reranker_failures,
+                r.report_successes = report_successes,
+                r.report_failures = report_failures,
+                r.avg_latency_ms = CASE WHEN latency_count = 0 THEN 0.0 ELSE latency_sum_ms / toFloat(latency_count) END,
                 r.updated_at = datetime()
             RETURN count(r) as count_rows
             """
             provider_query = """
             MATCH (e:AnalyticsEvent)
-            WHERE date(datetime(e.occurred_at)) >= date() - duration({days: $days_back})
+            WHERE e.occurred_at >= $start_iso
               AND e.provider IS NOT NULL
             WITH
                 date(datetime(e.occurred_at)) as event_date,
                 coalesce(e.provider, "unknown_provider") as provider,
                 coalesce(e.model, "unknown_model") as model,
                 count(e) as event_count,
-                coalesce(sum(e.cost_estimate_usd), 0.0) as total_cost_estimate_usd,
-                avg(toFloat(e.latency_ms)) as avg_latency_ms
+                coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as total_cost_estimate_usd,
+                coalesce(sum(CASE WHEN e.latency_ms IS NOT NULL THEN toFloat(e.latency_ms) ELSE 0.0 END), 0.0) as latency_sum_ms,
+                sum(CASE WHEN e.latency_ms IS NOT NULL THEN 1 ELSE 0 END) as latency_count,
+                sum(CASE WHEN e.source_event_type_raw = "report_provider_fallback_triggered" THEN 1 ELSE 0 END) as fallback_triggered,
+                sum(CASE WHEN e.source_event_type_raw = "report_provider_fallback_succeeded" THEN 1 ELSE 0 END) as fallback_succeeded,
+                sum(CASE WHEN e.source_event_type_raw = "report_provider_fallback_failed" THEN 1 ELSE 0 END) as fallback_failed
             MERGE (r:AnalyticsDailyProviderRollup {
                 event_date: toString(event_date),
                 provider: provider,
@@ -274,14 +305,20 @@ class GraphService:
             SET
                 r.event_count = event_count,
                 r.total_cost_estimate_usd = total_cost_estimate_usd,
-                r.avg_latency_ms = avg_latency_ms,
+                r.latency_sum_ms = latency_sum_ms,
+                r.latency_count = latency_count,
+                r.fallback_triggered = fallback_triggered,
+                r.fallback_succeeded = fallback_succeeded,
+                r.fallback_failed = fallback_failed,
+                r.avg_latency_ms = CASE WHEN latency_count = 0 THEN 0.0 ELSE latency_sum_ms / toFloat(latency_count) END,
                 r.updated_at = datetime()
             RETURN count(r) as count_rows
             """
-            campaign_rows = int((await (await session.run(campaign_query, days_back=days_back)).single() or {}).get("count_rows") or 0)
-            user_rows = int((await (await session.run(user_query, days_back=days_back)).single() or {}).get("count_rows") or 0)
-            system_rows = int((await (await session.run(system_query, days_back=days_back)).single() or {}).get("count_rows") or 0)
-            provider_rows = int((await (await session.run(provider_query, days_back=days_back)).single() or {}).get("count_rows") or 0)
+            start_iso = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days_back)))).isoformat()
+            campaign_rows = int((await (await session.run(campaign_query, start_iso=start_iso)).single() or {}).get("count_rows") or 0)
+            user_rows = int((await (await session.run(user_query, start_iso=start_iso)).single() or {}).get("count_rows") or 0)
+            system_rows = int((await (await session.run(system_query, start_iso=start_iso)).single() or {}).get("count_rows") or 0)
+            provider_rows = int((await (await session.run(provider_query, start_iso=start_iso)).single() or {}).get("count_rows") or 0)
             return {
                 "campaign_rollups": campaign_rows,
                 "user_rollups": user_rows,

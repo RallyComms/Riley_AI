@@ -148,6 +148,10 @@ class Settings(BaseSettings):
     # Mission Control admin allowlists (comma-separated values).
     MISSION_CONTROL_ADMIN_USER_IDS: Optional[str] = None
     MISSION_CONTROL_ADMIN_EMAILS: Optional[str] = None
+    # Mission Control rollup refresh hook (request-triggered, throttled).
+    MISSION_CONTROL_ROLLUP_AUTO_REFRESH_ENABLED: bool = True
+    MISSION_CONTROL_ROLLUP_REFRESH_MINUTES: int = 15
+    MISSION_CONTROL_ROLLUP_DAYS_BACK: int = 35
 
     model_config = SettingsConfigDict(
         env_file=".env",
