@@ -955,21 +955,6 @@ export default function MissionControlPage() {
                       <Metric label="Projected Month-End Cost" value={`$${asNumber(cost.projected_month_end_cost).toFixed(2)}`} />
                       <Metric label={`Selected Window Cost (${timeframeLabel})`} value={`$${asNumber(cost.selected_window_cost ?? cost.month_estimated_cost).toFixed(2)}`} />
                     </div>
-                    <div className="rounded-lg border border-slate-200 bg-white p-4">
-                      <p className="text-sm text-slate-700">
-                        Projection math: <span className="font-semibold">${asNumber(cost.current_month_cost ?? cost.month_estimated_cost).toFixed(2)}</span> MTD /
-                        {" "}
-                        <span className="font-semibold">{Math.max(1, asNumber(cost.current_month_days_elapsed))}</span> elapsed days
-                        {" "}=
-                        {" "}
-                        <span className="font-semibold">${asNumber(cost.average_daily_burn_rate).toFixed(2)}</span>/day,
-                        projected across{" "}
-                        <span className="font-semibold">{Math.max(1, asNumber(cost.current_month_total_days))}</span> days
-                        {" "}=
-                        {" "}
-                        <span className="font-semibold">${asNumber(cost.projected_month_end_cost).toFixed(2)}</span>.
-                      </p>
-                    </div>
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                       <Metric label="Last 7d Estimated Cost" value={`$${asNumber(cost.last_7d_estimated_cost).toFixed(2)}`} />
                       <Metric label="Cost Per Chat" value={`$${asNumber(cost.cost_per_chat).toFixed(4)}`} />
