@@ -38,6 +38,7 @@ interface ApiFetchOptions {
   method?: string;
   body?: any | FormData;
   headers?: Record<string, string>;
+  signal?: AbortSignal;
 }
 
 export class ApiRequestError extends Error {
@@ -66,7 +67,7 @@ export async function apiFetch<T = any>(
   path: string,
   options: ApiFetchOptions = {}
 ): Promise<T> {
-  const { token, method = "GET", body, headers = {} } = options;
+  const { token, method = "GET", body, headers = {}, signal } = options;
   
   // Require token for /api/v1/* endpoints
   if (path.startsWith("/api/v1/") && !token) {
@@ -96,6 +97,7 @@ export async function apiFetch<T = any>(
   const requestOptions: RequestInit = {
     method,
     headers: requestHeaders,
+    signal,
   };
   
   // Add body for non-GET requests
