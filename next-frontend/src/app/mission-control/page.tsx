@@ -580,32 +580,12 @@ function safeDateTime(value: string): string {
   return d.toLocaleString();
 }
 
-function withSecondary(primary: string, secondary?: string): string {
-  const main = asString(primary, "-");
-  const detail = asString(secondary, "");
-  if (!detail) return main;
-  return `${main} (${detail})`;
+function renderCampaignLabel(name: string, _campaignId: string, _secondary?: string): string {
+  return asString(name, "Unresolved Campaign");
 }
 
-function renderCampaignLabel(name: string, campaignId: string, secondary?: string): string {
-  const fallbackName = asString(name, "Unresolved Campaign");
-  const detail = asString(secondary, "");
-  if (detail) {
-    return withSecondary(fallbackName, detail);
-  }
-  const id = asString(campaignId, "");
-  if (id && id !== fallbackName && id.toLowerCase() !== "unknown_campaign") {
-    return withSecondary(fallbackName, id);
-  }
-  return fallbackName;
-}
-
-function renderUserLabel(userLabel: string, userId: string, secondary?: string): string {
-  const label = asString(userLabel, asString(userId, "unknown_user"));
-  const detail = asString(secondary, "");
-  if (detail) return withSecondary(label, detail);
-  if (label !== userId) return withSecondary(label, userId);
-  return label;
+function renderUserLabel(userLabel: string, userId: string, _secondary?: string): string {
+  return asString(userLabel, asString(userId, "unknown_user"));
 }
 
 export default function MissionControlPage() {
