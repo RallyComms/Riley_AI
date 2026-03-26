@@ -82,6 +82,12 @@ type CostData = {
   timeframe?: MissionControlTimeframe;
   timeframe_label?: string;
   month_estimated_cost: number;
+  selected_window_cost?: number;
+  current_month_cost?: number;
+  average_daily_burn_rate?: number;
+  projected_month_end_cost?: number;
+  current_month_days_elapsed?: number;
+  current_month_total_days?: number;
   last_7d_estimated_cost: number;
   provider_cost_30d: Array<{ provider: string; cost: number }>;
   cost_per_chat: number;
@@ -223,6 +229,12 @@ const defaultPerformance: PerformanceData = {
 
 const defaultCost: CostData = {
   month_estimated_cost: 0,
+  selected_window_cost: 0,
+  current_month_cost: 0,
+  average_daily_burn_rate: 0,
+  projected_month_end_cost: 0,
+  current_month_days_elapsed: 0,
+  current_month_total_days: 0,
   last_7d_estimated_cost: 0,
   provider_cost_30d: [],
   cost_per_chat: 0,
@@ -410,6 +422,12 @@ function normalizeCost(raw: unknown): CostData {
     timeframe: asString(src.timeframe, "30d") as MissionControlTimeframe,
     timeframe_label: asString(src.timeframe_label, ""),
     month_estimated_cost: asNumber(src.month_estimated_cost),
+    selected_window_cost: asNumber(src.selected_window_cost),
+    current_month_cost: asNumber(src.current_month_cost),
+    average_daily_burn_rate: asNumber(src.average_daily_burn_rate),
+    projected_month_end_cost: asNumber(src.projected_month_end_cost),
+    current_month_days_elapsed: asNumber(src.current_month_days_elapsed),
+    current_month_total_days: asNumber(src.current_month_total_days),
     last_7d_estimated_cost: asNumber(src.last_7d_estimated_cost),
     provider_cost_30d: rows.map((row, idx) => {
       const item = (row && typeof row === "object" ? row : {}) as Record<string, unknown>;
@@ -932,7 +950,27 @@ export default function MissionControlPage() {
                 {activeTab === "cost" && (
                   <div className="space-y-4">
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
-                      <Metric label={`Cost (${timeframeLabel})`} value={`$${asNumber(cost.month_estimated_cost).toFixed(2)}`} />
+                      <Metric label="Current Month Cost (MTD)" value={`$${asNumber(cost.current_month_cost ?? cost.month_estimated_cost).toFixed(2)}`} />
+                      <Metric label="Average Daily Burn Rate" value={`$${asNumber(cost.average_daily_burn_rate).toFixed(2)} / day`} />
+                      <Metric label="Projected Month-End Cost" value={`$${asNumber(cost.projected_month_end_cost).toFixed(2)}`} />
+                      <Metric label={`Selected Window Cost (${timeframeLabel})`} value={`$${asNumber(cost.selected_window_cost ?? cost.month_estimated_cost).toFixed(2)}`} />
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                      <p className="text-sm text-slate-700">
+                        Projection math: <span className="font-semibold">${asNumber(cost.current_month_cost ?? cost.month_estimated_cost).toFixed(2)}</span> MTD /
+                        {" "}
+                        <span className="font-semibold">{Math.max(1, asNumber(cost.current_month_days_elapsed))}</span> elapsed days
+                        {" "}=
+                        {" "}
+                        <span className="font-semibold">${asNumber(cost.average_daily_burn_rate).toFixed(2)}</span>/day,
+                        projected across{" "}
+                        <span className="font-semibold">{Math.max(1, asNumber(cost.current_month_total_days))}</span> days
+                        {" "}=
+                        {" "}
+                        <span className="font-semibold">${asNumber(cost.projected_month_end_cost).toFixed(2)}</span>.
+                      </p>
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                       <Metric label="Last 7d Estimated Cost" value={`$${asNumber(cost.last_7d_estimated_cost).toFixed(2)}`} />
                       <Metric label="Cost Per Chat" value={`$${asNumber(cost.cost_per_chat).toFixed(4)}`} />
                       <Metric label="Cost Per Report" value={`$${asNumber(cost.cost_per_report).toFixed(4)}`} />

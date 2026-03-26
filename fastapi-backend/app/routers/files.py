@@ -14,7 +14,13 @@ from app.services.ocr import run_ocr, is_image_ext
 from app.services.graph import GraphService
 from app.services.pricing_registry import estimate_single_unit_cost, estimate_storage_cost
 from app.services.qdrant import vector_service
-from app.services.ingestion import process_upload, delete_file, untag_file, _generate_embedding
+from app.services.ingestion import (
+    process_upload,
+    delete_file,
+    untag_file,
+    _generate_embedding,
+    reindex_existing_file,
+)
 from app.services.storage import StorageService
 from qdrant_client.http.models import PointStruct
 
@@ -1480,20 +1486,29 @@ async def toggle_ai_enabled(
     Returns:
         DeleteResponse with status and message
     """
-    settings = get_settings()
-    
     try:
-        # Verify file exists in Tier 2
-        await _get_file_point_for_tenant(
+        # Verify file exists in tenant/global scope and load current payload.
+        _, payload, resolved_collection = await _get_file_point_for_tenant(
             file_id=file_id,
             tenant_id=tenant_id,
-            collection_name=settings.QDRANT_COLLECTION_TIER_2,
         )
-        
+
+        current_status = str(payload.get("ingestion_status") or "uploaded").strip().lower()
+        payload_update: Dict[str, Any] = {"ai_enabled": request.ai_enabled}
+        if not request.ai_enabled and current_status in {"queued", "processing", "uploaded"}:
+            payload_update.update(
+                {
+                    "ingestion_status": "uploaded",
+                    "ingestion_job_status": "cancelled",
+                    "ingestion_job_completed_at": datetime.now().isoformat(),
+                    "ingestion_job_error_message": "Riley Memory disabled before ingestion completed.",
+                }
+            )
+
         # Update ai_enabled flag in Qdrant payload
         await vector_service.client.set_payload(
-            collection_name=settings.QDRANT_COLLECTION_TIER_2,
-            payload={"ai_enabled": request.ai_enabled},
+            collection_name=resolved_collection,
+            payload=payload_update,
             points=[file_id]
         )
 
@@ -1512,7 +1527,7 @@ async def toggle_ai_enabled(
         )
         try:
             chunk_points, _ = await vector_service.client.scroll(
-                collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                collection_name=resolved_collection,
                 scroll_filter=chunk_filter,
                 limit=1000,
                 with_payload=False,
@@ -1531,7 +1546,7 @@ async def toggle_ai_enabled(
                 ]
             )
             points_with_payload, _ = await vector_service.client.scroll(
-                collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                collection_name=resolved_collection,
                 scroll_filter=fallback_filter,
                 limit=1000,
                 with_payload=True,
@@ -1543,11 +1558,21 @@ async def toggle_ai_enabled(
             ]
         if chunk_points:
             await vector_service.client.set_payload(
-                collection_name=settings.QDRANT_COLLECTION_TIER_2,
+                collection_name=resolved_collection,
                 payload={"ai_enabled": request.ai_enabled},
                 points=[str(point.id) for point in chunk_points],
             )
-        
+
+        # Turning Riley Memory ON is the explicit ingestion trigger.
+        if request.ai_enabled:
+            status_now = str(payload.get("ingestion_status") or "uploaded").strip().lower()
+            chunk_count = int(payload.get("chunk_count") or 0)
+            should_start_ingestion = status_now not in {"queued", "processing"} and (
+                chunk_count <= 0 or status_now in {"uploaded", "failed", "low_text", "ocr_needed"}
+            )
+            if should_start_ingestion:
+                await reindex_existing_file(file_id=file_id, collection_name=resolved_collection)
+
         status_text = "enabled" if request.ai_enabled else "disabled"
         return DeleteResponse(
             status="success",
@@ -1573,7 +1598,7 @@ class OCRResponse(BaseModel):
 
 # SINGLE SOURCE OF TRUTH: Only ONE OCR endpoint exists in the codebase
 # This endpoint handles: cache check, queued status, GCS download, OCR execution,
-# payload merge, ai_enabled=True auto-flip, vector embedding update, and upsert.
+# payload merge, preserves ai_enabled toggle state, vector embedding update, and upsert.
 @router.post("/files/{file_id}/ocr", response_model=OCRResponse)
 async def request_ocr(
     file_id: str,
@@ -1595,7 +1620,7 @@ async def request_ocr(
     5. Runs OCR extraction
     6. On success:
        - Merges OCR fields into existing payload (preserves all existing fields)
-       - Sets ai_enabled=True automatically
+       - Preserves existing ai_enabled value (does not auto-enable Riley Memory)
        - Generates new embedding from OCR text (truncated to 9000 chars)
        - Upserts PointStruct with NEW vector and MERGED payload
     7. On failure: Sets ocr_status="failed" and stores error
@@ -1702,8 +1727,8 @@ async def request_ocr(
                 "ocr_language": ocr_result["language"],
                 "ocr_extracted_at": ocr_extracted_at,
                 "ocr_error": None,
-                # Automatically enable AI Memory after successful OCR
-                "ai_enabled": True,
+                # Preserve Riley Memory toggle state; OCR should not auto-enable retrieval.
+                "ai_enabled": bool(payload.get("ai_enabled", False)),
                 # Update content_preview to show OCR text preview
                 "content_preview": ocr_result["text"][:1000],
             })

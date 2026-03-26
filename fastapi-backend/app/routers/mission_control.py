@@ -568,6 +568,16 @@ async def mission_control_cost_summary(
     graph: GraphService = Depends(get_graph),
 ) -> Dict[str, Any]:
     window = _resolve_timeframe(timeframe)
+    month_to_date_cost = await _single_value(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE e.cost_estimate_usd IS NOT NULL
+          AND date(datetime(e.occurred_at)).year = date().year
+          AND date(datetime(e.occurred_at)).month = date().month
+        RETURN coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as value
+        """,
+    )
     totals = await _single_value(
         graph,
         """
@@ -687,22 +697,31 @@ async def mission_control_cost_summary(
         """,
         window_hours=window["window_hours"],
     )
-    month_cost = round(float(totals.get("window_cost") or 0.0), 2)
+    window_cost = round(float(totals.get("window_cost") or 0.0), 2)
+    current_month_cost = round(float(month_to_date_cost.get("value") or 0.0), 2)
     chats_30d = int(chat_count_30d.get("value") or 0)
     reports_30d = int(report_count_30d.get("value") or 0)
-    cost_per_chat = round(month_cost / float(chats_30d), 6) if chats_30d else 0.0
-    cost_per_report = round(month_cost / float(reports_30d), 6) if reports_30d else 0.0
+    cost_per_chat = round(window_cost / float(chats_30d), 6) if chats_30d else 0.0
+    cost_per_report = round(window_cost / float(reports_30d), 6) if reports_30d else 0.0
     now = datetime.now(timezone.utc)
     days_in_month = monthrange(now.year, now.month)[1]
     month_elapsed_days = max(1, now.day)
+    daily_burn_rate = round(current_month_cost / float(month_elapsed_days), 4)
+    projected_month_end_cost = round(daily_burn_rate * float(days_in_month), 2)
     projected_curve = []
     for day in range(1, days_in_month + 1):
-        projected_value = (month_cost / float(month_elapsed_days)) * float(day)
+        projected_value = daily_burn_rate * float(day)
         projected_curve.append({"day": day, "projected_cost": round(projected_value, 2)})
     return {
         "timeframe": window["timeframe"],
         "timeframe_label": window["label"],
-        "month_estimated_cost": month_cost,
+        "month_estimated_cost": current_month_cost,
+        "selected_window_cost": window_cost,
+        "current_month_cost": current_month_cost,
+        "average_daily_burn_rate": daily_burn_rate,
+        "projected_month_end_cost": projected_month_end_cost,
+        "current_month_days_elapsed": month_elapsed_days,
+        "current_month_total_days": days_in_month,
         "last_7d_estimated_cost": round(float(totals.get("last_7d_cost") or 0.0), 2),
         "cost_confidence_breakdown_30d": {
             "exact_usage": round(float(totals.get("exact_usage_cost_30d") or 0.0), 4),

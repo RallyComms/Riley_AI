@@ -27,7 +27,7 @@ type UploadStatusItem = {
 
 // Helper function to determine if file type supports AI processing
 function isAISupportedType(type: Asset["type"]): boolean {
-  return type === "pdf" || type === "docx";
+  return type === "pdf" || type === "docx" || type === "xlsx" || type === "pptx" || type === "img";
 }
 
 // Mock initial data with new fields - using valid public URLs for testing
@@ -218,7 +218,7 @@ export default function CampaignAssetsPage() {
           assignedTo: [],
           comments: 0,
           status: "ready",
-          aiEnabled: isAISupportedType(effectiveType),
+          aiEnabled: isAISupportedType(effectiveType) ? Boolean(file.ai_enabled) : false,
         };
       });
       
@@ -355,7 +355,7 @@ export default function CampaignAssetsPage() {
           setUploadStatuses((prev) =>
             prev.map((item) =>
               item.fileName === file.name
-                ? { ...item, status: "queued", message: "Indexing queued" }
+              ? { ...item, status: "queued", message: "Uploaded (Riley Memory off by default)" }
                 : item
             )
           );
@@ -371,7 +371,7 @@ export default function CampaignAssetsPage() {
               setUploadStatuses((prev) =>
                 prev.map((item) =>
                   item.fileName === file.name
-                    ? { ...item, status: "queued", message: "Indexing queued" }
+                    ? { ...item, status: "queued", message: "Uploaded (Riley Memory off by default)" }
                     : item
                 )
               );
@@ -401,12 +401,10 @@ export default function CampaignAssetsPage() {
       // This ensures the UI sees the latest preview state without waiting
       await fetchFiles();
       if (successfulUploads.length > 0) {
-        setRecentUploadedNames((prev) => {
-          const merged = new Set([...prev, ...successfulUploads.map((name) => normalizeFilename(name))]);
-          return Array.from(merged);
-        });
+        setRecentUploadedNames([]);
+        stopUploadStatusPolling();
       }
-      showToast("success", `Queued indexing for ${selectedFiles.length} file(s).`);
+      showToast("success", `Uploaded ${selectedFiles.length} file(s). Riley Memory is off by default.`);
     } catch (error) {
       console.error("Upload error:", error);
       showToast("error", `Upload failed: ${error instanceof Error ? error.message : "Unknown error"}`);
@@ -514,12 +512,33 @@ export default function CampaignAssetsPage() {
     }
   };
 
-  const handleAIEnabledChange = (assetId: string, enabled: boolean) => {
+  const handleAIEnabledChange = async (assetId: string, enabled: boolean) => {
+    // Optimistic update.
     setAssets((prev) =>
-      prev.map((asset) =>
-        asset.id === assetId ? { ...asset, aiEnabled: enabled } : asset
-      )
+      prev.map((asset) => (asset.id === assetId ? { ...asset, aiEnabled: enabled } : asset))
     );
+    try {
+      const token = await getToken();
+      if (!token) throw new Error("Authentication required");
+      await apiFetch(`/api/v1/files/${assetId}/ai_enabled?tenant_id=${encodeURIComponent(campaignId)}`, {
+        token,
+        method: "PATCH",
+        body: { ai_enabled: enabled },
+      });
+      await fetchFiles();
+      showToast(
+        "success",
+        enabled
+          ? "Riley Memory enabled. Ingestion has started for this asset."
+          : "Riley Memory disabled. Riley will exclude this asset going forward."
+      );
+    } catch (error) {
+      // Revert optimistic state.
+      setAssets((prev) =>
+        prev.map((asset) => (asset.id === assetId ? { ...asset, aiEnabled: !enabled } : asset))
+      );
+      showToast("error", error instanceof Error ? error.message : "Failed to update Riley Memory setting.");
+    }
   };
 
   const handleAssetClick = (asset: Asset) => {

@@ -1404,10 +1404,36 @@ async def _run_ingestion_pipeline(
     preview_type: Optional[str],
     preview_status: str,
     preview_error: Optional[str],
+    initial_ai_enabled: bool,
 ) -> None:
     """Async extraction -> quality gate -> chunk embedding pipeline."""
     settings = get_settings()
+    ai_enabled_for_retrieval = bool(initial_ai_enabled)
     started = time.perf_counter()
+
+    async def _abort_if_ai_disabled(stage: str) -> bool:
+        latest_points = await vector_service.client.retrieve(
+            collection_name=collection_name,
+            ids=[point_id],
+            with_payload=True,
+            with_vectors=False,
+        )
+        latest_payload = latest_points[0].payload if latest_points else {}
+        if bool((latest_payload or {}).get("ai_enabled", False)):
+            return False
+        now_iso = datetime.now().isoformat()
+        current_status = str((latest_payload or {}).get("ingestion_status") or "uploaded").strip().lower()
+        await vector_service.client.set_payload(
+            collection_name=collection_name,
+            payload={
+                "ingestion_status": "uploaded" if current_status in {"queued", "processing", "uploaded"} else current_status,
+                "ingestion_job_status": "cancelled" if job_id else None,
+                "ingestion_job_completed_at": now_iso if job_id else None,
+                "ingestion_job_error_message": f"Skipped during {stage}: Riley Memory disabled." if job_id else None,
+            },
+            points=[point_id],
+        )
+        return True
 
     try:
         started_at = datetime.now().isoformat()
@@ -1434,6 +1460,9 @@ async def _run_ingestion_pipeline(
             points=[point_id],
         )
 
+        if await _abort_if_ai_disabled("pre_extract"):
+            return
+
         raw_text = await extract_text(file_bytes, filename)
         structured_segments = await _extract_structured_segments(file_bytes, filename, raw_text)
         merged_cleaned_text, prepared_segments = _prepare_segments_for_chunking(structured_segments)
@@ -1446,6 +1475,9 @@ async def _run_ingestion_pipeline(
         ocr_text_present = False
         ocr_confidence: Optional[float] = None
         multimodal_status = "native_only"
+
+        if await _abort_if_ai_disabled("pre_ocr"):
+            return
 
         if settings.OCR_ENABLED_SYSTEMWIDE and _ocr_required_for_file(
             file_type=file_type,
@@ -1739,6 +1771,18 @@ async def _run_ingestion_pipeline(
             )
             return
 
+        latest_parent_points = await vector_service.client.retrieve(
+            collection_name=collection_name,
+            ids=[point_id],
+            with_payload=True,
+            with_vectors=False,
+        )
+        if latest_parent_points:
+            latest_parent_payload = latest_parent_points[0].payload or {}
+            ai_enabled_for_retrieval = bool(latest_parent_payload.get("ai_enabled", ai_enabled_for_retrieval))
+        if await _abort_if_ai_disabled("pre_chunking"):
+            return
+
         micro_chunks = _chunk_text_with_offsets(
             cleaned_text,
             chunk_size_tokens=MICRO_CHUNK_SIZE_TOKENS,
@@ -1759,8 +1803,12 @@ async def _run_ingestion_pipeline(
         chunk_rows: List[Dict[str, Any]] = []
         total_tokens = 0
         bm25_available = await vector_service.bm25_enabled_for_collection(collection_name)
+        chunk_processed_count = 0
         for chunk_type, chunk_list in (("micro", micro_chunks), ("macro", macro_chunks)):
             for chunk_idx, chunk in enumerate(chunk_list):
+                if chunk_processed_count % 5 == 0:
+                    if await _abort_if_ai_disabled("chunk_embedding"):
+                        return
                 chunk_text = str(chunk.get("text") or "").strip()
                 if not chunk_text:
                     continue
@@ -1782,6 +1830,7 @@ async def _run_ingestion_pipeline(
                 vector = await _generate_embedding(merged_chunk_text)
                 token_estimate = _estimate_tokens(merged_chunk_text)
                 total_tokens += token_estimate
+                chunk_processed_count += 1
                 point_uuid = _chunk_point_uuid(point_id, chunk_type, chunk_idx)
                 chunk_id = f"{point_id}::chunk::{chunk_type}::{chunk_idx}"
                 chunk_payload: Dict[str, Any] = {
@@ -1798,7 +1847,7 @@ async def _run_ingestion_pipeline(
                     "tenant_id": tenant_id,
                     "url": file_url,
                     "tags": tags,
-                    "ai_enabled": True,
+                    "ai_enabled": ai_enabled_for_retrieval,
                     "ingestion_status": quality_status,
                     "text": merged_chunk_text,
                     "content": merged_chunk_text,
@@ -1861,6 +1910,9 @@ async def _run_ingestion_pipeline(
                     )
                 )
             return points
+
+        if await _abort_if_ai_disabled("pre_chunk_persist"):
+            return
 
         if bm25_available:
             try:
@@ -1942,7 +1994,7 @@ async def _run_ingestion_pipeline(
             "preview_type": preview_type,
             "preview_status": preview_status,
             "preview_error": preview_error,
-            "ai_enabled": True,
+            "ai_enabled": ai_enabled_for_retrieval,
             "ingestion_status": quality_status,
             "ingestion_error": None,
             "extracted_char_count": len(cleaned_text),
@@ -1987,6 +2039,8 @@ async def _run_ingestion_pipeline(
         if not is_global:
             parent_payload["client_id"] = tenant_id
         completed_at = datetime.now().isoformat()
+        if await _abort_if_ai_disabled("pre_parent_persist"):
+            return
         await vector_service.client.set_payload(
             collection_name=collection_name,
             payload=parent_payload,
@@ -2131,7 +2185,6 @@ async def process_upload(
         filename = file.filename or "unknown"
         file_type = filename.split(".")[-1].lower() if "." in filename else "unknown"
         is_global_upload = tenant_id == "global"
-        is_supported_text = file_type in TEXT_NATIVE_EXTENSIONS
         is_image = is_image_ext(filename)
 
         point_id = str(uuid.uuid4())
@@ -2206,8 +2259,8 @@ async def process_upload(
             "preview_type": preview_type,
             "preview_status": preview_status,
             "preview_error": preview_error,
-            "ocr_enabled": bool(is_image),
-            "ocr_status": "queued" if is_image else None,
+            "ocr_enabled": False,
+            "ocr_status": "not_requested",
             "ocr_text_present": False,
             "ocr_confidence": None,
             "multimodal_status": "pending",
@@ -2216,7 +2269,7 @@ async def process_upload(
             "vision_processed": False,
             "visual_chunk_count": 0,
             "vision_enabled": bool(settings.RILEY_VISION_ENABLED),
-            "vision_status": "queued" if is_image else "not_requested",
+            "vision_status": "not_requested",
             "vision_segments_annotated": 0,
             "analysis_status": "not_requested",
             "analysis_completed_at": None,
@@ -2225,7 +2278,7 @@ async def process_upload(
         if not is_global_upload:
             payload["client_id"] = tenant_id
         if is_image:
-            payload["content"] = "[Image file — OCR queued for multimodal ingestion]"
+            payload["content"] = "[Image file — Riley Memory is off by default; enable it to start OCR/ingestion]"
             payload["content_preview"] = payload["content"]
 
         placeholder_vector = [0.0] * int(settings.EMBEDDING_DIM)
@@ -2234,50 +2287,13 @@ async def process_upload(
             points=[PointStruct(id=point_id, vector=placeholder_vector, payload=payload)],
         )
 
-        if is_supported_text or is_image:
-            try:
-                job_id = await enqueue_ingestion_job(
-                    collection_name=target_collection,
-                    file_id=point_id,
-                    tenant_id=tenant_id,
-                )
-                await vector_service.client.set_payload(
-                    collection_name=target_collection,
-                    payload={
-                        "ingestion_status": "queued",
-                        "ingestion_job_id": job_id,
-                    },
-                    points=[point_id],
-                )
-            except Exception as enqueue_exc:
-                await vector_service.client.set_payload(
-                    collection_name=target_collection,
-                    payload={
-                        "ingestion_status": "failed",
-                        "ingestion_error": f"Failed to enqueue ingestion job: {enqueue_exc}",
-                        "ingestion_job_status": "failed",
-                        "ingestion_job_error_message": str(enqueue_exc),
-                    },
-                    points=[point_id],
-                )
-                logger.exception("ingestion_enqueue_failed file_id=%s tenant=%s", point_id, tenant_id)
-        elif not is_image:
-            await vector_service.client.set_payload(
-                collection_name=target_collection,
-                payload={
-                    "ingestion_status": "failed",
-                    "ingestion_error": f"Unsupported file type for Phase 1A: {file_type}",
-                },
-                points=[point_id],
-            )
-
         logger.info(
-            "upload_staged file_id=%s tenant=%s file_type=%s collection=%s async_ingestion=%s status=%s",
+            "upload_staged file_id=%s tenant=%s file_type=%s collection=%s ai_enabled=%s status=%s",
             point_id,
             tenant_id,
             file_type,
             target_collection,
-            is_supported_text,
+            False,
             ingestion_status,
         )
         return {
@@ -2362,6 +2378,22 @@ async def run_ingestion_job(
             # Stale task; a newer job exists for this file.
             return
 
+        # Riley Memory is the source of truth for whether ingestion is allowed.
+        if not bool(payload.get("ai_enabled", False)):
+            now_iso = datetime.now().isoformat()
+            current_status = str(payload.get("ingestion_status") or "uploaded").strip().lower()
+            await vector_service.client.set_payload(
+                collection_name=collection_name,
+                payload={
+                    "ingestion_status": "uploaded" if current_status in {"queued", "processing", "uploaded"} else current_status,
+                    "ingestion_job_status": "cancelled",
+                    "ingestion_job_completed_at": now_iso,
+                    "ingestion_job_error_message": "Skipped because Riley Memory is disabled.",
+                },
+                points=[file_id],
+            )
+            return
+
         filename = payload.get("filename") or "unknown"
         file_type = (payload.get("file_type") or payload.get("type") or "").lower()
         file_url = payload.get("url")
@@ -2408,6 +2440,7 @@ async def run_ingestion_job(
             preview_type=payload.get("preview_type"),
             preview_status=payload.get("preview_status", "not_requested"),
             preview_error=payload.get("preview_error"),
+            initial_ai_enabled=bool(payload.get("ai_enabled", False)),
         )
     except Exception as exc:
         logger.exception(

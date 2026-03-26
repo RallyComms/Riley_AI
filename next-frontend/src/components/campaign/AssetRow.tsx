@@ -50,7 +50,7 @@ function normalizeAssetType(type: string | undefined | null): Asset["type"] | "u
 
 function isAISupportedType(type: string | undefined | null): boolean {
   const normalized = normalizeAssetType(type);
-  return normalized === "pdf" || normalized === "docx";
+  return normalized === "pdf" || normalized === "docx" || normalized === "xlsx" || normalized === "pptx" || normalized === "img";
 }
 
 const allTags: AssetTag[] = ["Messaging", "Research", "Strategy", "Media", "Pitch", "Other"];

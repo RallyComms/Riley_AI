@@ -762,12 +762,27 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   };
 
   const handleRenameKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, sessionId: string) => {
+    // Prevent row-level keyboard handlers from consuming key events while typing.
+    e.stopPropagation();
     if (e.key === "Enter") {
       e.preventDefault();
       handleRenameSave(e, sessionId);
     } else if (e.key === "Escape") {
       e.preventDefault();
       handleRenameCancel();
+    }
+  };
+
+  const handleProjectInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Keep sidebar/global shortcuts from hijacking text input keys (including Space).
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      void handleCreateProject();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      setIsCreatingProject(false);
+      setProjectInput("");
     }
   };
 
@@ -1342,6 +1357,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             setOpenConversationMenuId(null);
           }}
           onKeyDown={(e) => {
+            // Only treat key presses on the row itself as activation.
+            // Do not intercept keys from child inputs/buttons.
+            if (e.currentTarget !== e.target) return;
             if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
               setActiveConversationId(conv.id);
@@ -1543,6 +1561,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   type="text"
                   value={projectInput}
                   onChange={(e) => setProjectInput(e.target.value)}
+                  onKeyDown={handleProjectInputKeyDown}
                   placeholder="Project name"
                   className="w-full rounded-md border border-zinc-700 bg-zinc-900/70 px-2 py-1.5 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
                 />
