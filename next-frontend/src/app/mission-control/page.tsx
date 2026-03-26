@@ -953,8 +953,6 @@ export default function MissionControlPage() {
                       <Metric label="Current Month Cost (MTD)" value={`$${asNumber(cost.current_month_cost ?? cost.month_estimated_cost).toFixed(2)}`} />
                       <Metric label="Average Daily Burn Rate" value={`$${asNumber(cost.average_daily_burn_rate).toFixed(2)} / day`} />
                       <Metric label="Projected Month-End Cost" value={`$${asNumber(cost.projected_month_end_cost).toFixed(2)}`} />
-                    </div>
-                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                       <Metric label="Last 7d Estimated Cost" value={`$${asNumber(cost.last_7d_estimated_cost).toFixed(2)}`} />
                       <Metric label="Cost Per Chat" value={`$${asNumber(cost.cost_per_chat).toFixed(4)}`} />
                       <Metric label="Cost Per Report" value={`$${asNumber(cost.cost_per_report).toFixed(4)}`} />
