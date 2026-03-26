@@ -365,6 +365,7 @@ async def mission_control_overview(
              round(coalesce(sum(toFloat(r.total_cost_estimate_usd)), 0.0), 4) as cost
         ORDER BY (chats + reports) DESC, cost DESC
         LIMIT 25
+        WITH campaign_id, chats, reports, cost
         OPTIONAL MATCH (c:Campaign)
         WHERE c.id = campaign_id OR c.tenant_id = campaign_id
         RETURN
@@ -390,6 +391,7 @@ async def mission_control_overview(
         WHERE trim(user_id) <> ""
         ORDER BY (chats + reports) DESC, cost DESC
         LIMIT 25
+        WITH user_id, chats, reports, cost
         OPTIONAL MATCH (u:User {id: user_id})
         WITH user_id, chats, reports, cost, u,
              CASE
@@ -751,6 +753,7 @@ async def mission_control_cost_summary(
              coalesce(sum(toFloat(r.total_cost_estimate_usd)), 0.0) as cost
         ORDER BY cost DESC
         LIMIT 25
+        WITH campaign_id, cost
         OPTIONAL MATCH (c:Campaign)
         WHERE c.id = campaign_id OR c.tenant_id = campaign_id
         RETURN
@@ -771,6 +774,7 @@ async def mission_control_cost_summary(
         WHERE trim(user_id) <> ""
         ORDER BY cost DESC
         LIMIT 25
+        WITH user_id, cost
         OPTIONAL MATCH (u:User {id: user_id})
         WITH user_id, u, cost,
              CASE
@@ -949,6 +953,7 @@ async def mission_control_adoption_summary(
         WHERE trim(user_id) <> ""
         ORDER BY events DESC
         LIMIT 25
+        WITH user_id, events, chats, reports
         OPTIONAL MATCH (u:User {id: user_id})
         WITH user_id, events, chats, reports, u,
              CASE
