@@ -146,6 +146,7 @@ async def mission_control_overview(
         """
         MATCH (e:AnalyticsEvent)
         WHERE datetime(e.occurred_at) >= datetime() - duration({hours: $window_hours})
+          AND coalesce(e.actor_user_id, "") <> "system:deadline-reminder"
         WITH coalesce(e.user_id, e.actor_user_id, "") as uid
         WHERE trim(uid) <> ""
         RETURN count(DISTINCT uid) as value
@@ -303,6 +304,7 @@ async def mission_control_overview(
         """
         MATCH (e:AnalyticsEvent)
         WHERE datetime(e.occurred_at) >= datetime() - duration({hours: $window_hours})
+          AND coalesce(e.actor_user_id, "") <> "system:deadline-reminder"
         WITH coalesce(e.user_id, e.actor_user_id, "") as user_id, collect(e) as events
         WHERE trim(user_id) <> ""
         OPTIONAL MATCH (u:User {id: user_id})
@@ -641,6 +643,7 @@ async def mission_control_cost_summary(
         MATCH (e:AnalyticsEvent)
         WHERE e.cost_estimate_usd IS NOT NULL
           AND datetime(e.occurred_at) >= datetime() - duration({hours: $window_hours})
+          AND coalesce(e.actor_user_id, "") <> "system:deadline-reminder"
         WITH coalesce(e.user_id, e.actor_user_id, "") as user_id, e
         WHERE trim(user_id) <> ""
         OPTIONAL MATCH (u:User {id: user_id})
@@ -782,6 +785,7 @@ async def mission_control_adoption_summary(
         """
         MATCH (e:AnalyticsEvent)
         WHERE datetime(e.occurred_at) >= datetime() - duration({hours: $window_hours})
+          AND coalesce(e.actor_user_id, "") <> "system:deadline-reminder"
         WITH e, date(datetime(e.occurred_at)) as d
         RETURN
           count(e) as events_30d,
@@ -800,6 +804,7 @@ async def mission_control_adoption_summary(
         """
         MATCH (e:AnalyticsEvent)
         WHERE datetime(e.occurred_at) >= datetime() - duration({hours: $window_hours})
+          AND coalesce(e.actor_user_id, "") <> "system:deadline-reminder"
         WITH coalesce(e.user_id, e.actor_user_id, "") as user_id, collect(e) as events
         WHERE trim(user_id) <> ""
         OPTIONAL MATCH (u:User {id: user_id})
