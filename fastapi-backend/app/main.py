@@ -1,4 +1,5 @@
 import os
+from asyncio import create_task
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -33,6 +34,10 @@ async def lifespan(app: FastAPI):
     """Manage application lifespan: startup and shutdown events."""
     # Startup: Initialize Neo4j connection and store in app.state
     app.state.graph = GraphService()
+    try:
+        await app.state.graph.ensure_mission_control_schema()
+    except Exception as exc:
+        print(f"⚠️ Mission Control schema ensure failed: {exc}")
 
     # Startup: Log Qdrant connection mode
     settings = get_settings()
@@ -60,6 +65,13 @@ async def lifespan(app: FastAPI):
     limiter = to_thread.current_default_thread_limiter()
     if isinstance(limiter, CapacityLimiter):
         limiter.total_tokens = 100
+
+    if settings.MISSION_CONTROL_ROLLUP_AUTO_REFRESH_ENABLED:
+        create_task(
+            app.state.graph.rebuild_analytics_daily_rollups(
+                days_back=max(7, int(settings.MISSION_CONTROL_ROLLUP_DAYS_BACK))
+            )
+        )
     
     yield
     # Shutdown: Close Neo4j connection
