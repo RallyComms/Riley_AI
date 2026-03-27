@@ -190,6 +190,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const skipNextHistoryLoadConversationIdRef = useRef<string | null>(null);
   
   // Check if this is Global Riley (Imperial Amber theme)
   const isGlobal = tenantId === "global";
@@ -587,6 +588,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       return;
     }
 
+    if (skipNextHistoryLoadConversationIdRef.current === activeConversationId) {
+      skipNextHistoryLoadConversationIdRef.current = null;
+      setIsLoading(false);
+      return;
+    }
+
     setIsLoading(true);
     // Reset to a clean per-conversation state before loading history.
     instantScrollRef.current = true;
@@ -621,25 +628,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               content: msg.content,
             })
           );
-          setMessages([
-            {
-              id: "system-1",
-              role: "system",
-              content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
-            },
-            ...historyMessages,
-          ]);
+          setMessages(historyMessages);
           window.setTimeout(() => {
             instantScrollRef.current = false;
           }, 0);
         } else {
-          setMessages([
-            {
-              id: "system-1",
-              role: "system",
-              content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
-            },
-          ]);
+          setMessages([]);
           window.setTimeout(() => {
             instantScrollRef.current = false;
           }, 0);
@@ -647,13 +641,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       } catch (error) {
         console.error("Failed to load chat history:", error);
         if (cancelled) return;
-        setMessages([
-          {
-            id: "system-1",
-            role: "system",
-            content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
-          },
-        ]);
+        setMessages([]);
         window.setTimeout(() => {
           instantScrollRef.current = false;
         }, 0);
@@ -668,7 +656,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     return () => {
       cancelled = true;
     };
-  }, [activeConversationId, contextName, getToken, tenantId]);
+  }, [activeConversationId, getToken, tenantId]);
 
   // Check if send is enabled and why it might be disabled
   const canSend = input.trim().length > 0 && !isLoading && !missingAuth && !missingTenantId;
@@ -707,14 +695,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       };
 
       setConversations((prev) => [newConversation, ...prev.filter((c) => c.id !== newConversation.id)]);
+      skipNextHistoryLoadConversationIdRef.current = newConversation.id;
       setActiveConversationId(newConversation.id);
-      setMessages([
-        {
-          id: "system-1",
-          role: "system",
-          content: `Hi, I'm Riley. I have access to ${contextName}. How can I help you today?`,
-        },
-      ]);
+      setMessages([]);
       setInput("");
     } catch (error) {
       console.error("Failed to create Riley conversation:", error);
@@ -951,6 +934,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           },
         });
         sessionId = created.id;
+        skipNextHistoryLoadConversationIdRef.current = sessionId;
         setActiveConversationId(sessionId);
       } catch (error) {
         console.error("Failed to initialize conversation:", error);
@@ -997,11 +981,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     // Step 4: OPTIMISTIC UPDATE - Immediately append user message + thinking placeholder
     // This makes the message appear instantly in the UI BEFORE any await
     setMessages((prev) => {
-      // If this is the first message (only system message exists), keep system + add user + thinking
-      if (prev.length === 1 && prev[0].role === "system") {
-        return [prev[0], userMessage, thinkingMessage];
-      }
-      // Otherwise, append to existing messages
       return [...prev, userMessage, thinkingMessage];
     });
     
@@ -1047,6 +1026,15 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
       // Replace thinking message with actual response
       setMessages((prev) => {
+        const hasThinking = prev.some((msg) => msg.id === thinkingId);
+        if (!hasThinking) {
+          const hasUserMessage = prev.some(
+            (msg) => msg.id === userMessage.id
+          );
+          return hasUserMessage
+            ? [...prev, assistantMessage]
+            : [...prev, userMessage, assistantMessage];
+        }
         return prev.map((msg) =>
           msg.id === thinkingId ? assistantMessage : msg
         );
@@ -1087,6 +1075,15 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       };
       // Replace thinking message with error message
       setMessages((prev) => {
+        const hasThinking = prev.some((msg) => msg.id === thinkingId);
+        if (!hasThinking) {
+          const hasUserMessage = prev.some(
+            (msg) => msg.id === userMessage.id
+          );
+          return hasUserMessage
+            ? [...prev, errorMessage]
+            : [...prev, userMessage, errorMessage];
+        }
         return prev.map((msg) =>
           msg.id === thinkingId ? errorMessage : msg
         );
@@ -1323,7 +1320,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     [conversations]
   );
 
-  const isEmpty = messages.length === 0 || (messages.length === 1 && messages[0].role === "system");
+  const isEmpty = messages.length === 0;
   const hasThinkingPlaceholder = messages.some((msg) => msg.status === "thinking");
   const showWelcome =
     isEmpty &&
