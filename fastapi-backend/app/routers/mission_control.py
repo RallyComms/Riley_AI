@@ -389,7 +389,8 @@ async def mission_control_overview(
              coalesce(sum(toInteger(r.report_events)), 0) as reports,
              round(coalesce(sum(toFloat(r.total_cost_estimate_usd)), 0.0), 4) as cost
         WHERE trim(user_id) <> ""
-        ORDER BY (chats + reports) DESC, cost DESC
+        WITH user_id, chats, reports, cost
+        ORDER BY chats DESC, reports DESC, cost DESC
         LIMIT 25
         WITH user_id, chats, reports, cost
         OPTIONAL MATCH (u:User {id: user_id})
