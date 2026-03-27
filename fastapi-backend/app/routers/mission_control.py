@@ -363,7 +363,7 @@ async def mission_control_overview(
              coalesce(sum(toInteger(r.chat_events)), 0) as chats,
              coalesce(sum(toInteger(r.report_events)), 0) as reports,
              round(coalesce(sum(toFloat(r.total_cost_estimate_usd)), 0.0), 4) as cost
-        ORDER BY (chats + reports) DESC, cost DESC
+        ORDER BY chats DESC, reports DESC, cost DESC
         LIMIT 25
         WITH campaign_id, chats, reports, cost
         OPTIONAL MATCH (c:Campaign)
@@ -572,7 +572,7 @@ async def mission_control_riley_performance(
              coalesce(sum(toInteger(r.report_events)), 0) as reports,
              coalesce(sum(toFloat(r.latency_sum_ms)), 0.0) as latency_sum_ms,
              coalesce(sum(toInteger(r.latency_count)), 0) as latency_count
-        ORDER BY (chats + reports) DESC, latency_count DESC
+        ORDER BY chats DESC, reports DESC, latency_count DESC
         LIMIT 20
         WITH campaign_id, chats, reports, latency_sum_ms, latency_count
         OPTIONAL MATCH (c:Campaign)
