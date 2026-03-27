@@ -395,14 +395,14 @@ async def mission_control_overview(
         OPTIONAL MATCH (u:User {id: user_id})
         WITH user_id, chats, reports, cost, u,
              CASE
-                 WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                 ELSE split(u.email, "@")[0]
+                WHEN u["email"] IS NULL OR trim(u["email"]) = "" THEN NULL
+                ELSE split(u["email"], "@")[0]
              END as email_prefix
         RETURN
           user_id,
-          coalesce(u.display_name, "") as user_display_name,
-          coalesce(u.username, "") as username,
-          coalesce(u.email, "") as email,
+          coalesce(u["display_name"], "") as user_display_name,
+          coalesce(u["username"], "") as username,
+          coalesce(u["email"], "") as email,
           coalesce(email_prefix, "") as email_prefix,
           chats,
           reports,
@@ -573,6 +573,7 @@ async def mission_control_riley_performance(
              coalesce(sum(toInteger(r.latency_count)), 0) as latency_count
         ORDER BY (chats + reports) DESC, latency_count DESC
         LIMIT 20
+        WITH campaign_id, chats, reports, latency_sum_ms, latency_count
         OPTIONAL MATCH (c:Campaign)
         WHERE c.id = campaign_id OR c.tenant_id = campaign_id
         RETURN
@@ -778,14 +779,14 @@ async def mission_control_cost_summary(
         OPTIONAL MATCH (u:User {id: user_id})
         WITH user_id, u, cost,
              CASE
-                 WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                 ELSE split(u.email, "@")[0]
+                 WHEN u["email"] IS NULL OR trim(u["email"]) = "" THEN NULL
+                 ELSE split(u["email"], "@")[0]
              END as email_prefix
         RETURN
           user_id,
-          coalesce(u.display_name, "") as user_display_name,
-          coalesce(u.username, "") as username,
-          coalesce(u.email, "") as email,
+          coalesce(u["display_name"], "") as user_display_name,
+          coalesce(u["username"], "") as username,
+          coalesce(u["email"], "") as email,
           coalesce(email_prefix, "") as email_prefix,
           round(cost, 4) as cost
         """,
@@ -957,14 +958,14 @@ async def mission_control_adoption_summary(
         OPTIONAL MATCH (u:User {id: user_id})
         WITH user_id, events, chats, reports, u,
              CASE
-                 WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                 ELSE split(u.email, "@")[0]
+                 WHEN u["email"] IS NULL OR trim(u["email"]) = "" THEN NULL
+                 ELSE split(u["email"], "@")[0]
              END as email_prefix
         RETURN
           user_id,
-          coalesce(u.display_name, "") as user_display_name,
-          coalesce(u.username, "") as username,
-          coalesce(u.email, "") as email,
+          coalesce(u["display_name"], "") as user_display_name,
+          coalesce(u["username"], "") as username,
+          coalesce(u["email"], "") as email,
           coalesce(email_prefix, "") as email_prefix,
           events,
           chats,
@@ -1048,8 +1049,8 @@ async def mission_control_workflow_health_summary(
         OPTIONAL MATCH (u:User {id: ar.user_id})
         WITH ar, c, u,
              CASE
-                 WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                 ELSE split(u.email, "@")[0]
+                 WHEN u["email"] IS NULL OR trim(u["email"]) = "" THEN NULL
+                 ELSE split(u["email"], "@")[0]
              END as email_prefix
         RETURN
           ar.id as request_id,
@@ -1057,9 +1058,9 @@ async def mission_control_workflow_health_summary(
           ar.status as status,
           coalesce(c.name, c.title, "") as campaign_name,
           ar.user_id as user_id,
-          coalesce(u.display_name, "") as user_display_name,
-          coalesce(u.username, "") as username,
-          coalesce(u.email, "") as email,
+          coalesce(u["display_name"], "") as user_display_name,
+          coalesce(u["username"], "") as username,
+          coalesce(u["email"], "") as email,
           coalesce(email_prefix, "") as email_prefix,
           ar.created_at as created_at
         ORDER BY datetime(ar.created_at) ASC
@@ -1078,8 +1079,8 @@ async def mission_control_workflow_health_summary(
         OPTIONAL MATCH (u:User {id: d.assigned_user_id})
         WITH d, c, u,
              CASE
-                 WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                 ELSE split(u.email, "@")[0]
+                 WHEN u["email"] IS NULL OR trim(u["email"]) = "" THEN NULL
+                 ELSE split(u["email"], "@")[0]
              END as assignee_email_prefix
         RETURN
           d.id as deadline_id,
@@ -1088,9 +1089,9 @@ async def mission_control_workflow_health_summary(
           d.title as title,
           d.due_at as due_at,
           d.assigned_user_id as assigned_user_id,
-          coalesce(u.display_name, "") as assignee_display_name,
-          coalesce(u.username, "") as assignee_username,
-          coalesce(u.email, "") as assignee_email,
+          coalesce(u["display_name"], "") as assignee_display_name,
+          coalesce(u["username"], "") as assignee_username,
+          coalesce(u["email"], "") as assignee_email,
           coalesce(assignee_email_prefix, "") as assignee_email_prefix
         ORDER BY datetime(d.due_at) ASC
         LIMIT 50
@@ -1109,8 +1110,8 @@ async def mission_control_workflow_health_summary(
         OPTIONAL MATCH (u:User {id: d.assigned_user_id})
         WITH d, c, u,
              CASE
-                 WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                 ELSE split(u.email, "@")[0]
+                 WHEN u["email"] IS NULL OR trim(u["email"]) = "" THEN NULL
+                 ELSE split(u["email"], "@")[0]
              END as assignee_email_prefix
         RETURN
           d.id as deadline_id,
@@ -1119,9 +1120,9 @@ async def mission_control_workflow_health_summary(
           d.title as title,
           d.due_at as due_at,
           d.assigned_user_id as assigned_user_id,
-          coalesce(u.display_name, "") as assignee_display_name,
-          coalesce(u.username, "") as assignee_username,
-          coalesce(u.email, "") as assignee_email,
+          coalesce(u["display_name"], "") as assignee_display_name,
+          coalesce(u["username"], "") as assignee_username,
+          coalesce(u["email"], "") as assignee_email,
           coalesce(assignee_email_prefix, "") as assignee_email_prefix
         ORDER BY datetime(d.due_at) ASC
         LIMIT 50
