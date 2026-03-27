@@ -1068,7 +1068,7 @@ async def mission_control_workflow_health_summary(
           coalesce(u["username"], "") as username,
           coalesce(u["email"], "") as email,
           coalesce(email_prefix, "") as email_prefix,
-          ar.created_at as created_at
+          toString(ar.created_at) as created_at
         ORDER BY datetime(ar.created_at) ASC
         LIMIT 50
         """,
@@ -1093,7 +1093,7 @@ async def mission_control_workflow_health_summary(
           d.campaign_id as campaign_id,
           coalesce(c.name, c.title, "") as campaign_name,
           d.title as title,
-          d.due_at as due_at,
+          toString(d.due_at) as due_at,
           d.assigned_user_id as assigned_user_id,
           coalesce(u["display_name"], "") as assignee_display_name,
           coalesce(u["username"], "") as assignee_username,
@@ -1124,7 +1124,7 @@ async def mission_control_workflow_health_summary(
           d.campaign_id as campaign_id,
           coalesce(c.name, c.title, "") as campaign_name,
           d.title as title,
-          d.due_at as due_at,
+          toString(d.due_at) as due_at,
           d.assigned_user_id as assigned_user_id,
           coalesce(u["display_name"], "") as assignee_display_name,
           coalesce(u["username"], "") as assignee_username,
