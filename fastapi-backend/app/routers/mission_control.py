@@ -363,6 +363,7 @@ async def mission_control_overview(
              coalesce(sum(toInteger(r.chat_events)), 0) as chats,
              coalesce(sum(toInteger(r.report_events)), 0) as reports,
              round(coalesce(sum(toFloat(r.total_cost_estimate_usd)), 0.0), 4) as cost
+        WITH campaign_id, chats, reports, cost
         ORDER BY chats DESC, reports DESC, cost DESC
         LIMIT 25
         WITH campaign_id, chats, reports, cost
@@ -572,6 +573,7 @@ async def mission_control_riley_performance(
              coalesce(sum(toInteger(r.report_events)), 0) as reports,
              coalesce(sum(toFloat(r.latency_sum_ms)), 0.0) as latency_sum_ms,
              coalesce(sum(toInteger(r.latency_count)), 0) as latency_count
+        WITH campaign_id, chats, reports, latency_sum_ms, latency_count
         ORDER BY chats DESC, reports DESC, latency_count DESC
         LIMIT 20
         WITH campaign_id, chats, reports, latency_sum_ms, latency_count
@@ -753,6 +755,7 @@ async def mission_control_cost_summary(
           AND r.campaign_id <> "unknown_campaign"
         WITH r.campaign_id as campaign_id,
              coalesce(sum(toFloat(r.total_cost_estimate_usd)), 0.0) as cost
+        WITH campaign_id, cost
         ORDER BY cost DESC
         LIMIT 25
         WITH campaign_id, cost
@@ -774,6 +777,7 @@ async def mission_control_cost_summary(
           AND coalesce(r.user_id, "") <> "unknown_user"
         WITH coalesce(r.user_id, "") as user_id, coalesce(sum(toFloat(r.total_cost_estimate_usd)), 0.0) as cost
         WHERE trim(user_id) <> ""
+        WITH user_id, cost
         ORDER BY cost DESC
         LIMIT 25
         WITH user_id, cost
@@ -953,6 +957,7 @@ async def mission_control_adoption_summary(
              coalesce(sum(toInteger(r.chat_events)), 0) as chats,
              coalesce(sum(toInteger(r.report_events)), 0) as reports
         WHERE trim(user_id) <> ""
+        WITH user_id, events, chats, reports
         ORDER BY events DESC
         LIMIT 25
         WITH user_id, events, chats, reports
