@@ -33,6 +33,8 @@ interface BackendMessage {
   content: string;
   timestamp: string; // ISO string
   author_id: string;
+  author_display_name?: string;
+  author_avatar_url?: string | null;
   edited_at?: string | null;
   deleted_at?: string | null;
 }
@@ -370,20 +372,38 @@ export default function TeamChatPage() {
   // Map backend message to frontend shape
   const mapBackendToFrontend = (
     backendMsg: BackendMessage,
-    userMap: Map<string, { name: string; initials: string }>
+    context: { campaignId: string; threadId: string }
   ): TeamMessage => {
-    const authorInfo = userMap.get(backendMsg.author_id) || {
-      name: "Unknown User",
-      initials: "??",
-    };
+    const authorId = String(backendMsg.author_id || "").trim();
+    if (!authorId) {
+      console.error("team_chat_message_invalid_payload", {
+        message_id: backendMsg.id,
+        campaign_id: context.campaignId,
+        thread_id: context.threadId,
+        raw_message: backendMsg,
+      });
+      throw new Error(`Team chat message ${backendMsg.id} is missing author_id`);
+    }
+
+    const backendAuthorName = String(backendMsg.author_display_name || "").trim();
+    if (!backendAuthorName) {
+      console.error("team_chat_identity_resolution_failed", {
+        message_id: backendMsg.id,
+        author_id: authorId,
+        campaign_id: context.campaignId,
+        thread_id: context.threadId,
+      });
+    }
+    const authorName = backendAuthorName || authorId;
+    const authorInitials = getInitials(authorName);
 
     return {
       id: backendMsg.id,
-      author: authorInfo.name,
-      authorInitials: authorInfo.initials,
+      author: authorName,
+      authorInitials,
       content: backendMsg.content,
       timestamp: new Date(backendMsg.timestamp),
-      author_id: backendMsg.author_id,
+      author_id: authorId,
       edited_at: backendMsg.edited_at ? new Date(backendMsg.edited_at) : null,
       deleted_at: backendMsg.deleted_at ? new Date(backendMsg.deleted_at) : null,
       mentions: extractMentionMetadata(backendMsg.content, campaignMembers),
@@ -566,31 +586,9 @@ export default function TeamChatPage() {
       });
       const backendMessages: BackendMessage[] = data.messages || [];
 
-      // Build user map from campaign members (authorized users only).
-      const userMap = new Map<string, { name: string; initials: string }>();
-      for (const member of campaignMembers) {
-        userMap.set(member.user_id, {
-          name: member.display_name,
-          initials: getInitials(member.display_name),
-        });
-      }
-      const currentUserName =
-        user?.firstName ||
-        user?.emailAddresses[0]?.emailAddress ||
-        "You";
-      const currentUserInitials = getInitials(currentUserName);
-
-      // Add current user to map
-      if (user?.id) {
-        userMap.set(user.id, {
-          name: currentUserName,
-          initials: currentUserInitials,
-        });
-      }
-
       // Map backend messages to frontend shape
       const newMessages = backendMessages.map((msg) =>
-        mapBackendToFrontend(msg, userMap)
+        mapBackendToFrontend(msg, { campaignId, threadId })
       );
 
       // Update last timestamp (newest message timestamp)

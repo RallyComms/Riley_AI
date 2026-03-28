@@ -172,6 +172,8 @@ class TeamMessageResponse(BaseModel):
     content: str
     timestamp: str
     author_id: str
+    author_display_name: str
+    author_avatar_url: Optional[str] = None
     edited_at: Optional[str] = None
     deleted_at: Optional[str] = None
 
