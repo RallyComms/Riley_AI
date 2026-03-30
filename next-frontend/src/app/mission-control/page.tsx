@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import Link from "next/link";
 import { useAuth } from "@clerk/nextjs";
 import { Activity, AlertTriangle, BarChart3, ChevronRight, DollarSign, ShieldCheck, Users } from "lucide-react";
@@ -1444,7 +1444,7 @@ function SimpleTable({
   emptyLabel,
 }: {
   columns: string[];
-  rows: string[][];
+  rows: Array<Array<string | ReactNode>>;
   emptyLabel: string;
 }) {
   if (!rows.length) {
