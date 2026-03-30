@@ -1,7 +1,10 @@
+import logging
 from datetime import datetime, timezone
 from typing import Dict, List, Literal, Optional, Union
 from fastapi import APIRouter, HTTPException, Depends, Query, status
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 from app.dependencies.auth import verify_tenant_access, verify_clerk_token
 from app.dependencies.graph_dep import get_graph
@@ -569,6 +572,24 @@ async def list_campaign_events(
         limit=limit,
         viewer_user_id=viewer_user_id,
     )
+    logger.info(
+        "notification_delivered surface=campaign_events campaign_id=%s user_id=%s count=%d",
+        tenant_id, viewer_user_id, len(events),
+    )
+    try:
+        delivered_ids = [e.get("id") for e in events if e.get("id")]
+        missed = await graph.mark_events_seen_and_detect_missed(
+            user_id=viewer_user_id,
+            delivered_event_ids=delivered_ids,
+        )
+        for m in missed:
+            logger.warning(
+                "notification_missed event_id=%s user_id=%s event_type=%s campaign_id=%s created_at=%s",
+                m.get("event_id"), viewer_user_id, m.get("event_type"),
+                m.get("campaign_id"), m.get("created_at"),
+            )
+    except Exception:
+        logger.debug("mark_events_seen failed for user_id=%s", viewer_user_id, exc_info=True)
     return CampaignEventsResponse(events=[CampaignEventItem(**item) for item in events])
 
 
@@ -581,6 +602,24 @@ async def list_user_campaign_feed(
     """List cross-campaign Riley Bot feed events relevant to current user."""
     user_id = current_user.get("id", "unknown")
     events = await graph.list_user_campaign_feed_events(user_id=user_id, limit=limit)
+    logger.info(
+        "notification_delivered surface=intelligence_feed user_id=%s count=%d",
+        user_id, len(events),
+    )
+    try:
+        delivered_ids = [e.get("id") for e in events if e.get("id")]
+        missed = await graph.mark_events_seen_and_detect_missed(
+            user_id=user_id,
+            delivered_event_ids=delivered_ids,
+        )
+        for m in missed:
+            logger.warning(
+                "notification_missed event_id=%s user_id=%s event_type=%s campaign_id=%s created_at=%s",
+                m.get("event_id"), user_id, m.get("event_type"),
+                m.get("campaign_id"), m.get("created_at"),
+            )
+    except Exception:
+        logger.debug("mark_events_seen failed for user_id=%s", user_id, exc_info=True)
     return UserCampaignFeedResponse(
         events=[UserCampaignFeedEventItem(**item) for item in events]
     )

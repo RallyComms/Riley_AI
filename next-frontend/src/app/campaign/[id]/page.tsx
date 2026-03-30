@@ -140,16 +140,20 @@ export default function CampaignOverviewPage() {
         }
       } catch (err) {
         console.error("Failed to load campaign activity events:", err);
-        if (mounted) {
-          setEvents([]);
-        }
       }
     };
     fetchEvents();
-    const interval = setInterval(fetchEvents, 30000);
+    const interval = setInterval(fetchEvents, 15000);
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        fetchEvents();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       mounted = false;
       clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [campaignId, getToken, isLoaded]);
 

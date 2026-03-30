@@ -2562,12 +2562,18 @@ class GraphService:
                     ELSE split(requester.email, "@")[0]
                 END as requester_email_prefix
             WHERE
-                NOT (e.type IN [
-                    "document_assigned_to_user",
-                    "document_tagged_for_review",
-                    "document_mentioned_user",
-                    "campaign_message_mentioned_user"
-                ])
+                (
+                    NOT (e.type IN [
+                        "document_assigned_to_user",
+                        "document_tagged_for_review",
+                        "document_mentioned_user",
+                        "campaign_message_mentioned_user"
+                    ])
+                    OR (
+                        e.type IN ["document_mentioned_user", "campaign_message_mentioned_user"]
+                        AND e.user_id = $user_id
+                    )
+                )
                 AND
                 NOT EXISTS {
                     MATCH (:User {id: $user_id})-[:DISMISSED_FEED_EVENT]->(e)
@@ -2600,7 +2606,6 @@ class GraphService:
                 e.user_id = $user_id
                 OR e.actor_user_id = $user_id
                 OR e.type IN [
-                    "mention",
                     "document_assigned",
                     "document_moved_needs_review",
                     "document_moved_in_review",
@@ -2666,6 +2671,69 @@ class GraphService:
                     }
                 )
             return items
+
+    async def mark_events_seen_and_detect_missed(
+        self,
+        *,
+        user_id: str,
+        delivered_event_ids: List[str],
+        missed_threshold_seconds: int = 60,
+    ) -> List[Dict[str, Any]]:
+        """Mark delivered events as seen and return targeted events that were never delivered.
+
+        Returns a list of missed-notification dicts (event_id, event_type, created_at)
+        for events where user_id matches the viewer but the event was never included
+        in a feed response within the threshold window.
+        """
+        async with self._driver.session() as session:
+            if delivered_event_ids:
+                await session.run(
+                    """
+                    UNWIND $event_ids AS eid
+                    MATCH (u:User {id: $user_id})
+                    MATCH (e:CampaignEvent {id: eid})
+                    MERGE (u)-[r:SEEN_FEED_EVENT]->(e)
+                    ON CREATE SET r.seen_at = datetime()
+                    """,
+                    user_id=user_id,
+                    event_ids=delivered_event_ids,
+                )
+
+            result = await session.run(
+                """
+                MATCH (e:CampaignEvent)
+                WHERE e.user_id = $user_id
+                  AND e.created_at IS NOT NULL
+                  AND e.created_at < datetime() - duration({seconds: $threshold})
+                  AND e.created_at > datetime() - duration({hours: 24})
+                  AND NOT EXISTS {
+                      MATCH (:User {id: $user_id})-[:SEEN_FEED_EVENT]->(e)
+                  }
+                  AND NOT EXISTS {
+                      MATCH (:User {id: $user_id})-[:DISMISSED_FEED_EVENT]->(e)
+                  }
+                RETURN
+                  e.id as event_id,
+                  e.type as event_type,
+                  e.campaign_id as campaign_id,
+                  toString(e.created_at) as created_at
+                ORDER BY e.created_at DESC
+                LIMIT 20
+                """,
+                user_id=user_id,
+                threshold=missed_threshold_seconds,
+            )
+            missed: List[Dict[str, Any]] = []
+            async for record in result:
+                missed.append(
+                    {
+                        "event_id": record.get("event_id"),
+                        "event_type": record.get("event_type"),
+                        "campaign_id": record.get("campaign_id"),
+                        "created_at": record.get("created_at"),
+                    }
+                )
+            return missed
 
     async def dismiss_user_feed_event(
         self,
@@ -2736,6 +2804,10 @@ class GraphService:
                 actor_user_id=actor_user_id,
                 request_id=request_id,
             )
+        logger.info(
+            "notification_created event_id=%s type=%s campaign_id=%s target_user_id=%s actor_user_id=%s",
+            event_id, event_type, campaign_id, user_id, actor_user_id,
+        )
         await self.append_analytics_event(
             event_id=event_id,
             source_event_type_raw=event_type,
@@ -3187,6 +3259,7 @@ class GraphService:
                     email_fallback=user.get("email"),
                 )
                 for mentioned_user_id in normalized_mentions:
+                    mention_event_id = str(uuid.uuid4())
                     await session.run(
                         """
                         MATCH (c:Campaign {id: $campaign_id})
@@ -3197,14 +3270,19 @@ class GraphService:
                             type: "campaign_message_mentioned_user",
                             message: $message,
                             user_id: $mentioned_user_id,
-                            actor_user_id: null,
+                            actor_user_id: $actor_user_id,
                             created_at: datetime()
                         })
                         """,
                         campaign_id=campaign_id,
                         mentioned_user_id=mentioned_user_id,
-                        event_id=str(uuid.uuid4()),
+                        event_id=mention_event_id,
                         message=f"{actor_display_name} mentioned you in campaign chat",
+                        actor_user_id=user_id,
+                    )
+                    logger.info(
+                        "notification_created event_id=%s type=campaign_message_mentioned_user campaign_id=%s target_user_id=%s actor_user_id=%s",
+                        mention_event_id, campaign_id, mentioned_user_id, user_id,
                     )
             await self.append_analytics_event(
                 event_id=f"team_message:{created_message.get('id')}",
@@ -3603,6 +3681,7 @@ class GraphService:
             if normalized_mentions:
                 actor_display_name = await self.resolve_user_display_name(user_id=user_id)
                 for mentioned_user_id in normalized_mentions:
+                    mention_event_id = str(uuid.uuid4())
                     await session.run(
                         """
                         MATCH (t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})
@@ -3613,15 +3692,20 @@ class GraphService:
                             type: "campaign_message_mentioned_user",
                             message: $message,
                             user_id: $mentioned_user_id,
-                            actor_user_id: null,
+                            actor_user_id: $actor_user_id,
                             created_at: datetime()
                         })
                         """,
                         thread_id=thread_id,
                         campaign_id=campaign_id,
                         mentioned_user_id=mentioned_user_id,
-                        event_id=str(uuid.uuid4()),
+                        event_id=mention_event_id,
                         message=f"{actor_display_name} mentioned you in campaign chat",
+                        actor_user_id=user_id,
+                    )
+                    logger.info(
+                        "notification_created event_id=%s type=campaign_message_mentioned_user campaign_id=%s target_user_id=%s actor_user_id=%s",
+                        mention_event_id, campaign_id, mentioned_user_id, user_id,
                     )
             await self.append_analytics_event(
                 event_id=f"thread_message:{created_message.get('id')}",

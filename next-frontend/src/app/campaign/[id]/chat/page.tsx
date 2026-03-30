@@ -697,22 +697,31 @@ export default function TeamChatPage() {
       if (lastTimestamp) {
         fetchMessages(lastTimestamp, currentThreadId);
       } else {
-        // If no lastTimestamp yet, fetch all messages
         fetchMessages(null, currentThreadId);
       }
       fetchThreads();
-      if (isMembersPanelOpen) {
+      fetchCampaignFeedEvents();
+      if (isMembersPanelOpen && isLead) {
+        fetchPendingAccessRequests();
+      }
+    }, 12000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
         fetchCampaignFeedEvents();
-        if (isLead) {
-          fetchPendingAccessRequests();
+        fetchThreads();
+        if (lastTimestamp) {
+          fetchMessages(lastTimestamp, currentThreadId);
         }
       }
-    }, 12000); // 12 seconds
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
 
     return () => {
       if (pollingIntervalRef.current) {
         clearInterval(pollingIntervalRef.current);
       }
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isLoaded, campaignId, lastTimestamp, isLoading, error, user?.id, currentThreadId, isMembersPanelOpen, isLead]);

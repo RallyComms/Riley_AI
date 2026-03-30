@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
 import { usePathname } from "next/navigation";
 import { Bot, Minus, AlertCircle, Calendar, FileText, MessageCircle, UserPlus } from "lucide-react";
@@ -76,6 +76,8 @@ export function GlobalRileyOrb() {
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
+  const fetchFeedRef = useRef<() => Promise<void>>();
+
   useEffect(() => {
     let mounted = true;
     const fetchFeed = async () => {
@@ -96,17 +98,24 @@ export function GlobalRileyOrb() {
         }
       } catch (err) {
         console.error("Failed to load Riley intelligence feed:", err);
-        if (mounted) {
-          setNotifications([]);
-        }
       }
     };
+    fetchFeedRef.current = fetchFeed;
 
     fetchFeed();
-    const interval = setInterval(fetchFeed, 30000);
+    const interval = setInterval(fetchFeed, 15000);
+
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") {
+        fetchFeed();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibility);
+
     return () => {
       mounted = false;
       clearInterval(interval);
+      document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [getToken, isLoaded, isMissionControlRoute, user?.id]);
 
@@ -150,6 +159,10 @@ export function GlobalRileyOrb() {
     };
   };
 
+  const refreshFeed = useCallback(() => {
+    fetchFeedRef.current?.();
+  }, []);
+
   const handleDismiss = async (eventId: string) => {
     try {
       setDismissLoadingEventId(eventId);
@@ -160,6 +173,7 @@ export function GlobalRileyOrb() {
         method: "POST",
       });
       setNotifications((prev) => prev.filter((event) => event.id !== eventId));
+      refreshFeed();
     } catch (err) {
       console.error("Failed to dismiss feed event:", err);
     } finally {
@@ -185,6 +199,7 @@ export function GlobalRileyOrb() {
         }
       );
       setNotifications((prev) => prev.filter((item) => item.id !== event.id));
+      refreshFeed();
     } catch (err) {
       console.error("Failed to resolve access request from feed:", err);
     } finally {
