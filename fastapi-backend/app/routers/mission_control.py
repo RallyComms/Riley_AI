@@ -904,60 +904,169 @@ async def mission_control_adoption_summary(
 ) -> Dict[str, Any]:
     window = _resolve_timeframe(timeframe)
     await _maybe_schedule_rollup_refresh(graph)
-    window_start_day = _window_start_day(int(window["window_days"]))
+    window_start_iso = _window_start_iso(int(window["window_hours"]))
+    excluded_system_actor_rows = await _rows(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE e.occurred_at >= $window_start_iso
+          AND e.actor_user_id IS NOT NULL
+          AND (
+            trim(coalesce(e.actor_user_id, "")) = ""
+            OR toLower(trim(coalesce(e.actor_user_id, ""))) STARTS WITH "system:"
+            OR toLower(trim(coalesce(e.actor_user_id, ""))) IN ["system", "unknown_user", "unknown", "null", "none"]
+          )
+        RETURN
+          coalesce(e.actor_user_id, "") as actor_user_id,
+          coalesce(e.user_id, "") as user_id,
+          coalesce(e.source_event_type_raw, "") as event_type
+        LIMIT 50
+        """,
+        window_start_iso=window_start_iso,
+    )
+    for row in excluded_system_actor_rows:
+        logger.info(
+            "mission_control_event_excluded_system_actor actor_user_id=%s user_id=%s event_type=%s",
+            row.get("actor_user_id"),
+            row.get("user_id"),
+            row.get("event_type"),
+        )
+    filter_audit = await _single_value(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE e.occurred_at >= $window_start_iso
+        WITH
+          count(e) as total_events,
+          count(
+            CASE
+              WHEN (
+                e.actor_user_id IS NOT NULL
+                AND trim(coalesce(e.actor_user_id, "")) <> ""
+                AND NOT toLower(trim(coalesce(e.actor_user_id, ""))) STARTS WITH "system:"
+                AND toLower(trim(coalesce(e.actor_user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+              )
+              THEN 1
+              WHEN (
+                e.actor_user_id IS NULL
+                AND trim(coalesce(e.user_id, "")) <> ""
+                AND NOT toLower(trim(coalesce(e.user_id, ""))) STARTS WITH "system:"
+                AND toLower(trim(coalesce(e.user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+              )
+              THEN 1
+              ELSE NULL
+            END
+          ) as included_events
+        RETURN total_events, included_events
+        """,
+        window_start_iso=window_start_iso,
+    )
+    excluded_non_user = int(filter_audit.get("total_events") or 0) - int(filter_audit.get("included_events") or 0)
+    if excluded_non_user > 0:
+        logger.info(
+            "mission_control_event_excluded_non_user timeframe=%s excluded_count=%s total_events=%s",
+            window.get("timeframe"),
+            excluded_non_user,
+            int(filter_audit.get("total_events") or 0),
+        )
     metrics = await _single_value(
         graph,
         """
-        CALL {
-          MATCH (r:AnalyticsDailySystemRollup)
-          WHERE r.event_date >= $window_start_day
-          RETURN coalesce(sum(toInteger(r.event_count)), 0) as events_30d
-        }
-        CALL {
-          MATCH (r:AnalyticsDailyCampaignRollup)
-          WHERE r.event_date >= $window_start_day
-            AND r.campaign_id IS NOT NULL
-            AND trim(r.campaign_id) <> ""
-            AND r.campaign_id <> "global"
-            AND r.campaign_id <> "unknown_campaign"
-          RETURN count(DISTINCT r.campaign_id) as unique_campaigns_30d
-        }
-        CALL {
-          MATCH (r:AnalyticsDailyUserRollup)
-          WHERE r.event_date >= $window_start_day
-            AND r.user_id IS NOT NULL
-            AND trim(r.user_id) <> ""
-            AND r.user_id <> "system:deadline-reminder"
-            AND r.user_id <> "unknown_user"
-          RETURN
-            count(DISTINCT r.user_id) as unique_users_30d,
-            count(DISTINCT CASE WHEN coalesce(toInteger(r.chat_events), 0) > 0 THEN r.user_id ELSE NULL END) as chat_users_30d,
-            count(DISTINCT CASE WHEN coalesce(toInteger(r.report_events), 0) > 0 THEN r.user_id ELSE NULL END) as report_users_30d
-        }
+        MATCH (e:AnalyticsEvent)
+        WHERE e.occurred_at >= $window_start_iso
+        WITH
+          e,
+          CASE
+            WHEN (
+              e.actor_user_id IS NOT NULL
+              AND trim(coalesce(e.actor_user_id, "")) <> ""
+              AND NOT toLower(trim(coalesce(e.actor_user_id, ""))) STARTS WITH "system:"
+              AND toLower(trim(coalesce(e.actor_user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+            )
+            THEN trim(coalesce(e.actor_user_id, ""))
+            WHEN (
+              e.actor_user_id IS NULL
+              AND trim(coalesce(e.user_id, "")) <> ""
+              AND NOT toLower(trim(coalesce(e.user_id, ""))) STARTS WITH "system:"
+              AND toLower(trim(coalesce(e.user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+            )
+            THEN trim(coalesce(e.user_id, ""))
+            ELSE ""
+          END as human_user_id
+        WHERE human_user_id <> ""
         RETURN
-          events_30d,
-          unique_users_30d,
-          unique_campaigns_30d,
-          chat_users_30d,
-          report_users_30d
+          count(e) as events_30d,
+          count(DISTINCT human_user_id) as unique_users_30d,
+          count(
+            DISTINCT CASE
+              WHEN (
+                e.campaign_id IS NOT NULL
+                AND trim(e.campaign_id) <> ""
+                AND e.campaign_id <> "global"
+                AND e.campaign_id <> "unknown_campaign"
+              )
+              THEN e.campaign_id
+              ELSE NULL
+            END
+          ) as unique_campaigns_30d,
+          count(
+            DISTINCT CASE
+              WHEN ((e.feature_area = "chat") OR (e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]))
+              THEN human_user_id
+              ELSE NULL
+            END
+          ) as chat_users_30d,
+          count(
+            DISTINCT CASE
+              WHEN (e.source_entity = "RileyReportJob" AND e.object_id IS NOT NULL)
+              THEN human_user_id
+              ELSE NULL
+            END
+          ) as report_users_30d
         """,
-        window_start_day=window_start_day,
+        window_start_iso=window_start_iso,
     )
     user_rows = await _rows(
         graph,
         """
-        MATCH (r:AnalyticsDailyUserRollup)
-        WHERE r.event_date >= $window_start_day
-          AND r.user_id IS NOT NULL
-          AND trim(r.user_id) <> ""
-          AND r.user_id <> "system:deadline-reminder"
-          AND r.user_id <> "unknown_user"
-        WITH r.user_id as user_id,
-             coalesce(sum(toInteger(r.event_count)), 0) as events,
-             coalesce(sum(toInteger(r.chat_events)), 0) as chats,
-             coalesce(sum(toInteger(r.report_events)), 0) as reports
+        MATCH (e:AnalyticsEvent)
+        WHERE e.occurred_at >= $window_start_iso
+        WITH
+          e,
+          CASE
+            WHEN (
+              e.actor_user_id IS NOT NULL
+              AND trim(coalesce(e.actor_user_id, "")) <> ""
+              AND NOT toLower(trim(coalesce(e.actor_user_id, ""))) STARTS WITH "system:"
+              AND toLower(trim(coalesce(e.actor_user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+            )
+            THEN trim(coalesce(e.actor_user_id, ""))
+            WHEN (
+              e.actor_user_id IS NULL
+              AND trim(coalesce(e.user_id, "")) <> ""
+              AND NOT toLower(trim(coalesce(e.user_id, ""))) STARTS WITH "system:"
+              AND toLower(trim(coalesce(e.user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+            )
+            THEN trim(coalesce(e.user_id, ""))
+            ELSE ""
+          END as user_id
         WHERE trim(user_id) <> ""
-        WITH user_id, events, chats, reports
+        WITH user_id,
+             count(e) as events,
+             sum(
+               CASE
+                 WHEN ((e.feature_area = "chat") OR (e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]))
+                 THEN 1
+                 ELSE 0
+               END
+             ) as chats,
+             sum(
+               CASE
+                 WHEN (e.source_entity = "RileyReportJob" AND e.object_id IS NOT NULL)
+                 THEN 1
+                 ELSE 0
+               END
+             ) as reports
         ORDER BY events DESC
         LIMIT 25
         WITH user_id, events, chats, reports
@@ -977,7 +1086,7 @@ async def mission_control_adoption_summary(
           chats,
           reports
         """,
-        window_start_day=window_start_day,
+        window_start_iso=window_start_iso,
     )
     return {
         "timeframe": window["timeframe"],
