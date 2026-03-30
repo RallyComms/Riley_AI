@@ -13,6 +13,7 @@ from app.routers import (
     files,
     search,
     campaign,
+    conversations,
     ingestion_worker,
     reports,
     report_worker,
@@ -131,6 +132,8 @@ app.include_router(chat.router, prefix="/api/v1", dependencies=[Depends(verify_c
 app.include_router(files.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # CRITICAL: This puts the campaign route at /api/v1/campaign/{tenant_id}
 app.include_router(campaign.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
+# Conversations v2 route (authenticated)
+app.include_router(conversations.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # Riley report jobs route (authenticated)
 app.include_router(reports.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # Riley campaign intelligence route (authenticated)

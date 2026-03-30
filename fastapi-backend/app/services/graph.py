@@ -3077,6 +3077,545 @@ class GraphService:
             
             return record["is_member"] if record else False
 
+    async def ensure_public_conversation(self, campaign_id: str, created_by: str) -> Dict[str, Any]:
+        """Ensure a single public conversation exists per campaign."""
+        conversation_id = f"public:{campaign_id}"
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (c:Campaign {id: $campaign_id})
+                MERGE (conv:Conversation {id: $conversation_id})
+                ON CREATE SET
+                    conv.type = "public",
+                    conv.campaign_id = $campaign_id,
+                    conv.created_by = $created_by,
+                    conv.created_at = datetime()
+                ON MATCH SET
+                    conv.type = coalesce(conv.type, "public"),
+                    conv.campaign_id = coalesce(conv.campaign_id, $campaign_id)
+                RETURN
+                    conv.id as id,
+                    conv.type as type,
+                    conv.campaign_id as campaign_id,
+                    conv.created_by as created_by,
+                    toString(conv.created_at) as created_at
+                """,
+                campaign_id=campaign_id,
+                conversation_id=conversation_id,
+                created_by=created_by,
+            )
+            record = await result.single()
+            if not record:
+                raise ValueError(f"Campaign {campaign_id} not found")
+            return {
+                "id": record.get("id"),
+                "type": record.get("type") or "public",
+                "campaign_id": record.get("campaign_id"),
+                "created_by": record.get("created_by"),
+                "created_at": record.get("created_at"),
+            }
+
+    async def list_conversations(self, campaign_id: str, user_id: str) -> List[Dict[str, Any]]:
+        """List public + private conversations visible to the user."""
+        await self.ensure_public_conversation(campaign_id=campaign_id, created_by=user_id)
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (conv:Conversation {campaign_id: $campaign_id})
+                OPTIONAL MATCH (viewer:User {id: $user_id})-[membership:CONVERSATION_MEMBER]->(conv)
+                WHERE
+                    conv.type = "public"
+                    OR membership IS NOT NULL
+                OPTIONAL MATCH (viewer)-[seen:SEEN_CONVERSATION]->(conv)
+                WITH conv, membership, coalesce(seen.last_seen_at, datetime({epochMillis: 0})) as last_seen_at
+                CALL {
+                    WITH conv, last_seen_at
+                    OPTIONAL MATCH (conv)<-[:IN_CONVERSATION]-(message:ConversationMessage)
+                    WHERE message.created_at > last_seen_at
+                    RETURN count(message) as unread_count
+                }
+                OPTIONAL MATCH (participant:User)-[:CONVERSATION_MEMBER]->(conv)
+                WITH conv, membership, unread_count, participant,
+                     CASE
+                        WHEN participant.email IS NULL OR trim(participant.email) = "" THEN NULL
+                        ELSE split(participant.email, "@")[0]
+                     END as participant_email_prefix
+                RETURN
+                    conv.id as id,
+                    conv.type as type,
+                    conv.campaign_id as campaign_id,
+                    conv.created_by as created_by,
+                    toString(conv.created_at) as created_at,
+                    conv.name as name,
+                    toString(membership.joined_at) as joined_at,
+                    membership.history_access as history_access,
+                    unread_count as unread_count,
+                    collect(DISTINCT CASE
+                        WHEN participant IS NULL THEN NULL
+                        ELSE {
+                            user_id: participant.id,
+                            display_name: CASE
+                                WHEN participant.display_name IS NOT NULL AND trim(participant.display_name) <> "" THEN participant.display_name
+                                WHEN participant.username IS NOT NULL AND trim(participant.username) <> "" THEN participant.username
+                                WHEN participant_email_prefix IS NOT NULL AND trim(participant_email_prefix) <> "" THEN participant_email_prefix
+                                WHEN participant.email IS NOT NULL AND trim(participant.email) <> "" THEN participant.email
+                                ELSE participant.id
+                            END
+                        }
+                    END) as participants
+                ORDER BY
+                    CASE WHEN conv.type = "public" THEN 0 ELSE 1 END,
+                    conv.created_at DESC
+                """,
+                campaign_id=campaign_id,
+                user_id=user_id,
+            )
+            conversations: List[Dict[str, Any]] = []
+            async for record in result:
+                participants_raw = record.get("participants") or []
+                participants: List[Dict[str, str]] = []
+                for participant in participants_raw:
+                    if isinstance(participant, dict) and participant.get("user_id"):
+                        participants.append(
+                            {
+                                "user_id": str(participant.get("user_id")),
+                                "display_name": str(participant.get("display_name") or participant.get("user_id")),
+                            }
+                        )
+                conversations.append(
+                    {
+                        "id": record.get("id"),
+                        "type": record.get("type"),
+                        "campaign_id": record.get("campaign_id"),
+                        "created_by": record.get("created_by"),
+                        "created_at": record.get("created_at"),
+                        "name": record.get("name"),
+                        "joined_at": record.get("joined_at"),
+                        "history_access": record.get("history_access"),
+                        "unread_count": int(record.get("unread_count") or 0),
+                        "participants": participants,
+                    }
+                )
+            return conversations
+
+    async def create_private_conversation(
+        self,
+        *,
+        campaign_id: str,
+        created_by: str,
+        participant_user_ids: List[str],
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a private conversation scoped to a campaign."""
+        valid_member_ids = set(await self.get_campaign_member_ids(campaign_id))
+        selected = {
+            str(member_id).strip()
+            for member_id in (participant_user_ids or [])
+            if str(member_id).strip()
+        }
+        selected.add(created_by)
+
+        invalid_members = sorted([member_id for member_id in selected if member_id not in valid_member_ids])
+        if invalid_members:
+            raise ValueError("All conversation participants must be campaign members")
+
+        conversation_id = str(uuid.uuid4())
+        normalized_name = str(name or "").strip() or None
+
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (campaign:Campaign {id: $campaign_id})
+                CREATE (conv:Conversation {
+                    id: $conversation_id,
+                    type: "private",
+                    campaign_id: $campaign_id,
+                    created_by: $created_by,
+                    name: $name,
+                    created_at: datetime()
+                })
+                WITH conv, campaign
+                UNWIND $member_ids as member_id
+                MATCH (member:User {id: member_id})-[:MEMBER_OF]->(campaign)
+                MERGE (member)-[membership:CONVERSATION_MEMBER]->(conv)
+                ON CREATE SET
+                    membership.joined_at = datetime(),
+                    membership.history_access = "full"
+                WITH conv, member,
+                     CASE
+                        WHEN member.email IS NULL OR trim(member.email) = "" THEN NULL
+                        ELSE split(member.email, "@")[0]
+                     END as member_email_prefix
+                RETURN
+                    conv.id as id,
+                    conv.type as type,
+                    conv.campaign_id as campaign_id,
+                    conv.created_by as created_by,
+                    conv.name as name,
+                    toString(conv.created_at) as created_at,
+                    collect(DISTINCT {
+                        user_id: member.id,
+                        display_name: CASE
+                            WHEN member.display_name IS NOT NULL AND trim(member.display_name) <> "" THEN member.display_name
+                            WHEN member.username IS NOT NULL AND trim(member.username) <> "" THEN member.username
+                            WHEN member_email_prefix IS NOT NULL AND trim(member_email_prefix) <> "" THEN member_email_prefix
+                            WHEN member.email IS NOT NULL AND trim(member.email) <> "" THEN member.email
+                            ELSE member.id
+                        END
+                    }) as participants
+                """,
+                campaign_id=campaign_id,
+                conversation_id=conversation_id,
+                created_by=created_by,
+                name=normalized_name,
+                member_ids=sorted(selected),
+            )
+            record = await result.single()
+            if not record:
+                raise ValueError(f"Campaign {campaign_id} not found")
+            participants_raw = record.get("participants") or []
+            participants: List[Dict[str, str]] = []
+            for participant in participants_raw:
+                if isinstance(participant, dict) and participant.get("user_id"):
+                    participants.append(
+                        {
+                            "user_id": str(participant.get("user_id")),
+                            "display_name": str(participant.get("display_name") or participant.get("user_id")),
+                        }
+                    )
+            return {
+                "id": record.get("id"),
+                "type": record.get("type"),
+                "campaign_id": record.get("campaign_id"),
+                "created_by": record.get("created_by"),
+                "name": record.get("name"),
+                "created_at": record.get("created_at"),
+                "participants": participants,
+            }
+
+    async def add_user_to_conversation(
+        self,
+        *,
+        conversation_id: str,
+        actor_user_id: str,
+        target_user_id: str,
+        history_access: str = "from_join",
+    ) -> Dict[str, Any]:
+        """Add a user to a private conversation with controlled history access."""
+        normalized_history_access = str(history_access or "").strip().lower()
+        if normalized_history_access not in {"full", "from_join"}:
+            raise ValueError("history_access must be one of: full, from_join")
+
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (conv:Conversation {id: $conversation_id, type: "private"})
+                MATCH (actor:User {id: $actor_user_id})-[:CONVERSATION_MEMBER]->(conv)
+                MATCH (target:User {id: $target_user_id})-[:MEMBER_OF]->(:Campaign {id: conv.campaign_id})
+                MERGE (target)-[membership:CONVERSATION_MEMBER]->(conv)
+                ON CREATE SET membership.joined_at = datetime()
+                SET membership.history_access = $history_access
+                RETURN
+                    conv.id as conversation_id,
+                    conv.campaign_id as campaign_id,
+                    target.id as user_id,
+                    toString(membership.joined_at) as joined_at,
+                    membership.history_access as history_access
+                """,
+                conversation_id=conversation_id,
+                actor_user_id=actor_user_id,
+                target_user_id=target_user_id,
+                history_access=normalized_history_access,
+            )
+            record = await result.single()
+            if not record:
+                raise ValueError("Conversation not found, not private, or permission denied")
+            return {
+                "conversation_id": record.get("conversation_id"),
+                "campaign_id": record.get("campaign_id"),
+                "user_id": record.get("user_id"),
+                "joined_at": record.get("joined_at"),
+                "history_access": record.get("history_access"),
+            }
+
+    async def leave_conversation(self, *, conversation_id: str, user_id: str) -> Dict[str, Any]:
+        """Leave a private conversation."""
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (u:User {id: $user_id})-[membership:CONVERSATION_MEMBER]->(conv:Conversation {id: $conversation_id, type: "private"})
+                DELETE membership
+                RETURN conv.id as conversation_id, conv.campaign_id as campaign_id
+                """,
+                conversation_id=conversation_id,
+                user_id=user_id,
+            )
+            record = await result.single()
+            if not record:
+                raise ValueError("Conversation not found or user is not a member")
+            return {
+                "conversation_id": record.get("conversation_id"),
+                "campaign_id": record.get("campaign_id"),
+            }
+
+    async def get_conversation_messages(
+        self,
+        *,
+        conversation_id: str,
+        campaign_id: str,
+        user_id: str,
+        limit: int = 50,
+        since: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Get messages for a public/private conversation with history access checks."""
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (conv:Conversation {id: $conversation_id, campaign_id: $campaign_id})
+                OPTIONAL MATCH (viewer:User {id: $user_id})-[membership:CONVERSATION_MEMBER]->(conv)
+                WITH conv, membership
+                WHERE
+                    (
+                        conv.type = "public"
+                        AND EXISTS {
+                            MATCH (:User {id: $user_id})-[:MEMBER_OF]->(:Campaign {id: $campaign_id})
+                        }
+                    )
+                    OR (conv.type = "private" AND membership IS NOT NULL)
+                MATCH (conv)<-[:IN_CONVERSATION]-(message:ConversationMessage)<-[:SENT_CONVERSATION_MESSAGE]-(author:User)
+                WITH conv, membership, message, author,
+                     CASE
+                        WHEN author.email IS NULL OR trim(author.email) = "" THEN NULL
+                        ELSE split(author.email, "@")[0]
+                     END as email_prefix
+                WHERE
+                    ($since IS NULL OR message.created_at > datetime($since))
+                    AND (
+                        conv.type = "public"
+                        OR coalesce(membership.history_access, "full") = "full"
+                        OR message.created_at >= coalesce(membership.joined_at, datetime({epochMillis: 0}))
+                    )
+                RETURN
+                    message.id as id,
+                    message.conversation_id as conversation_id,
+                    message.content as content,
+                    toString(message.created_at) as created_at,
+                    author.id as author_id,
+                    CASE
+                        WHEN author.display_name IS NOT NULL AND trim(author.display_name) <> "" THEN author.display_name
+                        WHEN author.username IS NOT NULL AND trim(author.username) <> "" THEN author.username
+                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
+                        WHEN author.email IS NOT NULL AND trim(author.email) <> "" THEN author.email
+                        ELSE author.id
+                    END as author_display_name,
+                    author.avatar_url as author_avatar_url
+                ORDER BY message.created_at DESC
+                LIMIT $limit
+                """,
+                conversation_id=conversation_id,
+                campaign_id=campaign_id,
+                user_id=user_id,
+                limit=limit,
+                since=since,
+            )
+            rows: List[Dict[str, Any]] = []
+            async for record in result:
+                rows.append(
+                    {
+                        "id": record.get("id"),
+                        "conversation_id": record.get("conversation_id"),
+                        "content": record.get("content") or "",
+                        "created_at": record.get("created_at"),
+                        "author_id": record.get("author_id"),
+                        "author_display_name": record.get("author_display_name"),
+                        "author_avatar_url": record.get("author_avatar_url"),
+                    }
+                )
+            rows.reverse()
+            await session.run(
+                """
+                MATCH (viewer:User {id: $user_id})
+                MATCH (conv:Conversation {id: $conversation_id, campaign_id: $campaign_id})
+                OPTIONAL MATCH (viewer)-[membership:CONVERSATION_MEMBER]->(conv)
+                WHERE
+                    (
+                        conv.type = "public"
+                        AND EXISTS {
+                            MATCH (viewer)-[:MEMBER_OF]->(:Campaign {id: $campaign_id})
+                        }
+                    )
+                    OR (conv.type = "private" AND membership IS NOT NULL)
+                MERGE (viewer)-[seen:SEEN_CONVERSATION]->(conv)
+                SET seen.last_seen_at = datetime()
+                """,
+                user_id=user_id,
+                conversation_id=conversation_id,
+                campaign_id=campaign_id,
+            )
+            return rows
+
+    async def post_conversation_message(
+        self,
+        *,
+        conversation_id: str,
+        campaign_id: str,
+        user: Dict[str, Any],
+        content: str,
+        mention_user_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Post a message to a public/private conversation."""
+        normalized_content = str(content or "").strip()
+        if not normalized_content:
+            raise ValueError("Message content cannot be empty")
+        if len(normalized_content) > 2000:
+            raise ValueError("Message content cannot exceed 2000 characters")
+
+        author_id = self._require_team_chat_author_id(
+            user.get("id"),
+            campaign_id=campaign_id,
+            thread_id=conversation_id,
+        )
+        message_id = str(uuid.uuid4())
+        normalized_mentions = sorted(
+            {
+                str(mentioned_user_id).strip()
+                for mentioned_user_id in (mention_user_ids or [])
+                if str(mentioned_user_id).strip() and str(mentioned_user_id).strip() != author_id
+            }
+        )
+
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (conv:Conversation {id: $conversation_id, campaign_id: $campaign_id})
+                OPTIONAL MATCH (viewer:User {id: $user_id})-[membership:CONVERSATION_MEMBER]->(conv)
+                WITH conv, viewer, membership,
+                     CASE
+                        WHEN viewer.email IS NULL OR trim(viewer.email) = "" THEN NULL
+                        ELSE split(viewer.email, "@")[0]
+                     END as email_prefix
+                WHERE
+                    (
+                        conv.type = "public"
+                        AND EXISTS {
+                            MATCH (:User {id: $user_id})-[:MEMBER_OF]->(:Campaign {id: $campaign_id})
+                        }
+                    )
+                    OR (conv.type = "private" AND membership IS NOT NULL)
+                CREATE (message:ConversationMessage {
+                    id: $message_id,
+                    conversation_id: $conversation_id,
+                    user_id: $user_id,
+                    content: $content,
+                    created_at: datetime()
+                })
+                CREATE (viewer)-[:SENT_CONVERSATION_MESSAGE]->(message)-[:IN_CONVERSATION]->(conv)
+                RETURN
+                    conv.type as conversation_type,
+                    message.id as id,
+                    message.conversation_id as conversation_id,
+                    message.content as content,
+                    toString(message.created_at) as created_at,
+                    viewer.id as author_id,
+                    CASE
+                        WHEN viewer.display_name IS NOT NULL AND trim(viewer.display_name) <> "" THEN viewer.display_name
+                        WHEN viewer.username IS NOT NULL AND trim(viewer.username) <> "" THEN viewer.username
+                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
+                        WHEN viewer.email IS NOT NULL AND trim(viewer.email) <> "" THEN viewer.email
+                        ELSE viewer.id
+                    END as author_display_name,
+                    viewer.avatar_url as author_avatar_url
+                """,
+                conversation_id=conversation_id,
+                campaign_id=campaign_id,
+                user_id=author_id,
+                message_id=message_id,
+                content=normalized_content,
+            )
+            record = await result.single()
+            if not record:
+                raise ValueError("Conversation not found or permission denied")
+
+            conversation_type = str(record.get("conversation_type") or "")
+            if conversation_type == "private":
+                participants_result = await session.run(
+                    """
+                    MATCH (conv:Conversation {id: $conversation_id})<-[membership:CONVERSATION_MEMBER]-(participant:User)
+                    WHERE participant.id <> $user_id
+                    RETURN collect(participant.id) as participant_ids
+                    """,
+                    conversation_id=conversation_id,
+                    user_id=author_id,
+                )
+                participants_record = await participants_result.single()
+                participant_ids = participants_record.get("participant_ids") or []
+                for target_user_id in participant_ids:
+                    await self.create_campaign_event(
+                        campaign_id=campaign_id,
+                        event_type="private_conversation_message",
+                        message="New private conversation message",
+                        user_id=target_user_id,
+                        actor_user_id=author_id,
+                        object_id=message_id,
+                        metadata={
+                            "conversation_id": conversation_id,
+                            "delivery_scope": "private_conversation",
+                        },
+                    )
+            elif conversation_type == "public" and normalized_mentions:
+                actor_display_name = await self.resolve_user_display_name(
+                    user_id=author_id,
+                    email_fallback=user.get("email"),
+                )
+                for mentioned_user_id in normalized_mentions:
+                    await session.run(
+                        """
+                        MATCH (campaign:Campaign {id: $campaign_id})
+                        MATCH (target:User {id: $mentioned_user_id})-[:MEMBER_OF]->(campaign)
+                        CREATE (:CampaignEvent {
+                            id: $event_id,
+                            campaign_id: $campaign_id,
+                            type: "campaign_message_mentioned_user",
+                            message: $message,
+                            user_id: $mentioned_user_id,
+                            actor_user_id: $actor_user_id,
+                            created_at: datetime()
+                        })
+                        """,
+                        campaign_id=campaign_id,
+                        mentioned_user_id=mentioned_user_id,
+                        event_id=str(uuid.uuid4()),
+                        message=f"{actor_display_name} mentioned you in campaign chat",
+                        actor_user_id=author_id,
+                    )
+
+            await self.append_analytics_event(
+                event_id=f"conversation_message:{message_id}",
+                source_event_type_raw="conversation_message_posted",
+                source_entity="ConversationMessage",
+                campaign_id=campaign_id,
+                user_id=author_id,
+                actor_user_id=author_id,
+                occurred_at=record.get("created_at"),
+                object_id=message_id,
+                status="created",
+                metadata={
+                    "conversation_id": conversation_id,
+                    "conversation_type": conversation_type,
+                    "mention_count": len(normalized_mentions),
+                },
+            )
+
+            return {
+                "id": record.get("id"),
+                "conversation_id": record.get("conversation_id"),
+                "content": record.get("content") or "",
+                "created_at": record.get("created_at"),
+                "author_id": record.get("author_id"),
+                "author_display_name": record.get("author_display_name"),
+                "author_avatar_url": record.get("author_avatar_url"),
+            }
+
     async def add_member(
         self,
         tenant_id: str,
