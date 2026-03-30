@@ -248,30 +248,53 @@ export default function ConversationsPage() {
               <p className="text-sm text-zinc-400">Conversations</p>
             </div>
             <div className="space-y-2 p-3">
-              {conversations.map((conversation) => (
-                <button
-                  key={conversation.id}
-                  type="button"
-                  onClick={() => setSelectedConversationId(conversation.id)}
-                  className={`w-full rounded border px-3 py-2 text-left text-sm ${
-                    conversation.id === selectedConversationId
-                      ? "border-blue-600/50 bg-blue-500/10 text-blue-200"
-                      : "border-zinc-800 bg-zinc-950/40 text-zinc-300 hover:bg-zinc-800"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="font-medium">
-                      {conversationLabel(conversation)}
-                    </p>
-                    {(conversation.unread_count || 0) > 0 ? (
-                      <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs font-semibold text-blue-300">
-                        {conversation.unread_count}
-                      </span>
-                    ) : null}
+              {conversations.length === 0 ? (
+                <div className="rounded border border-zinc-800 bg-zinc-950/40 p-3">
+                  <p className="text-sm font-medium text-zinc-100">Start a conversation</p>
+                  <p className="mt-1 text-xs text-zinc-500">No conversations yet. Create one or post to the campaign feed.</p>
+                  <div className="mt-3 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={handleCreateConversation}
+                      className="rounded border border-blue-600/50 bg-blue-500/10 px-2.5 py-1.5 text-xs text-blue-300 hover:bg-blue-500/20"
+                    >
+                      Start a conversation
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedConversationId(publicConversation?.id || "")}
+                      className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs hover:bg-zinc-800"
+                    >
+                      Post to campaign
+                    </button>
                   </div>
-                  <p className="text-xs uppercase tracking-wide text-zinc-500">{conversation.type}</p>
-                </button>
-              ))}
+                </div>
+              ) : (
+                conversations.map((conversation) => (
+                  <button
+                    key={conversation.id}
+                    type="button"
+                    onClick={() => setSelectedConversationId(conversation.id)}
+                    className={`w-full rounded border px-3 py-2 text-left text-sm ${
+                      conversation.id === selectedConversationId
+                        ? "border-blue-600/50 bg-blue-500/10 text-blue-200"
+                        : "border-zinc-800 bg-zinc-950/40 text-zinc-300 hover:bg-zinc-800"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="font-medium">
+                        {conversationLabel(conversation)}
+                      </p>
+                      {(conversation.unread_count || 0) > 0 ? (
+                        <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs font-semibold text-blue-300">
+                          {conversation.unread_count}
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="text-xs uppercase tracking-wide text-zinc-500">{conversation.type}</p>
+                  </button>
+                ))
+              )}
             </div>
           </aside>
         </div>

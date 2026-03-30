@@ -84,8 +84,8 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
       icon: <Sparkles className="h-5 w-5" />,
     },
     {
-      name: "Team Chat",
-      href: `/campaign/${campaignId}/chat`,
+      name: "Conversations",
+      href: `/campaign/${campaignId}/conversations`,
       icon: <MessageCircle className="h-5 w-5" />,
     },
   ];
