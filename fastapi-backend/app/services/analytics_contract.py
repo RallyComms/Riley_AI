@@ -74,8 +74,6 @@ def normalize_event_type(
         "campaign_member_added_notification": ("campaign.membership.added_notification", "campaign_membership", "campaign_member"),
         "campaign_message_mentioned_user": ("chat.mention.created", "collaboration_chat", "message_mention"),
         "deadline_created": ("deadline.created", "deadlines", "campaign_deadline"),
-        "deadline_reminder_10m": ("deadline.reminder.10m", "deadlines", "campaign_deadline"),
-        "deadline_happening_now": ("deadline.reminder.now", "deadlines", "campaign_deadline"),
         "document_mentioned_user": ("document.mention.created", "document_collaboration", "document_comment"),
         "document_tagged_for_review": ("document.review.tagged", "document_workflow", "document"),
         "document_assigned_to_user": ("document.assigned.user", "document_workflow", "document"),

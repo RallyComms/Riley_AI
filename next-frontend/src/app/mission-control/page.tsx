@@ -121,7 +121,6 @@ type WorkflowData = {
   timeframe_label?: string;
   access_requests_24h: number;
   access_decisions_24h: number;
-  deadline_reminders_24h: number;
   preview_failures_24h: number;
   pending_access_requests: number;
   overdue_deadlines: number;
@@ -259,7 +258,6 @@ const defaultAdoption: AdoptionData = {
 const defaultWorkflow: WorkflowData = {
   access_requests_24h: 0,
   access_decisions_24h: 0,
-  deadline_reminders_24h: 0,
   preview_failures_24h: 0,
   pending_access_requests: 0,
   overdue_deadlines: 0,
@@ -510,7 +508,6 @@ function normalizeWorkflow(raw: unknown): WorkflowData {
     timeframe_label: asString(src.timeframe_label, ""),
     access_requests_24h: asNumber(src.access_requests_24h),
     access_decisions_24h: asNumber(src.access_decisions_24h),
-    deadline_reminders_24h: asNumber(src.deadline_reminders_24h),
     preview_failures_24h: asNumber(src.preview_failures_24h),
     pending_access_requests: asNumber(src.pending_access_requests),
     overdue_deadlines: asNumber(src.overdue_deadlines),
@@ -1270,7 +1267,6 @@ export default function MissionControlPage() {
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
                       <Metric label={`Access Requests (${timeframeLabel})`} value={workflow.access_requests_24h} />
                       <Metric label={`Access Decisions (${timeframeLabel})`} value={workflow.access_decisions_24h} />
-                      <Metric label={`Deadline Reminders (${timeframeLabel})`} value={workflow.deadline_reminders_24h} />
                       <Metric label={`Preview Failures (${timeframeLabel})`} value={workflow.preview_failures_24h} />
                       <Metric label="Pending Access Requests" value={workflow.pending_access_requests} />
                       <Metric label="Overdue Deadlines" value={workflow.overdue_deadlines} />

@@ -169,8 +169,6 @@ def _failure_classification(*, event_type: str, worker_name: str, detail: str, m
         return "Worker Timeout"
     if "permission" in detail_text or "unauthorized" in detail_text or "forbidden" in detail_text:
         return "Authorization"
-    if "deadline_reminder" in worker or "deadlinereminderworker" in worker:
-        return "Worker Execution"
     if event in {"worker_failed", "ingestion_failed", "preview_generation_failed"}:
         return "Worker Execution"
     return "Platform Error"
@@ -1138,7 +1136,6 @@ async def mission_control_workflow_health_summary(
         RETURN
           sum(CASE WHEN e.source_event_type_raw = "access_request_created" THEN 1 ELSE 0 END) as access_requests_24h,
           sum(CASE WHEN e.source_event_type_raw IN ["access_request_approved", "access_request_denied"] THEN 1 ELSE 0 END) as access_decisions_24h,
-          sum(CASE WHEN e.source_event_type_raw IN ["deadline_reminder_10m", "deadline_happening_now"] THEN 1 ELSE 0 END) as deadline_reminders_24h,
           sum(CASE WHEN e.source_event_type_raw = "preview_generation_failed" THEN 1 ELSE 0 END) as preview_failures_24h
         """,
         window_hours=window["window_hours"],
@@ -1248,7 +1245,6 @@ async def mission_control_workflow_health_summary(
         "timeframe_label": window["label"],
         "access_requests_24h": int(workflow.get("access_requests_24h") or 0),
         "access_decisions_24h": int(workflow.get("access_decisions_24h") or 0),
-        "deadline_reminders_24h": int(workflow.get("deadline_reminders_24h") or 0),
         "preview_failures_24h": int(workflow.get("preview_failures_24h") or 0),
         "pending_access_requests": int(pending_access.get("value") or 0),
         "overdue_deadlines": int(overdue_deadlines.get("value") or 0),

@@ -19,7 +19,6 @@ from app.routers import (
     document_intel_worker,
     campaign_intelligence,
     campaign_intel_worker,
-    deadline_reminder_worker,
     comparisons,
     mission_control,
 )
@@ -148,9 +147,6 @@ app.include_router(report_worker.router, prefix="/api/v1")
 app.include_router(document_intel_worker.router, prefix="/api/v1")
 # Internal worker route for Cloud Tasks campaign intelligence callbacks (token-protected)
 app.include_router(campaign_intel_worker.router, prefix="/api/v1")
-# Internal worker route for periodic deadline reminder event generation (token-protected)
-app.include_router(deadline_reminder_worker.router, prefix="/api/v1")
-
 # Ensure static directory exists BEFORE mounting (required for Cloud Run)
 # This must happen synchronously at module load time, not in lifespan
 Path("static").mkdir(parents=True, exist_ok=True)
