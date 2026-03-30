@@ -3122,12 +3122,12 @@ class GraphService:
             result = await session.run(
                 """
                 MATCH (conv:Conversation {campaign_id: $campaign_id})
-                OPTIONAL MATCH (viewer:User {id: $user_id})-[membership:CONVERSATION_MEMBER]->(conv)
-                WHERE
-                    conv.type = "public"
-                    OR membership IS NOT NULL
+                MATCH (viewer:User {id: $user_id})
+                OPTIONAL MATCH (viewer)-[membership:CONVERSATION_MEMBER]->(conv)
+                WITH conv, viewer, membership
+                WHERE conv.type = "public" OR membership IS NOT NULL
                 OPTIONAL MATCH (viewer)-[seen:SEEN_CONVERSATION]->(conv)
-                WITH conv, membership, coalesce(seen.last_seen_at, datetime({epochMillis: 0})) as last_seen_at
+                WITH conv, viewer, membership, coalesce(seen.last_seen_at, datetime({epochMillis: 0})) as last_seen_at
                 CALL {
                     WITH conv, last_seen_at
                     OPTIONAL MATCH (conv)<-[:IN_CONVERSATION]-(message:ConversationMessage)
@@ -3339,11 +3339,12 @@ class GraphService:
             }
 
     async def leave_conversation(self, *, conversation_id: str, user_id: str) -> Dict[str, Any]:
-        """Leave a private conversation."""
+        """Leave a private conversation. Idempotent: succeeds even if already left."""
         async with self._driver.session() as session:
             result = await session.run(
                 """
-                MATCH (u:User {id: $user_id})-[membership:CONVERSATION_MEMBER]->(conv:Conversation {id: $conversation_id, type: "private"})
+                MATCH (conv:Conversation {id: $conversation_id, type: "private"})
+                OPTIONAL MATCH (u:User {id: $user_id})-[membership:CONVERSATION_MEMBER]->(conv)
                 DELETE membership
                 RETURN conv.id as conversation_id, conv.campaign_id as campaign_id
                 """,
@@ -3352,7 +3353,7 @@ class GraphService:
             )
             record = await result.single()
             if not record:
-                raise ValueError("Conversation not found or user is not a member")
+                raise ValueError("Conversation not found")
             return {
                 "conversation_id": record.get("conversation_id"),
                 "campaign_id": record.get("campaign_id"),
@@ -3372,13 +3373,14 @@ class GraphService:
             result = await session.run(
                 """
                 MATCH (conv:Conversation {id: $conversation_id, campaign_id: $campaign_id})
-                OPTIONAL MATCH (viewer:User {id: $user_id})-[membership:CONVERSATION_MEMBER]->(conv)
-                WITH conv, membership
+                MATCH (viewer:User {id: $user_id})
+                OPTIONAL MATCH (viewer)-[membership:CONVERSATION_MEMBER]->(conv)
+                WITH conv, viewer, membership
                 WHERE
                     (
                         conv.type = "public"
                         AND EXISTS {
-                            MATCH (:User {id: $user_id})-[:MEMBER_OF]->(:Campaign {id: $campaign_id})
+                            MATCH (viewer)-[:MEMBER_OF]->(:Campaign {id: $campaign_id})
                         }
                     )
                     OR (conv.type = "private" AND membership IS NOT NULL)
@@ -3437,6 +3439,7 @@ class GraphService:
                 MATCH (viewer:User {id: $user_id})
                 MATCH (conv:Conversation {id: $conversation_id, campaign_id: $campaign_id})
                 OPTIONAL MATCH (viewer)-[membership:CONVERSATION_MEMBER]->(conv)
+                WITH viewer, conv, membership
                 WHERE
                     (
                         conv.type = "public"
@@ -3488,7 +3491,8 @@ class GraphService:
             result = await session.run(
                 """
                 MATCH (conv:Conversation {id: $conversation_id, campaign_id: $campaign_id})
-                OPTIONAL MATCH (viewer:User {id: $user_id})-[membership:CONVERSATION_MEMBER]->(conv)
+                MATCH (viewer:User {id: $user_id})
+                OPTIONAL MATCH (viewer)-[membership:CONVERSATION_MEMBER]->(conv)
                 WITH conv, viewer, membership,
                      CASE
                         WHEN viewer.email IS NULL OR trim(viewer.email) = "" THEN NULL
@@ -3498,7 +3502,7 @@ class GraphService:
                     (
                         conv.type = "public"
                         AND EXISTS {
-                            MATCH (:User {id: $user_id})-[:MEMBER_OF]->(:Campaign {id: $campaign_id})
+                            MATCH (viewer)-[:MEMBER_OF]->(:Campaign {id: $campaign_id})
                         }
                     )
                     OR (conv.type = "private" AND membership IS NOT NULL)

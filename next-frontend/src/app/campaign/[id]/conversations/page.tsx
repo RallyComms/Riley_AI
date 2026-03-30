@@ -11,6 +11,11 @@ type ConversationParticipant = {
   display_name: string;
 };
 
+type CampaignMember = {
+  user_id: string;
+  display_name: string;
+};
+
 type Conversation = {
   id: string;
   type: "public" | "private";
@@ -46,14 +51,30 @@ export default function ConversationsPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
+  const [campaignMembers, setCampaignMembers] = useState<CampaignMember[]>([]);
+
+  // New Conversation modal state
+  const [showNewConversation, setShowNewConversation] = useState(false);
+  const [newConvName, setNewConvName] = useState("");
+  const [newConvSelectedIds, setNewConvSelectedIds] = useState<Set<string>>(new Set());
+  const [newConvLoading, setNewConvLoading] = useState(false);
+
+  // Add People panel state
+  const [showAddPeople, setShowAddPeople] = useState(false);
+  const [addPeopleSelectedIds, setAddPeopleSelectedIds] = useState<Set<string>>(new Set());
+  const [addPeopleHistoryAccess, setAddPeopleHistoryAccess] = useState<"full" | "from_join">("from_join");
+  const [addPeopleLoading, setAddPeopleLoading] = useState(false);
+
+  const currentUserId = String(user?.id || "");
+
   const publicConversation = useMemo(
     () => conversations.find((c) => c.type === "public") || null,
-    [conversations]
+    [conversations],
   );
 
   const selectedConversation = useMemo(
     () => conversations.find((c) => c.id === selectedConversationId) || null,
-    [conversations, selectedConversationId]
+    [conversations, selectedConversationId],
   );
 
   const conversationLabel = useCallback(
@@ -64,7 +85,6 @@ export default function ConversationsPage() {
       if (conversation.type === "public") return "Public Feed";
 
       const participants = (conversation.participants || []).filter((p) => p?.user_id);
-      const currentUserId = String(user?.id || "");
       const others = participants.filter((p) => p.user_id !== currentUserId);
 
       if (others.length === 1) {
@@ -78,8 +98,23 @@ export default function ConversationsPage() {
       }
       return "Private Conversation";
     },
-    [user?.id]
+    [currentUserId],
   );
+
+  const fetchCampaignMembers = useCallback(async () => {
+    if (!campaignId || !isLoaded) return;
+    try {
+      const token = await getToken();
+      if (!token) return;
+      const data = await apiFetch<{ members: CampaignMember[] }>(
+        `/api/v1/campaigns/${encodeURIComponent(campaignId)}/members?mentions_only=true`,
+        { token, method: "GET" },
+      );
+      setCampaignMembers(data.members || []);
+    } catch {
+      setCampaignMembers([]);
+    }
+  }, [campaignId, getToken, isLoaded]);
 
   const fetchConversations = useCallback(async () => {
     if (!campaignId || !isLoaded) return;
@@ -87,7 +122,7 @@ export default function ConversationsPage() {
     if (!token) return;
     const data = await apiFetch<{ conversations: Conversation[] }>(
       `/api/v1/conversations?campaign_id=${encodeURIComponent(campaignId)}`,
-      { token, method: "GET" }
+      { token, method: "GET" },
     );
     const next = data.conversations || [];
     setConversations(next);
@@ -104,16 +139,16 @@ export default function ConversationsPage() {
     if (!token) return;
     const data = await apiFetch<{ messages: ConversationMessage[] }>(
       `/api/v1/conversations/${encodeURIComponent(selectedConversationId)}/messages?campaign_id=${encodeURIComponent(campaignId)}&limit=100`,
-      { token, method: "GET" }
+      { token, method: "GET" },
     );
     setMessages(data.messages || []);
-    // Fetching messages marks conversation as seen server-side.
     await fetchConversations();
   }, [campaignId, fetchConversations, getToken, isLoaded, selectedConversationId]);
 
   useEffect(() => {
     void fetchConversations();
-  }, [fetchConversations]);
+    void fetchCampaignMembers();
+  }, [fetchConversations, fetchCampaignMembers]);
 
   useEffect(() => {
     void fetchMessages();
@@ -130,11 +165,7 @@ export default function ConversationsPage() {
       await apiFetch(`/api/v1/conversations/${encodeURIComponent(selectedConversationId)}/messages`, {
         token,
         method: "POST",
-        body: {
-          campaign_id: campaignId,
-          content: draft.trim(),
-          mention_user_ids: [],
-        },
+        body: { campaign_id: campaignId, content: draft.trim(), mention_user_ids: [] },
       });
       setDraft("");
       await fetchMessages();
@@ -145,35 +176,165 @@ export default function ConversationsPage() {
     }
   };
 
-  const handleCreateConversation = async () => {
-    try {
-      setError(null);
-      const participantsRaw = window.prompt("Participant user IDs (comma-separated):", "");
-      if (participantsRaw === null) return;
-      const nameRaw = window.prompt("Conversation name (optional):", "");
-      const participants = participantsRaw
-        .split(",")
-        .map((id) => id.trim())
-        .filter(Boolean);
+  // --- New Conversation ---
+  const openNewConversation = () => {
+    setNewConvName("");
+    setNewConvSelectedIds(new Set());
+    setShowNewConversation(true);
+    setError(null);
+  };
 
+  const toggleNewConvMember = (id: string) => {
+    setNewConvSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleCreateConversation = async () => {
+    if (newConvSelectedIds.size === 0) return;
+    try {
+      setNewConvLoading(true);
+      setError(null);
       const token = await getToken();
       if (!token) throw new Error("Authentication required.");
-
-      await apiFetch("/api/v1/conversations", {
+      const created = await apiFetch<Conversation>("/api/v1/conversations", {
         token,
         method: "POST",
         body: {
           type: "private",
           campaign_id: campaignId,
-          participants,
-          name: nameRaw?.trim() || undefined,
+          participants: Array.from(newConvSelectedIds),
+          name: newConvName.trim() || undefined,
         },
       });
+      setShowNewConversation(false);
       await fetchConversations();
+      if (created?.id) setSelectedConversationId(created.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create conversation.");
+    } finally {
+      setNewConvLoading(false);
     }
   };
+
+  // --- Add People ---
+  const existingParticipantIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const p of selectedConversation?.participants || []) {
+      if (p?.user_id) ids.add(p.user_id);
+    }
+    return ids;
+  }, [selectedConversation]);
+
+  const addableCampaignMembers = useMemo(
+    () => campaignMembers.filter((m) => !existingParticipantIds.has(m.user_id)),
+    [campaignMembers, existingParticipantIds],
+  );
+
+  const openAddPeople = () => {
+    setAddPeopleSelectedIds(new Set());
+    setAddPeopleHistoryAccess("from_join");
+    setShowAddPeople(true);
+    setError(null);
+  };
+
+  const toggleAddPeopleMember = (id: string) => {
+    setAddPeopleSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleAddPeople = async () => {
+    if (addPeopleSelectedIds.size === 0 || !selectedConversationId) return;
+    try {
+      setAddPeopleLoading(true);
+      setError(null);
+      const token = await getToken();
+      if (!token) throw new Error("Authentication required.");
+      for (const userId of addPeopleSelectedIds) {
+        await apiFetch(
+          `/api/v1/conversations/${encodeURIComponent(selectedConversationId)}/add-user`,
+          {
+            token,
+            method: "POST",
+            body: { user_id: userId, history_access: addPeopleHistoryAccess },
+          },
+        );
+      }
+      setShowAddPeople(false);
+      await fetchConversations();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to add people.");
+    } finally {
+      setAddPeopleLoading(false);
+    }
+  };
+
+  // --- Leave Conversation ---
+  const [leaveLoading, setLeaveLoading] = useState(false);
+
+  const handleLeaveConversation = async () => {
+    if (!selectedConversationId || selectedConversation?.type !== "private") return;
+    try {
+      setLeaveLoading(true);
+      setError(null);
+      const token = await getToken();
+      if (!token) throw new Error("Authentication required.");
+      await apiFetch(
+        `/api/v1/conversations/${encodeURIComponent(selectedConversationId)}/leave`,
+        { token, method: "POST" },
+      );
+      setConversations((prev) => prev.filter((c) => c.id !== selectedConversationId));
+      setSelectedConversationId(publicConversation?.id || "");
+      setMessages([]);
+      setShowAddPeople(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to leave conversation.");
+    } finally {
+      setLeaveLoading(false);
+    }
+  };
+
+  // --- Member picker (shared UI) ---
+  const renderMemberPicker = (
+    members: CampaignMember[],
+    selectedIds: Set<string>,
+    onToggle: (id: string) => void,
+    emptyLabel: string,
+  ) => (
+    <div className="max-h-48 space-y-1 overflow-y-auto">
+      {members.length === 0 ? (
+        <p className="py-2 text-xs text-zinc-500">{emptyLabel}</p>
+      ) : (
+        members.map((m) => (
+          <label
+            key={m.user_id}
+            className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 hover:bg-zinc-800"
+          >
+            <input
+              type="checkbox"
+              checked={selectedIds.has(m.user_id)}
+              onChange={() => onToggle(m.user_id)}
+              className="accent-blue-500"
+            />
+            <span className="text-sm text-zinc-200">{m.display_name || m.user_id}</span>
+          </label>
+        ))
+      )}
+    </div>
+  );
+
+  // Only show members other than self for new conversation picker
+  const newConvMembers = useMemo(
+    () => campaignMembers.filter((m) => m.user_id !== currentUserId),
+    [campaignMembers, currentUserId],
+  );
 
   return (
     <div className="min-h-screen bg-zinc-950 p-6 text-zinc-100">
@@ -183,19 +344,26 @@ export default function ConversationsPage() {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => setSelectedConversationId(publicConversation?.id || "")}
+              onClick={() => {
+                setShowNewConversation(false);
+                setShowAddPeople(false);
+                setSelectedConversationId(publicConversation?.id || "");
+              }}
               className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm hover:bg-zinc-800"
             >
               Post to Campaign
             </button>
             <button
               type="button"
-              onClick={handleCreateConversation}
+              onClick={openNewConversation}
               className="rounded border border-blue-600/50 bg-blue-500/10 px-3 py-1.5 text-sm text-blue-300 hover:bg-blue-500/20"
             >
               New Conversation
             </button>
-            <Link href={`/campaign/${campaignId}`} className="rounded border border-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-800">
+            <Link
+              href={`/campaign/${campaignId}`}
+              className="rounded border border-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-800"
+            >
               Back
             </Link>
           </div>
@@ -204,45 +372,173 @@ export default function ConversationsPage() {
         {error ? <p className="text-sm text-red-300">{error}</p> : null}
 
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          {/* Main panel */}
           <section className="lg:col-span-2 rounded border border-zinc-800 bg-zinc-900">
-            <div className="border-b border-zinc-800 px-4 py-3">
-              <p className="text-sm text-zinc-400">Public Feed + Messages</p>
-              <p className="text-base font-medium">
-                {conversationLabel(selectedConversation)}
-              </p>
-            </div>
-            <div className="max-h-[60vh] space-y-2 overflow-y-auto px-4 py-3">
-              {messages.length === 0 ? (
-                <p className="text-sm text-zinc-500">No messages yet.</p>
-              ) : (
-                messages.map((message) => (
-                  <div key={message.id} className="rounded border border-zinc-800 bg-zinc-950/60 px-3 py-2">
-                    <p className="text-sm font-medium text-zinc-200">{message.author_display_name}</p>
-                    <p className="text-sm text-zinc-300">{message.content}</p>
-                    <p className="text-xs text-zinc-500">{new Date(message.created_at).toLocaleString()}</p>
-                  </div>
-                ))
-              )}
-            </div>
-            <form onSubmit={handlePost} className="border-t border-zinc-800 p-3">
-              <div className="flex items-center gap-2">
+            {/* New Conversation modal */}
+            {showNewConversation ? (
+              <div className="space-y-4 p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-base font-medium">New Conversation</p>
+                  <button
+                    type="button"
+                    onClick={() => setShowNewConversation(false)}
+                    className="text-xs text-zinc-400 hover:text-zinc-200"
+                  >
+                    Cancel
+                  </button>
+                </div>
                 <input
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  placeholder="Write a message..."
-                  className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+                  value={newConvName}
+                  onChange={(e) => setNewConvName(e.target.value)}
+                  placeholder="Conversation name (optional)"
+                  className="w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
                 />
+                <div>
+                  <p className="mb-1 text-xs font-medium text-zinc-400">Select participants</p>
+                  {renderMemberPicker(
+                    newConvMembers,
+                    newConvSelectedIds,
+                    toggleNewConvMember,
+                    "No other campaign members found.",
+                  )}
+                </div>
                 <button
-                  type="submit"
-                  disabled={loading || !selectedConversationId || !draft.trim()}
-                  className="rounded border border-emerald-600/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300 disabled:opacity-50"
+                  type="button"
+                  onClick={handleCreateConversation}
+                  disabled={newConvLoading || newConvSelectedIds.size === 0}
+                  className="rounded border border-blue-600/50 bg-blue-500/10 px-4 py-2 text-sm text-blue-300 hover:bg-blue-500/20 disabled:opacity-50"
                 >
-                  Send
+                  {newConvLoading ? "Creating..." : "Create Conversation"}
                 </button>
               </div>
-            </form>
+            ) : showAddPeople && selectedConversation?.type === "private" ? (
+              /* Add People panel */
+              <div className="space-y-4 p-4">
+                <div className="flex items-center justify-between">
+                  <p className="text-base font-medium">
+                    Add People to {conversationLabel(selectedConversation)}
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddPeople(false)}
+                    className="text-xs text-zinc-400 hover:text-zinc-200"
+                  >
+                    Cancel
+                  </button>
+                </div>
+                <div>
+                  <p className="mb-1 text-xs font-medium text-zinc-400">Select members to add</p>
+                  {renderMemberPicker(
+                    addableCampaignMembers,
+                    addPeopleSelectedIds,
+                    toggleAddPeopleMember,
+                    "All campaign members are already in this conversation.",
+                  )}
+                </div>
+                <div>
+                  <p className="mb-1 text-xs font-medium text-zinc-400">History access</p>
+                  <div className="flex gap-3">
+                    <label className="flex cursor-pointer items-center gap-1.5 text-sm text-zinc-200">
+                      <input
+                        type="radio"
+                        name="history_access"
+                        checked={addPeopleHistoryAccess === "from_join"}
+                        onChange={() => setAddPeopleHistoryAccess("from_join")}
+                        className="accent-blue-500"
+                      />
+                      From now on
+                    </label>
+                    <label className="flex cursor-pointer items-center gap-1.5 text-sm text-zinc-200">
+                      <input
+                        type="radio"
+                        name="history_access"
+                        checked={addPeopleHistoryAccess === "full"}
+                        onChange={() => setAddPeopleHistoryAccess("full")}
+                        className="accent-blue-500"
+                      />
+                      Full history
+                    </label>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleAddPeople}
+                  disabled={addPeopleLoading || addPeopleSelectedIds.size === 0}
+                  className="rounded border border-blue-600/50 bg-blue-500/10 px-4 py-2 text-sm text-blue-300 hover:bg-blue-500/20 disabled:opacity-50"
+                >
+                  {addPeopleLoading ? "Adding..." : "Add People"}
+                </button>
+              </div>
+            ) : (
+              /* Message view */
+              <>
+                <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+                  <div>
+                    <p className="text-sm text-zinc-400">
+                      {selectedConversation?.type === "public" ? "Public Feed" : "Messages"}
+                    </p>
+                    <p className="text-base font-medium">{conversationLabel(selectedConversation)}</p>
+                    {selectedConversation?.type === "private" && selectedConversation.participants && (
+                      <p className="mt-0.5 text-xs text-zinc-500">
+                        {selectedConversation.participants.map((p) => p.display_name || p.user_id).join(", ")}
+                      </p>
+                    )}
+                  </div>
+                  {selectedConversation?.type === "private" && (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={openAddPeople}
+                        className="rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-700"
+                      >
+                        Add People
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleLeaveConversation}
+                        disabled={leaveLoading}
+                        className="rounded border border-red-800/50 bg-red-500/10 px-2.5 py-1 text-xs text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                      >
+                        {leaveLoading ? "Leaving..." : "Leave"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <div className="max-h-[60vh] space-y-2 overflow-y-auto px-4 py-3">
+                  {messages.length === 0 ? (
+                    <p className="text-sm text-zinc-500">No messages yet.</p>
+                  ) : (
+                    messages.map((message) => (
+                      <div key={message.id} className="rounded border border-zinc-800 bg-zinc-950/60 px-3 py-2">
+                        <p className="text-sm font-medium text-zinc-200">{message.author_display_name}</p>
+                        <p className="text-sm text-zinc-300">{message.content}</p>
+                        <p className="text-xs text-zinc-500">{new Date(message.created_at).toLocaleString()}</p>
+                      </div>
+                    ))
+                  )}
+                </div>
+                <form onSubmit={handlePost} className="border-t border-zinc-800 p-3">
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      placeholder="Write a message..."
+                      className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+                    />
+                    <button
+                      type="submit"
+                      disabled={loading || !selectedConversationId || !draft.trim()}
+                      className="rounded border border-emerald-600/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300 disabled:opacity-50"
+                    >
+                      Send
+                    </button>
+                  </div>
+                </form>
+              </>
+            )}
           </section>
 
+          {/* Sidebar */}
           <aside className="rounded border border-zinc-800 bg-zinc-900">
             <div className="border-b border-zinc-800 px-4 py-3">
               <p className="text-sm text-zinc-400">Conversations</p>
@@ -251,11 +547,13 @@ export default function ConversationsPage() {
               {conversations.length === 0 ? (
                 <div className="rounded border border-zinc-800 bg-zinc-950/40 p-3">
                   <p className="text-sm font-medium text-zinc-100">Start a conversation</p>
-                  <p className="mt-1 text-xs text-zinc-500">No conversations yet. Create one or post to the campaign feed.</p>
+                  <p className="mt-1 text-xs text-zinc-500">
+                    No conversations yet. Create one or post to the campaign feed.
+                  </p>
                   <div className="mt-3 flex gap-2">
                     <button
                       type="button"
-                      onClick={handleCreateConversation}
+                      onClick={openNewConversation}
                       className="rounded border border-blue-600/50 bg-blue-500/10 px-2.5 py-1.5 text-xs text-blue-300 hover:bg-blue-500/20"
                     >
                       Start a conversation
@@ -274,7 +572,11 @@ export default function ConversationsPage() {
                   <button
                     key={conversation.id}
                     type="button"
-                    onClick={() => setSelectedConversationId(conversation.id)}
+                    onClick={() => {
+                      setSelectedConversationId(conversation.id);
+                      setShowNewConversation(false);
+                      setShowAddPeople(false);
+                    }}
                     className={`w-full rounded border px-3 py-2 text-left text-sm ${
                       conversation.id === selectedConversationId
                         ? "border-blue-600/50 bg-blue-500/10 text-blue-200"
@@ -282,9 +584,7 @@ export default function ConversationsPage() {
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <p className="font-medium">
-                        {conversationLabel(conversation)}
-                      </p>
+                      <p className="font-medium">{conversationLabel(conversation)}</p>
                       {(conversation.unread_count || 0) > 0 ? (
                         <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs font-semibold text-blue-300">
                           {conversation.unread_count}
