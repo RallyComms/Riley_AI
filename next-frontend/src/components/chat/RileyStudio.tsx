@@ -41,6 +41,13 @@ type MessageSource = {
   location?: string;
 };
 
+function generateClientMessageId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `msg-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 type Conversation = {
   id: string;
   title: string;
@@ -963,8 +970,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       }
     }
 
+    const clientMessageId = generateClientMessageId();
     const userMessage: Message = {
-      id: `user-${Date.now()}`,
+      id: `user-${clientMessageId}`,
       role: "user",
       content: trimmedInput,
     };
@@ -1011,6 +1019,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           mode: mode,
           session_id: sessionId,
           user_display_name: userDisplayName,
+          client_message_id: clientMessageId,
         },
       });
 

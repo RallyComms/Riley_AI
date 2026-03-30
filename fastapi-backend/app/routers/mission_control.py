@@ -944,14 +944,14 @@ async def mission_control_adoption_summary(
                 e.actor_user_id IS NOT NULL
                 AND trim(coalesce(e.actor_user_id, "")) <> ""
                 AND NOT toLower(trim(coalesce(e.actor_user_id, ""))) STARTS WITH "system:"
-                AND toLower(trim(coalesce(e.actor_user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+                AND NOT (toLower(trim(coalesce(e.actor_user_id, ""))) IN ["system", "unknown_user", "unknown", "null", "none"])
               )
               THEN 1
               WHEN (
                 e.actor_user_id IS NULL
                 AND trim(coalesce(e.user_id, "")) <> ""
                 AND NOT toLower(trim(coalesce(e.user_id, ""))) STARTS WITH "system:"
-                AND toLower(trim(coalesce(e.user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+                AND NOT (toLower(trim(coalesce(e.user_id, ""))) IN ["system", "unknown_user", "unknown", "null", "none"])
               )
               THEN 1
               ELSE NULL
@@ -981,14 +981,14 @@ async def mission_control_adoption_summary(
               e.actor_user_id IS NOT NULL
               AND trim(coalesce(e.actor_user_id, "")) <> ""
               AND NOT toLower(trim(coalesce(e.actor_user_id, ""))) STARTS WITH "system:"
-              AND toLower(trim(coalesce(e.actor_user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+              AND NOT (toLower(trim(coalesce(e.actor_user_id, ""))) IN ["system", "unknown_user", "unknown", "null", "none"])
             )
             THEN trim(coalesce(e.actor_user_id, ""))
             WHEN (
               e.actor_user_id IS NULL
               AND trim(coalesce(e.user_id, "")) <> ""
               AND NOT toLower(trim(coalesce(e.user_id, ""))) STARTS WITH "system:"
-              AND toLower(trim(coalesce(e.user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+              AND NOT (toLower(trim(coalesce(e.user_id, ""))) IN ["system", "unknown_user", "unknown", "null", "none"])
             )
             THEN trim(coalesce(e.user_id, ""))
             ELSE ""
@@ -1011,7 +1011,7 @@ async def mission_control_adoption_summary(
           ) as unique_campaigns_30d,
           count(
             DISTINCT CASE
-              WHEN ((e.feature_area = "chat") OR (e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]))
+              WHEN e.source_event_type_raw = "chat_generation_completed"
               THEN human_user_id
               ELSE NULL
             END
@@ -1038,14 +1038,14 @@ async def mission_control_adoption_summary(
               e.actor_user_id IS NOT NULL
               AND trim(coalesce(e.actor_user_id, "")) <> ""
               AND NOT toLower(trim(coalesce(e.actor_user_id, ""))) STARTS WITH "system:"
-              AND toLower(trim(coalesce(e.actor_user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+              AND NOT (toLower(trim(coalesce(e.actor_user_id, ""))) IN ["system", "unknown_user", "unknown", "null", "none"])
             )
             THEN trim(coalesce(e.actor_user_id, ""))
             WHEN (
               e.actor_user_id IS NULL
               AND trim(coalesce(e.user_id, "")) <> ""
               AND NOT toLower(trim(coalesce(e.user_id, ""))) STARTS WITH "system:"
-              AND toLower(trim(coalesce(e.user_id, ""))) NOT IN ["system", "unknown_user", "unknown", "null", "none"]
+              AND NOT (toLower(trim(coalesce(e.user_id, ""))) IN ["system", "unknown_user", "unknown", "null", "none"])
             )
             THEN trim(coalesce(e.user_id, ""))
             ELSE ""
@@ -1053,11 +1053,11 @@ async def mission_control_adoption_summary(
         WHERE trim(user_id) <> ""
         WITH user_id,
              count(e) as events,
-             sum(
-               CASE
-                 WHEN ((e.feature_area = "chat") OR (e.source_entity IN ["Message", "TeamMessage", "ThreadMessage"]))
-                 THEN 1
-                 ELSE 0
+             count(
+               DISTINCT CASE
+                 WHEN e.source_event_type_raw = "chat_generation_completed"
+                 THEN coalesce(e.event_id, "")
+                 ELSE NULL
                END
              ) as chats,
              sum(

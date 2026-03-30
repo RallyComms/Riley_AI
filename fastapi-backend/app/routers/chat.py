@@ -58,6 +58,7 @@ class ChatRequest(BaseModel):
     mode: Literal["fast", "deep", "normal"] = "fast"
     session_id: Optional[str] = Field(None, description="Optional session ID for chat memory")
     user_display_name: Optional[str] = Field(None, description="User's display name for personalization (username, firstName, or email)")
+    client_message_id: Optional[str] = Field(None, description="Client-generated stable ID for one user prompt")
 
 
 class ChatResponse(BaseModel):
@@ -1481,8 +1482,21 @@ Context Data:
     if graph:
         try:
             user_id = current_user.get("id", "unknown")
+            normalized_client_message_id = str(request.client_message_id or "").strip()
+            if normalized_client_message_id:
+                analytics_event_id = (
+                    f"chat_generation:{request.tenant_id}:{request.session_id or 'ad-hoc'}:{normalized_client_message_id}"
+                )
+            else:
+                analytics_event_id = f"chat_generation:{request.session_id or 'ad-hoc'}:{int(time.time() * 1000)}"
+                logger.warning(
+                    "chat_event_missing_client_message_id tenant_id=%s session_id=%s user_id=%s",
+                    request.tenant_id,
+                    request.session_id,
+                    user_id,
+                )
             await graph.append_analytics_event(
-                event_id=f"chat_generation:{request.session_id or 'ad-hoc'}:{int(time.time() * 1000)}",
+                event_id=analytics_event_id,
                 source_event_type_raw="chat_generation_completed",
                 source_entity="ChatGeneration",
                 campaign_id=request.tenant_id,
