@@ -151,8 +151,13 @@ export default function CampaignAssetsPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadPollIntervalRef = useRef<number | null>(null);
   const uploadPollStartedAtRef = useRef<number | null>(null);
+  const recentUploadedNamesRef = useRef<string[]>([]);
 
   const normalizeFilename = useCallback((name: string) => name.trim().toLowerCase(), []);
+
+  useEffect(() => {
+    recentUploadedNamesRef.current = recentUploadedNames;
+  }, [recentUploadedNames]);
 
   const stopUploadStatusPolling = useCallback(() => {
     if (uploadPollIntervalRef.current !== null) {
@@ -276,7 +281,12 @@ export default function CampaignAssetsPage() {
 
     const pollOnce = async () => {
       const latestAssets = await fetchFiles();
-      if (areRecentUploadsSettled(latestAssets, recentUploadedNames)) {
+      const trackedNames = recentUploadedNamesRef.current;
+      if (trackedNames.length === 0) {
+        stopUploadStatusPolling();
+        return;
+      }
+      if (areRecentUploadsSettled(latestAssets, trackedNames)) {
         stopUploadStatusPolling();
         setRecentUploadedNames([]);
         return;
@@ -401,8 +411,13 @@ export default function CampaignAssetsPage() {
       // This ensures the UI sees the latest preview state without waiting
       await fetchFiles();
       if (successfulUploads.length > 0) {
-        setRecentUploadedNames([]);
-        stopUploadStatusPolling();
+        setRecentUploadedNames((prev) => {
+          const merged = new Set(prev.map(normalizeFilename));
+          for (const name of successfulUploads) {
+            merged.add(normalizeFilename(name));
+          }
+          return Array.from(merged);
+        });
       }
       showToast("success", `Uploaded ${selectedFiles.length} file(s). Riley Memory is off by default.`);
     } catch (error) {
