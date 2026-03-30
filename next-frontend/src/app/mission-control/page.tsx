@@ -167,6 +167,7 @@ type SystemData = {
   report_failures_24h: number;
   ingestion_failures_24h: number;
   recent_failures: Array<{
+    failure_id?: string;
     type: string;
     failure_label?: string;
     failure_class?: string;
@@ -569,6 +570,7 @@ function normalizeSystem(raw: unknown): SystemData {
     recent_failures: failures.map((row, idx) => {
       const item = asRecord(row);
       return {
+        failure_id: asString(item.failure_id, ""),
         type: asString(item.type, "unknown"),
         failure_label: asString(item.failure_label, asString(item.type, "Unknown Failure")),
         failure_class: asString(item.failure_class, ""),
@@ -657,6 +659,7 @@ export default function MissionControlPage() {
   const [adoption, setAdoption] = useState<AdoptionData>(defaultAdoption);
   const [workflow, setWorkflow] = useState<WorkflowData>(defaultWorkflow);
   const [system, setSystem] = useState<SystemData>(defaultSystem);
+  const [resolvingFailureIds, setResolvingFailureIds] = useState<Record<string, boolean>>({});
   const cacheRef = useRef<Map<string, unknown>>(new Map());
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const activeTabRef = useRef<MissionControlTab>(activeTab);
@@ -860,6 +863,34 @@ export default function MissionControlPage() {
 
   const activeTabLoading = tabLoading[activeTab];
   const activeTabLabel = tabs.find((tab) => tab.id === activeTab)?.label || "Active tab";
+
+  const handleResolveFailure = useCallback(async (failureId: string) => {
+    const normalized = asString(failureId, "");
+    if (!normalized || resolvingFailureIds[normalized]) return;
+    setResolvingFailureIds((prev) => ({ ...prev, [normalized]: true }));
+    const previousFailures = system.recent_failures;
+    setSystem((prev) => ({
+      ...prev,
+      recent_failures: prev.recent_failures.filter((row) => asString(row.failure_id, "") !== normalized),
+    }));
+    try {
+      const token = await getToken();
+      if (!token) throw new Error("Authentication required.");
+      await apiFetch(`/api/v1/mission-control/failures/${encodeURIComponent(normalized)}/resolve`, {
+        token,
+        method: "POST",
+      });
+    } catch (err) {
+      setSystem((prev) => ({ ...prev, recent_failures: previousFailures }));
+      setError(err instanceof Error ? err.message : "Failed to resolve failure.");
+    } finally {
+      setResolvingFailureIds((prev) => {
+        const next = { ...prev };
+        delete next[normalized];
+        return next;
+      });
+    }
+  }, [getToken, resolvingFailureIds, system.recent_failures]);
 
   return (
     <div className="min-h-screen bg-slate-100 text-slate-900">
@@ -1218,7 +1249,7 @@ export default function MissionControlPage() {
                       <p className="mb-2 text-sm font-semibold">Recent Failures ({timeframeLabel})</p>
                       <SimpleTable
                         emptyLabel="No recent failures."
-                        columns={["Failure", "Worker", "Campaign", "Object/Job", "Status", "Timestamp", "Detail"]}
+                        columns={["Failure", "Worker", "Campaign", "Object/Job", "Status", "Timestamp", "Detail", "Action"]}
                         rows={system.recent_failures.map((row) => [
                           row.failure_class
                             ? `${asString(row.failure_label, row.type)} (${row.failure_class})`
@@ -1229,6 +1260,18 @@ export default function MissionControlPage() {
                           row.status || "-",
                           safeDateTime(row.occurred_at),
                           row.detail || "-",
+                          row.failure_id ? (
+                            <button
+                              type="button"
+                              onClick={() => void handleResolveFailure(row.failure_id || "")}
+                              disabled={Boolean(resolvingFailureIds[row.failure_id || ""])}
+                              className="rounded border border-emerald-600/40 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+                            >
+                              {resolvingFailureIds[row.failure_id || ""] ? "Resolving..." : "Resolve"}
+                            </button>
+                          ) : (
+                            "-"
+                          ),
                         ])}
                       />
                     </div>

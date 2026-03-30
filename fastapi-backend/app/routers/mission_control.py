@@ -1357,6 +1357,7 @@ async def mission_control_system_health_summary(
         """
         MATCH (e:AnalyticsEvent)
         WHERE datetime(e.occurred_at) >= datetime() - duration({hours: $window_hours})
+          AND coalesce(e.resolved, false) = false
           AND (
             e.source_event_type_raw = "auth_tenant_access_denied"
             OR e.source_event_type_raw = "worker_failed"
@@ -1367,6 +1368,7 @@ async def mission_control_system_health_summary(
         OPTIONAL MATCH (c:Campaign)
         WHERE c.id = e.campaign_id OR c.tenant_id = e.campaign_id
         RETURN
+          e.event_id as failure_id,
           e.source_event_type_raw as type,
           e.occurred_at as occurred_at,
           e.source_entity as source_entity,
@@ -1406,6 +1408,7 @@ async def mission_control_system_health_summary(
         )
         enriched_failures.append(
             {
+                "failure_id": row.get("failure_id"),
                 "type": row.get("type") or "unknown",
                 "failure_label": _failure_type_label(str(row.get("type") or "")),
                 "failure_class": failure_class,
@@ -1429,6 +1432,57 @@ async def mission_control_system_health_summary(
         "report_failures_24h": int(system.get("report_failures_24h") or 0),
         "ingestion_failures_24h": int(system.get("ingestion_failures_24h") or 0),
         "recent_failures": enriched_failures,
+    }
+
+
+@router.post("/mission-control/failures/{failure_id}/resolve")
+async def mission_control_resolve_failure(
+    failure_id: str,
+    current_user: Dict = Depends(verify_mission_control_admin),
+    graph: GraphService = Depends(get_graph),
+) -> Dict[str, Any]:
+    resolved_by = str(current_user.get("id") or "").strip() or "unknown"
+    row = await _single_value(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent {event_id: $failure_id})
+        WHERE
+          e.source_event_type_raw = "auth_tenant_access_denied"
+          OR e.source_event_type_raw = "worker_failed"
+          OR e.source_event_type_raw = "ingestion_failed"
+          OR e.source_event_type_raw = "preview_generation_failed"
+          OR (e.source_entity = "RileyReportJob" AND e.status = "failed")
+        WITH e, coalesce(e.resolved, false) as already_resolved
+        SET
+          e.resolved = true,
+          e.resolved_at = coalesce(e.resolved_at, datetime()),
+          e.resolved_by = coalesce(e.resolved_by, $resolved_by),
+          e.updated_at = datetime()
+        RETURN
+          e.event_id as failure_id,
+          e.source_event_type_raw as type,
+          already_resolved as already_resolved,
+          toString(e.resolved_at) as resolved_at,
+          e.resolved_by as resolved_by
+        """,
+        failure_id=failure_id,
+        resolved_by=resolved_by,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Failure not found.")
+    logger.info(
+        "mission_control_failure_resolved failure_id=%s resolved_by=%s already_resolved=%s",
+        row.get("failure_id"),
+        resolved_by,
+        bool(row.get("already_resolved")),
+    )
+    return {
+        "failure_id": row.get("failure_id"),
+        "type": row.get("type"),
+        "resolved": True,
+        "already_resolved": bool(row.get("already_resolved")),
+        "resolved_at": row.get("resolved_at"),
+        "resolved_by": row.get("resolved_by"),
     }
 
 
