@@ -204,6 +204,8 @@ class MembersListResponse(BaseModel):
 class MentionMemberResponse(BaseModel):
     user_id: str
     display_name: str
+    username: Optional[str] = None
+    email: Optional[str] = None
     avatar_url: Optional[str] = None
     role: Optional[str] = None
     status: Optional[Literal["active", "away", "in_meeting"]] = None

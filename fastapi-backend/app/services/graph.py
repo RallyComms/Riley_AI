@@ -4666,6 +4666,14 @@ class GraphService:
             RETURN
                 u.id as user_id,
                 CASE
+                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
+                    ELSE NULL
+                END as username,
+                CASE
+                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
+                    ELSE NULL
+                END as email,
+                CASE
                     WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
                     WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
@@ -4696,6 +4704,8 @@ class GraphService:
                     {
                         "user_id": record["user_id"],
                         "display_name": record["display_name"],
+                        "username": record.get("username"),
+                        "email": record.get("email"),
                         "avatar_url": record.get("avatar_url"),
                         "role": record.get("role"),
                         "status": record.get("status") or "active",

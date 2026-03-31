@@ -28,6 +28,8 @@ interface CampaignsResponse {
 interface CampaignMember {
   user_id: string;
   display_name?: string;
+  username?: string;
+  email?: string;
 }
 
 interface CampaignMembersResponse {
@@ -127,6 +129,22 @@ function initials(name: string): string {
   return `${words[0][0]}${words[1][0]}`.toUpperCase();
 }
 
+function resolveUserLabel(member: CampaignMember): string {
+  const displayName = String(member.display_name || "").trim();
+  if (displayName) return displayName;
+
+  const username = String(member.username || "").trim();
+  if (username) return username;
+
+  const email = String(member.email || "").trim();
+  if (email) {
+    const emailPrefix = email.split("@")[0]?.trim();
+    if (emailPrefix) return emailPrefix;
+  }
+
+  return String(member.user_id || "").trim() || "Unknown user";
+}
+
 export default function HomePage() {
   const router = useRouter();
   const { user } = useUser();
@@ -205,7 +223,7 @@ export default function HomePage() {
               { token, method: "GET" },
             );
             const names = (membersData.members || [])
-              .map((member) => member.display_name || member.user_id)
+              .map((member) => resolveUserLabel(member))
               .filter(Boolean)
               .slice(0, 4);
             return [campaign.campaignId, { count: membersData.members?.length || 0, names }] as const;

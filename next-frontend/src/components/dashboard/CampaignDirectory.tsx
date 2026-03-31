@@ -94,6 +94,8 @@ export function CampaignDirectory({
   onRequestAccess,
   onArchive,
   onRestore,
+  onTerminate,
+  terminatingCampaignId = null,
   campaignsVersion = 0,
   onViewDocument,
 }: CampaignDirectoryProps) {
@@ -389,13 +391,31 @@ export function CampaignDirectory({
                             ) : null}
 
                             {activeTab === "archive" && onRestore ? (
-                              <button
-                                type="button"
-                                onClick={() => onRestore(campaign.campaignId)}
-                                className="w-full rounded-lg border border-[#ddd4c3] px-3 py-2 text-sm font-medium text-[#5f6778] transition hover:bg-[#efe6d7]"
-                              >
-                                Restore
-                              </button>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => onRestore(campaign.campaignId)}
+                                  className="flex-1 rounded-lg border border-[#ddd4c3] px-3 py-2 text-sm font-medium text-[#5f6778] transition hover:bg-[#efe6d7]"
+                                >
+                                  Restore
+                                </button>
+                                {onTerminate ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const confirmed = window.confirm(
+                                        "Permanently delete this archived campaign? This cannot be undone.",
+                                      );
+                                      if (!confirmed) return;
+                                      void onTerminate(campaign.campaignId);
+                                    }}
+                                    disabled={terminatingCampaignId === campaign.campaignId}
+                                    className="flex-1 rounded-lg border border-[#e7b8b8] bg-[#fff3f3] px-3 py-2 text-sm font-medium text-[#9e3434] transition hover:bg-[#ffe9e9] disabled:cursor-not-allowed disabled:opacity-60"
+                                  >
+                                    {terminatingCampaignId === campaign.campaignId ? "Deleting..." : "Delete"}
+                                  </button>
+                                ) : null}
+                              </div>
                             ) : null}
                           </div>
                         );

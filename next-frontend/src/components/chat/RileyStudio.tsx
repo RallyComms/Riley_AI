@@ -160,7 +160,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingConversations, setIsLoadingConversations] = useState(true);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(tenantId !== "global");
   const [mode, setMode] = useState<"fast" | "deep">(initialMode);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameInput, setRenameInput] = useState("");
@@ -1508,17 +1508,14 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   };
 
   return (
-    <div 
+    <div
       className={cn(
-        "flex h-full text-white overflow-hidden",
-        !isGlobal && "bg-slate-950/50 backdrop-blur-sm"
+        "flex h-full overflow-hidden",
+        isGlobal ? "bg-[#f8f5ef] text-[#1f2a44]" : "bg-slate-950/50 text-white backdrop-blur-sm"
       )}
-      style={isGlobal ? {
-        background: "radial-gradient(ellipse at center, rgba(120, 53, 15, 0.2) 0%, rgb(2, 6, 23) 50%, rgb(2, 6, 23) 100%)"
-      } : undefined}
     >
       {/* Left Sidebar - Chat History */}
-      {isSidebarOpen && (
+      {isSidebarOpen && !isGlobal && (
         <aside className="w-64 bg-zinc-900/50 border-r border-zinc-800 flex flex-col shrink-0">
           {/* Sidebar Header */}
           <div className="p-4 border-b border-zinc-800 flex items-center justify-between">
@@ -1664,17 +1661,26 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       {/* Main Area */}
       <main className="flex-1 flex flex-col min-w-0">
         {/* Header with Mode Toggle */}
-        <header className="h-16 border-b border-zinc-800 flex items-center justify-between px-6 shrink-0">
+        <header
+          className={cn(
+            "h-16 flex items-center justify-between px-6 shrink-0",
+            isGlobal ? "border-b border-[#e3dac8] bg-[#fbf8f2]" : "border-b border-zinc-800"
+          )}
+        >
           <div className="flex items-center gap-2">
-            <Sparkles className={cn(
-              "h-5 w-5",
-              isGlobal ? "text-amber-400 drop-shadow-[0_0_15px_rgba(251,191,36,0.4)]" : "text-amber-400"
-            )} />
-            <h1 className="text-lg font-bold text-white">Riley</h1>
-            <span className="text-zinc-600">|</span>
+            <div
+              className={cn(
+                "h-7 w-7 rounded-full flex items-center justify-center",
+                isGlobal ? "bg-[#eadfb7] text-[#6d560f]" : "bg-amber-500/10 text-amber-400"
+              )}
+            >
+              <Sparkles className="h-4 w-4" />
+            </div>
+            <h1 className={cn("text-lg font-bold", isGlobal ? "text-[#1f2a44]" : "text-white")}>Riley</h1>
+            <span className={cn(isGlobal ? "text-[#9ba2b1]" : "text-zinc-600")}>|</span>
             <span className={cn(
               "text-sm font-medium",
-              isGlobal ? "text-amber-400 drop-shadow-[0_0_10px_rgba(251,191,36,0.3)]" : "text-amber-500/90"
+              isGlobal ? "text-[#6f788a]" : "text-amber-500/90"
             )}>
               {isGlobal ? "Rally Global Brain" : contextName}
             </span>
@@ -1702,32 +1708,36 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 <span>Generate Report</span>
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => setMode("fast")}
-              className={cn(
-                "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors",
-                mode === "fast"
-                  ? "bg-amber-500/10 border border-amber-500/20 text-amber-400"
-                  : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-500 hover:bg-zinc-800"
-              )}
-            >
-              <Zap className="h-4 w-4" />
-              <span>Fast</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("deep")}
-              className={cn(
-                "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors",
-                mode === "deep"
-                  ? "bg-amber-500/10 border border-amber-500/20 text-amber-400"
-                  : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-500 hover:bg-zinc-800"
-              )}
-            >
-              <Brain className="h-4 w-4" />
-              <span>Deep</span>
-            </button>
+            {!isGlobal && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setMode("fast")}
+                  className={cn(
+                    "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors",
+                    mode === "fast"
+                      ? "bg-amber-500/10 border border-amber-500/20 text-amber-400"
+                      : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-500 hover:bg-zinc-800"
+                  )}
+                >
+                  <Zap className="h-4 w-4" />
+                  <span>Fast</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMode("deep")}
+                  className={cn(
+                    "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors",
+                    mode === "deep"
+                      ? "bg-amber-500/10 border border-amber-500/20 text-amber-400"
+                      : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-500 hover:bg-zinc-800"
+                  )}
+                >
+                  <Brain className="h-4 w-4" />
+                  <span>Deep</span>
+                </button>
+              </>
+            )}
           </div>
         </header>
 
@@ -1921,20 +1931,20 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 <div className="mb-8 flex justify-center">
                   <div className={cn(
                     "h-20 w-20 rounded-full border flex items-center justify-center",
-                    "bg-amber-500/10 border-amber-500/20"
+                    isGlobal ? "bg-[#eadfb7] border-[#d8cb9d]" : "bg-amber-500/10 border-amber-500/20"
                   )}>
                     <Sparkles className={cn(
-                      "h-10 w-10 text-amber-400",
-                      isGlobal && "drop-shadow-[0_0_15px_rgba(251,191,36,0.4)]"
+                      "h-10 w-10",
+                      isGlobal ? "text-[#6d560f]" : "text-amber-400"
                     )} />
                   </div>
                 </div>
-                <h2 className="text-3xl font-bold text-white mb-2">
+                <h2 className={cn("text-3xl font-bold mb-2", isGlobal ? "text-[#1f2a44]" : "text-white")}>
                   Hi, I'm Riley.
                 </h2>
-                <p className="text-zinc-400 mb-8">
+                <p className={cn("mb-8", isGlobal ? "text-[#6f788a]" : "text-zinc-400")}>
                   I have access to <strong className={cn(
-                    isGlobal ? "text-amber-400" : "text-amber-400"
+                    isGlobal ? "text-[#6d560f]" : "text-amber-400"
                   )}>{isGlobal ? "Rally Global Brain" : contextName}</strong>. Ask me anything about strategy, messaging, or historical data.
                 </p>
 
@@ -1952,13 +1962,14 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         }}
                         className={cn(
                           "p-6 md:p-8 text-left rounded-lg border transition-all duration-200 ease-out text-sm",
-                          "bg-slate-900/50 border-white/5",
-                          "hover:border-amber-500/30 hover:bg-amber-500/5 hover:scale-[1.02] hover:shadow-[0_0_20px_rgba(251,191,36,0.1)]"
+                          isGlobal
+                            ? "bg-white border-[#e3dac8] hover:bg-[#fdfaf3] hover:border-[#d8cb9d]"
+                            : "bg-slate-900/50 border-white/5 hover:border-amber-500/30 hover:bg-amber-500/5 hover:scale-[1.02] hover:shadow-[0_0_20px_rgba(251,191,36,0.1)]"
                         )}
                       >
                         <div className="flex items-start gap-3">
                           <Icon className={cn("h-5 w-5 flex-shrink-0 mt-0.5", prompt.color)} />
-                          <span className="text-zinc-300 font-medium">{prompt.text}</span>
+                          <span className={cn("font-medium", isGlobal ? "text-[#2b3343]" : "text-zinc-300")}>{prompt.text}</span>
                         </div>
                       </button>
                     );
@@ -1991,24 +2002,33 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     )}
                   >
                     {message.role !== "user" && (
-                      <div className="flex-shrink-0 h-8 w-8 rounded-full border flex items-center justify-center bg-amber-500/10 border-amber-500/20">
-                        <Sparkles className="h-4 w-4 text-amber-400" />
+                      <div
+                        className={cn(
+                          "flex-shrink-0 h-8 w-8 rounded-full border flex items-center justify-center",
+                          isGlobal ? "bg-[#eadfb7] border-[#d8cb9d]" : "bg-amber-500/10 border-amber-500/20"
+                        )}
+                      >
+                        <Sparkles className={cn("h-4 w-4", isGlobal ? "text-[#6d560f]" : "text-amber-400")} />
                       </div>
                     )}
                     <div
                       className={cn(
-                        "relative group/message rounded-lg px-4 py-3 max-w-[85%]",
-                        message.role !== "system" && message.status !== "thinking" && "pr-20",
+                        "relative group/message px-4 py-3 max-w-[85%] rounded-2xl",
+                        message.role !== "system" && message.status !== "thinking" && !isGlobal && "pr-20",
                         message.role === "user"
-                          ? "bg-amber-500/10 border border-amber-500/20 text-amber-100"
+                          ? isGlobal
+                            ? "bg-[#4f6386] text-white"
+                            : "bg-amber-500/10 border border-amber-500/20 text-amber-100"
                           : message.role === "system"
-                          ? "bg-zinc-800/50 border border-zinc-700/50 text-zinc-300 italic"
+                          ? isGlobal
+                            ? "bg-[#f0eadf] text-[#6f788a] italic border border-[#e3dac8]"
+                            : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-300 italic"
                           : isGlobal
-                          ? "bg-zinc-900/50 border border-amber-500/10 text-zinc-100"
+                          ? "bg-[#f1eee8] border border-[#e3dac8] text-[#2b3343]"
                           : "bg-zinc-900/50 border border-zinc-800/50 text-zinc-100"
                       )}
                     >
-                      {message.role !== "system" && message.status !== "thinking" && (
+                      {message.role !== "system" && message.status !== "thinking" && !isGlobal && (
                         <div className="absolute right-2 top-2 flex items-center gap-1 rounded-md border border-zinc-700/70 bg-zinc-900/85 p-1 opacity-0 transition-opacity group-hover/message:opacity-100">
                           <button
                             type="button"
@@ -2047,7 +2067,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         <TypewriterMarkdown content={message.content} />
                       ) : message.role === "assistant" ? (
                         // Static markdown for previous assistant messages
-                        <div className="riley-md">
+                        <div className={cn("riley-md", isGlobal && "text-[#2b3343]")}>
                           <ReactMarkdown remarkPlugins={[remarkBreaks]}>
                             {message.content.replace(/<br\s*\/?>/gi, '\n\n')}
                           </ReactMarkdown>
@@ -2175,7 +2195,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                       )}
                     </div>
                     {message.role === "user" && (
-                      <div className="flex-shrink-0 h-8 w-8 rounded-full bg-zinc-800 flex items-center justify-center text-xs font-medium text-zinc-300">
+                      <div
+                        className={cn(
+                          "flex-shrink-0 h-8 w-8 rounded-full flex items-center justify-center text-xs font-medium",
+                          isGlobal ? "bg-[#dfe6f2] text-[#4f6386]" : "bg-zinc-800 text-zinc-300"
+                        )}
+                      >
                         A
                       </div>
                     )}
@@ -2186,13 +2211,23 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               {/* Thinking Indicator for non-optimistic loading only */}
               {isLoading && !hasThinkingPlaceholder && (
                 <div className="flex gap-4 justify-start">
-                  <div className="flex-shrink-0 h-8 w-8 rounded-full border flex items-center justify-center bg-amber-500/10 border-amber-500/20">
-                    <Sparkles className="h-4 w-4 text-amber-400" />
+                  <div
+                    className={cn(
+                      "flex-shrink-0 h-8 w-8 rounded-full border flex items-center justify-center",
+                      isGlobal ? "bg-[#eadfb7] border-[#d8cb9d]" : "bg-amber-500/10 border-amber-500/20"
+                    )}
+                  >
+                    <Sparkles className={cn("h-4 w-4", isGlobal ? "text-[#6d560f]" : "text-amber-400")} />
                   </div>
-                  <div className="rounded-lg px-4 py-3 bg-zinc-900/50 border border-zinc-800/50">
+                  <div
+                    className={cn(
+                      "rounded-2xl px-4 py-3",
+                      isGlobal ? "bg-[#f1eee8] border border-[#e3dac8]" : "bg-zinc-900/50 border border-zinc-800/50"
+                    )}
+                  >
                     <div className="flex items-center gap-2">
-                    <Loader2 className="h-4 w-4 animate-spin text-zinc-400" />
-                      <span className="text-sm text-zinc-400">Riley is thinking...</span>
+                      <Loader2 className={cn("h-4 w-4 animate-spin", isGlobal ? "text-[#7b8395]" : "text-zinc-400")} />
+                      <span className={cn("text-sm", isGlobal ? "text-[#6f788a]" : "text-zinc-400")}>Riley is thinking...</span>
                     </div>
                   </div>
                 </div>
@@ -2204,10 +2239,17 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         </div>
 
         {/* Input Area - Fixed Bottom */}
-        <div className="flex-shrink-0 border-t border-zinc-800 p-4 bg-slate-950/50 backdrop-blur-sm">
+        <div
+          className={cn(
+            "flex-shrink-0 p-4",
+            isGlobal
+              ? "border-t border-[#e3dac8] bg-[#fbf8f2]"
+              : "border-t border-zinc-800 bg-slate-950/50 backdrop-blur-sm"
+          )}
+        >
           <div className="max-w-3xl mx-auto w-full">
             {sendDisabledReason && !isLoading && (
-              <div className="mb-2 text-xs text-zinc-500 text-center">
+              <div className={cn("mb-2 text-xs text-center", isGlobal ? "text-[#8a90a0]" : "text-zinc-500")}>
                 {sendDisabledReason}
               </div>
             )}
@@ -2220,17 +2262,26 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 placeholder="Message Riley..."
                 disabled={isLoading || missingAuth || missingTenantId}
                 rows={1}
-                className="flex-1 resize-none rounded-lg border border-zinc-800 bg-zinc-900/50 px-4 py-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-amber-500/50 disabled:opacity-50 disabled:cursor-not-allowed max-h-[200px]"
+                className={cn(
+                  "flex-1 resize-none px-4 py-3 text-sm max-h-[200px] disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none",
+                  isGlobal
+                    ? "rounded-3xl border border-[#ddd5c5] bg-white text-[#1f2a44] placeholder:text-[#98a1b1] focus:ring-2 focus:ring-[#d4ad47]/40"
+                    : "rounded-lg border border-zinc-800 bg-zinc-900/50 text-zinc-100 placeholder:text-zinc-600 focus:ring-2 focus:ring-amber-500/50"
+                )}
               />
               <button
                 type="button"
                 onClick={handleSend}
                 disabled={!canSend}
                 className={cn(
-                  "flex-shrink-0 p-3 rounded-lg transition-colors",
+                  "flex-shrink-0 p-3 transition-colors",
                   canSend
-                    ? "bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20"
-                    : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-600 cursor-not-allowed"
+                    ? isGlobal
+                      ? "rounded-full bg-[#e8e2d2] border border-[#d6ccb8] text-[#4f6386] hover:bg-[#ded6c3]"
+                      : "rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20"
+                    : isGlobal
+                    ? "rounded-full bg-[#f2eee5] border border-[#e3dac8] text-[#a3a9b7] cursor-not-allowed"
+                    : "rounded-lg bg-zinc-800/50 border border-zinc-700/50 text-zinc-600 cursor-not-allowed"
                 )}
                 aria-label="Send message"
                 title={sendDisabledReason || "Send message"}
@@ -2242,9 +2293,11 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 )}
               </button>
             </div>
-            <p className="text-xs text-zinc-600 mt-2 text-center">
-              {mode === "fast" ? "⚡ Fast mode: Quick responses" : "🧠 Deep mode: Comprehensive analysis"}
-            </p>
+            {!isGlobal && (
+              <p className="text-xs text-zinc-600 mt-2 text-center">
+                {mode === "fast" ? "⚡ Fast mode: Quick responses" : "🧠 Deep mode: Comprehensive analysis"}
+              </p>
+            )}
           </div>
         </div>
       </main>
