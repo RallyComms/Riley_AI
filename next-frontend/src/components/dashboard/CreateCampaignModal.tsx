@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "@clerk/nextjs";
-import { X, Shield, CheckCircle } from "lucide-react";
+import { CheckCircle2, Search, Shield, UserPlus, X } from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
 import { cn } from "@app/lib/utils";
-import { motion, AnimatePresence } from "framer-motion";
 import { apiFetch } from "@app/lib/api";
 
 interface CampaignBucket {
@@ -24,222 +24,231 @@ interface CreateCampaignModalProps {
   onCampaignCreated: (campaign: CampaignBucket) => void;
 }
 
-// Theme colors for campaigns (rotating assignment)
-const THEME_COLORS = [
-  "#0f766e", // Teal
-  "#4f46e5", // Indigo
-  "#e11d48", // Rose
-  "#059669", // Emerald
-  "#7c3aed", // Violet
-  "#facc15", // Amber
-];
-
 interface Member {
   id: string;
   email: string;
-  role: string;
+  role: "Lead" | "Member" | string;
 }
 
+interface DirectoryUserResult {
+  id: string;
+  email: string;
+  display_name: string;
+}
+
+interface UserSearchResponse {
+  users: DirectoryUserResult[];
+}
+
+const THEME_COLORS = ["#0f766e", "#4f46e5", "#e11d48", "#059669", "#7c3aed", "#facc15"];
+
 export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: CreateCampaignModalProps) {
-  const { getToken, userId } = useAuth();
+  const { getToken } = useAuth();
+
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  
-  // Member invitation state
-  const [createdCampaignId, setCreatedCampaignId] = useState<string | null>(null);
-  const [memberEmail, setMemberEmail] = useState("");
-  const [memberRole, setMemberRole] = useState<"Member" | "Lead">("Member");
-  const [members, setMembers] = useState<Member[]>([]);
-  const [addMemberError, setAddMemberError] = useState<string | null>(null);
-  const [addMemberSuccess, setAddMemberSuccess] = useState<string | null>(null);
-  const [isAddingMember, setIsAddingMember] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Reset form when modal closes
-  const handleClose = () => {
-    if (!isSubmitting && !isAddingMember) {
-      setName("");
-      setDescription("");
-      setSubmitError(null);
-      setCreatedCampaignId(null);
-      setMemberEmail("");
-      setMemberRole("Member");
-      setMembers([]);
-      setAddMemberError(null);
-      setAddMemberSuccess(null);
-      onClose();
-    }
+  const [createdCampaignId, setCreatedCampaignId] = useState<string | null>(null);
+  const [members, setMembers] = useState<Member[]>([]);
+
+  const [memberSearchQuery, setMemberSearchQuery] = useState("");
+  const [memberSearchResults, setMemberSearchResults] = useState<DirectoryUserResult[]>([]);
+  const [memberSearchError, setMemberSearchError] = useState<string | null>(null);
+  const [isSearchingMembers, setIsSearchingMembers] = useState(false);
+
+  const [selectedMembers, setSelectedMembers] = useState<
+    Array<DirectoryUserResult & { role: "Lead" | "Member" }>
+  >([]);
+  const [isApplyingSelections, setIsApplyingSelections] = useState(false);
+  const [selectionError, setSelectionError] = useState<string | null>(null);
+  const [selectionSuccess, setSelectionSuccess] = useState<string | null>(null);
+
+  const isBusy = isSubmitting || isSearchingMembers || isApplyingSelections;
+
+  const resetState = () => {
+    setName("");
+    setDescription("");
+    setSubmitError(null);
+    setIsSubmitting(false);
+    setCreatedCampaignId(null);
+    setMembers([]);
+    setMemberSearchQuery("");
+    setMemberSearchResults([]);
+    setMemberSearchError(null);
+    setIsSearchingMembers(false);
+    setSelectedMembers([]);
+    setIsApplyingSelections(false);
+    setSelectionError(null);
+    setSelectionSuccess(null);
   };
 
-  const handleSubmit = async () => {
+  const handleClose = () => {
+    if (isBusy) return;
+    resetState();
+    onClose();
+  };
+
+  const fetchMembers = async (campaignId: string, token: string) => {
+    const membersData = await apiFetch<{ members: Member[] }>(
+      `/api/v1/campaigns/${encodeURIComponent(campaignId)}/members`,
+      { token, method: "GET" },
+    );
+    setMembers(membersData.members || []);
+  };
+
+  const handleSubmitCreate = async () => {
     if (!name.trim()) {
       setSubmitError("Campaign name is required");
       return;
     }
-
-    setIsSubmitting(true);
     setSubmitError(null);
-
+    setSelectionError(null);
+    setSelectionSuccess(null);
+    setIsSubmitting(true);
     try {
       const token = await getToken();
-      if (!token) {
-        throw new Error("No authentication token available");
-      }
+      if (!token) throw new Error("No authentication token available");
 
-      const createdCampaign = await apiFetch<{ id: string; name: string; description: string | null }>("/api/v1/campaigns", {
-        token,
-        method: "POST",
-        body: {
-          name: name.trim(),
-          description: description.trim() || null,
-        },
-      });
-
-      // Map backend response to frontend CampaignBucket shape
-      // Use a deterministic index for theme color (consistent per campaign ID)
-      const colorIndex = Math.abs(
-        createdCampaign.id.split("").reduce((acc: number, char: string) => acc + char.charCodeAt(0), 0)
-      ) % THEME_COLORS.length;
-      const themeColor = THEME_COLORS[colorIndex];
-
-      // Create frontend campaign object
-      const frontendCampaign: CampaignBucket = {
-        name: createdCampaign.name,
-        role: "Lead Strategist", // Creator is always Lead
-        lastActive: "Just now",
-        mentions: 0,
-        pendingRequests: 0,
-        userRole: "Lead",
-        themeColor,
-        campaignId: createdCampaign.id,
-      };
-
-      // Call onCampaignCreated immediately (optimistic update)
-      onCampaignCreated(frontendCampaign);
-
-      // Store campaign ID and show invite section
-      setCreatedCampaignId(createdCampaign.id);
-      
-      // Fetch initial members list (includes creator)
-      try {
-        const membersData = await apiFetch<{ members: Member[] }>(
-          `/api/v1/campaigns/${createdCampaign.id}/members`,
-          {
-            token,
-            method: "GET",
-          }
-        );
-        setMembers(membersData.members || []);
-      } catch (err) {
-        // If fetching members fails, continue anyway - user can still add members
-        console.error("Error fetching initial members:", err);
-      }
-      
-      // Don't close modal yet - show invite section
-      setIsSubmitting(false);
-    } catch (err) {
-      console.error("Error creating campaign:", err);
-      // Preserve exact error message from apiFetch (includes status codes if available)
-      const errorMessage = err instanceof Error 
-        ? err.message 
-        : "Failed to create campaign. Please try again.";
-      setSubmitError(errorMessage);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleAddMember = async () => {
-    if (!createdCampaignId || !memberEmail.trim()) {
-      setAddMemberError("Email is required");
-      return;
-    }
-
-    // Basic email validation
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(memberEmail.trim())) {
-      setAddMemberError("Please enter a valid email address");
-      return;
-    }
-
-    setIsAddingMember(true);
-    setAddMemberError(null);
-    setAddMemberSuccess(null);
-
-    try {
-      const token = await getToken();
-      if (!token) {
-        throw new Error("No authentication token available");
-      }
-
-      const data = await apiFetch<{ members: Member[] }>(
-        `/api/v1/campaigns/${createdCampaignId}/members`,
+      const createdCampaign = await apiFetch<{ id: string; name: string; description: string | null }>(
+        "/api/v1/campaigns",
         {
           token,
           method: "POST",
           body: {
-            email: memberEmail.trim(),
-            role: memberRole,
+            name: name.trim(),
+            description: description.trim() || null,
           },
-        }
+        },
       );
-      
-      // Update members list from response
-      setMembers(data.members || []);
-      setAddMemberSuccess(`${memberEmail.trim()} added successfully`);
-      setMemberEmail("");
-      setMemberRole("Member");
-      
-      // Clear success message after 3 seconds
-      setTimeout(() => setAddMemberSuccess(null), 3000);
+
+      const colorIndex =
+        Math.abs(
+          createdCampaign.id
+            .split("")
+            .reduce((acc: number, char: string) => acc + char.charCodeAt(0), 0),
+        ) % THEME_COLORS.length;
+
+      onCampaignCreated({
+        name: createdCampaign.name,
+        role: "Lead Strategist",
+        lastActive: "Just now",
+        mentions: 0,
+        pendingRequests: 0,
+        userRole: "Lead",
+        themeColor: THEME_COLORS[colorIndex],
+        campaignId: createdCampaign.id,
+      });
+
+      setCreatedCampaignId(createdCampaign.id);
+      await fetchMembers(createdCampaign.id, token);
+      setSelectionSuccess("Mission created. Add team members and roles below.");
     } catch (err) {
-      console.error("Error adding member:", err);
-      
-      // Handle specific error cases with user-friendly messages
-      let errorMessage = "Failed to add member";
-      if (err instanceof Error) {
-        const message = err.message;
-        // Check for 404 - User not found (from backend or HTTP status)
-        if (message.includes("404") || 
-            message.toLowerCase().includes("not found") || 
-            message.toLowerCase().includes("user not found")) {
-          errorMessage = "User not found — ask them to sign up first";
-        }
-        // Check for 403 - Only Lead can add members (from backend or HTTP status)
-        else if (message.includes("403") || 
-                 message.toLowerCase().includes("only lead") || 
-                 message.toLowerCase().includes("only campaign leads") ||
-                 message.toLowerCase().includes("permission") ||
-                 message.toLowerCase().includes("access denied")) {
-          errorMessage = "Only Lead members can add members";
-        }
-        // Use the exact error message from API (includes status codes from apiFetch)
-        else {
-          errorMessage = message;
-        }
-      }
-      
-      setAddMemberError(errorMessage);
+      setSubmitError(err instanceof Error ? err.message : "Failed to create campaign.");
     } finally {
-      setIsAddingMember(false);
+      setIsSubmitting(false);
     }
   };
 
-  const handleDone = () => {
-    if (!createdCampaignId) return;
+  const existingMemberIds = useMemo(() => new Set((members || []).map((m) => m.id)), [members]);
+  const selectedMemberIds = useMemo(() => new Set(selectedMembers.map((m) => m.id)), [selectedMembers]);
 
-    // Campaign was already added to the list via onCampaignCreated in handleSubmit
-    // Just close the modal and reset state
-    setName("");
-    setDescription("");
-    setSubmitError(null);
-    setCreatedCampaignId(null);
-    setMemberEmail("");
-    setMemberRole("Member");
-    setMembers([]);
-    setAddMemberError(null);
-    setAddMemberSuccess(null);
+  useEffect(() => {
+    if (!createdCampaignId) {
+      setMemberSearchResults([]);
+      return;
+    }
+    const query = memberSearchQuery.trim();
+    if (query.length < 2) {
+      setMemberSearchResults([]);
+      setMemberSearchError(null);
+      return;
+    }
+    const handle = window.setTimeout(async () => {
+      try {
+        setIsSearchingMembers(true);
+        setMemberSearchError(null);
+        const token = await getToken();
+        if (!token) return;
+        const data = await apiFetch<UserSearchResponse>(
+          `/api/v1/campaigns/${encodeURIComponent(createdCampaignId)}/users/search?query=${encodeURIComponent(query)}&limit=10`,
+          { token, method: "GET" },
+        );
+        const filtered = (data.users || []).filter(
+          (candidate) => !existingMemberIds.has(candidate.id) && !selectedMemberIds.has(candidate.id),
+        );
+        setMemberSearchResults(filtered);
+      } catch (err) {
+        setMemberSearchResults([]);
+        setMemberSearchError(err instanceof Error ? err.message : "Failed to search users.");
+      } finally {
+        setIsSearchingMembers(false);
+      }
+    }, 250);
+    return () => window.clearTimeout(handle);
+  }, [createdCampaignId, existingMemberIds, getToken, memberSearchQuery, selectedMemberIds]);
+
+  const addSearchCandidate = (candidate: DirectoryUserResult) => {
+    setSelectedMembers((prev) => {
+      if (prev.some((member) => member.id === candidate.id)) return prev;
+      return [...prev, { ...candidate, role: "Member" }];
+    });
+    setMemberSearchResults((prev) => prev.filter((item) => item.id !== candidate.id));
+    setMemberSearchQuery("");
+  };
+
+  const removeSelectedCandidate = (candidateId: string) => {
+    setSelectedMembers((prev) => prev.filter((member) => member.id !== candidateId));
+  };
+
+  const updateSelectedRole = (candidateId: string, role: "Lead" | "Member") => {
+    setSelectedMembers((prev) =>
+      prev.map((member) => (member.id === candidateId ? { ...member, role } : member)),
+    );
+  };
+
+  const applySelectedMembers = async (): Promise<boolean> => {
+    if (!createdCampaignId || selectedMembers.length === 0) return true;
+
+    setIsApplyingSelections(true);
+    setSelectionError(null);
+    setSelectionSuccess(null);
+    try {
+      const token = await getToken();
+      if (!token) throw new Error("No authentication token available");
+
+      for (const member of selectedMembers) {
+        await apiFetch(`/api/v1/campaigns/${encodeURIComponent(createdCampaignId)}/members`, {
+          token,
+          method: "POST",
+          body: {
+            email: member.email,
+            user_id: member.id,
+            role: member.role,
+          },
+        });
+      }
+
+      await fetchMembers(createdCampaignId, token);
+      setSelectionSuccess(
+        `${selectedMembers.length} member${selectedMembers.length === 1 ? "" : "s"} added successfully.`,
+      );
+      setSelectedMembers([]);
+      return true;
+    } catch (err) {
+      setSelectionError(err instanceof Error ? err.message : "Failed to add selected members.");
+      return false;
+    } finally {
+      setIsApplyingSelections(false);
+    }
+  };
+
+  const handleDone = async () => {
+    if (!createdCampaignId) return;
+    const success = await applySelectedMembers();
+    if (!success) return;
+    resetState();
     onClose();
   };
 
@@ -248,221 +257,218 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
   return (
     <AnimatePresence>
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-        {/* Backdrop */}
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+          className="absolute inset-0 bg-slate-900/30 backdrop-blur-sm"
           onClick={handleClose}
         />
 
-        {/* Modal */}
         <motion.div
-          initial={{ opacity: 0, scale: 0.95 }}
-          animate={{ opacity: 1, scale: 1 }}
-          exit={{ opacity: 0, scale: 0.95 }}
-          transition={{ duration: 0.2 }}
-          className="relative w-full max-w-2xl rounded-2xl border border-zinc-800 bg-zinc-900/95 backdrop-blur-xl shadow-2xl"
+          initial={{ opacity: 0, scale: 0.97, y: 8 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          exit={{ opacity: 0, scale: 0.97, y: 8 }}
+          transition={{ duration: 0.18 }}
+          className="relative w-full max-w-3xl overflow-hidden rounded-2xl bg-[#fbf8f2] shadow-[0_6px_20px_rgba(15,23,42,0.14)]"
         >
-          {/* Header */}
-          <div className="flex items-center justify-between border-b border-zinc-800 px-6 py-4">
+          <div className="flex items-center justify-between border-b border-[#e7dfcf] px-6 py-4">
             <div className="flex items-center gap-3">
-              <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-amber-400/10 border border-amber-400/20">
-                <Shield className="h-5 w-5 text-amber-400" />
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#efe6d7] text-[#2a3d64]">
+                <Shield className="h-5 w-5" />
               </div>
               <div>
-                <h2 className="text-lg font-semibold text-zinc-100">Create Campaign</h2>
-                <p className="text-xs text-zinc-400">Start a new mission</p>
+                <h2 className="text-lg font-semibold text-[#1f2a44]">Create Mission</h2>
+                <p className="text-xs text-[#6d7688]">Set campaign details and assign your team</p>
               </div>
             </div>
             <button
               type="button"
               onClick={handleClose}
-              disabled={isSubmitting}
-              className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 transition-colors disabled:opacity-50"
+              disabled={isBusy}
+              className="rounded-md p-1.5 text-[#687287] transition hover:bg-[#efe6d7] hover:text-[#1f2a44] disabled:opacity-50"
             >
               <X className="h-5 w-5" />
             </button>
           </div>
 
-          {/* Content */}
-          <div className="p-6">
+          <div className="max-h-[68vh] overflow-y-auto px-6 py-6">
             <div className="space-y-6">
-              {submitError && (
-                <div className="rounded-lg border border-red-500/50 bg-red-500/10 p-3">
-                  <p className="text-sm text-red-400">{submitError}</p>
+              {submitError ? (
+                <div className="rounded-xl bg-[#fff0f0] px-4 py-3 text-sm text-[#9e3434]">{submitError}</div>
+              ) : null}
+              {selectionError ? (
+                <div className="rounded-xl bg-[#fff0f0] px-4 py-3 text-sm text-[#9e3434]">{selectionError}</div>
+              ) : null}
+              {selectionSuccess ? (
+                <div className="flex items-center gap-2 rounded-xl bg-[#edf7ee] px-4 py-3 text-sm text-[#2f6d3a]">
+                  <CheckCircle2 className="h-4 w-4" />
+                  {selectionSuccess}
                 </div>
-              )}
+              ) : null}
 
-              <div>
-                <label className="block text-sm font-medium text-zinc-300 mb-2">
-                  Campaign Name
-                </label>
-                <input
-                  type="text"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="e.g., Clean Water Initiative 2025"
-                  className="w-full rounded-lg border border-zinc-800 bg-zinc-950/50 px-4 py-3 text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-amber-400/50 focus:border-amber-400/50"
-                  disabled={isSubmitting}
-                />
-              </div>
+              <section className="space-y-4">
+                <h3 className="text-sm font-semibold uppercase tracking-wide text-[#5f6778]">Campaign Details</h3>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-[#1f2a44]">Mission Name</label>
+                  <input
+                    type="text"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                    placeholder="e.g., Clean Water Initiative 2025"
+                    disabled={isSubmitting || !!createdCampaignId}
+                    className="w-full rounded-xl border border-[#e2d8c4] bg-white px-4 py-3 text-sm text-[#1f2a44] placeholder:text-[#8a90a0] focus:outline-none focus:ring-2 focus:ring-[#d5c59b] disabled:bg-[#f3efe6] disabled:text-[#8a90a0]"
+                  />
+                </div>
+                <div>
+                  <label className="mb-2 block text-sm font-medium text-[#1f2a44]">Description (Optional)</label>
+                  <textarea
+                    value={description}
+                    onChange={(event) => setDescription(event.target.value)}
+                    placeholder="Brief description of the campaign..."
+                    rows={3}
+                    disabled={isSubmitting || !!createdCampaignId}
+                    className="w-full resize-none rounded-xl border border-[#e2d8c4] bg-white px-4 py-3 text-sm text-[#1f2a44] placeholder:text-[#8a90a0] focus:outline-none focus:ring-2 focus:ring-[#d5c59b] disabled:bg-[#f3efe6] disabled:text-[#8a90a0]"
+                  />
+                </div>
+                <div className="rounded-xl bg-[#f2ecdf] px-4 py-3 text-sm text-[#4f5970]">
+                  You are added automatically as <span className="font-semibold">Lead</span>.
+                </div>
+              </section>
 
-              <div>
-                <label className="block text-sm font-medium text-zinc-300 mb-2">
-                  Description (Optional)
-                </label>
-                <textarea
-                  value={description}
-                  onChange={(e) => setDescription(e.target.value)}
-                  placeholder="Brief description of the campaign..."
-                  rows={3}
-                  className="w-full rounded-lg border border-zinc-800 bg-zinc-950/50 px-4 py-3 text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-amber-400/50 focus:border-amber-400/50 resize-none"
-                  disabled={isSubmitting}
-                />
-              </div>
+              <section className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold uppercase tracking-wide text-[#5f6778]">Team Members</h3>
+                  {createdCampaignId ? (
+                    <span className="text-xs text-[#6d7688]">Search and add users with roles</span>
+                  ) : (
+                    <span className="text-xs text-[#8a90a0]">Create mission first to enable user search</span>
+                  )}
+                </div>
 
-              {!createdCampaignId ? (
-                <>
-                  <div className="rounded-lg border border-amber-400/20 bg-amber-400/10 p-4">
-                    <p className="text-sm text-amber-300">
-                      You will be added as the Lead of this campaign. Team members can be added after creation.
-                    </p>
+                <div className="rounded-xl border border-[#e2d8c4] bg-white px-3 py-2">
+                  <div className="flex items-center gap-2">
+                    <Search className="h-4 w-4 text-[#8a90a0]" />
+                    <input
+                      type="text"
+                      value={memberSearchQuery}
+                      onChange={(event) => setMemberSearchQuery(event.target.value)}
+                      placeholder={
+                        createdCampaignId
+                          ? "Search users by name or email..."
+                          : "Create mission first to search users..."
+                      }
+                      disabled={!createdCampaignId || isSearchingMembers}
+                      className="w-full bg-transparent py-1 text-sm text-[#1f2a44] placeholder:text-[#8a90a0] focus:outline-none disabled:text-[#9aa1b0]"
+                    />
                   </div>
-                </>
-              ) : (
-                <>
-                  {/* Success message for campaign creation */}
-                  <div className="rounded-lg border border-emerald-500/50 bg-emerald-500/10 p-4">
-                    <div className="flex items-center gap-2">
-                      <CheckCircle className="h-5 w-5 text-emerald-400" />
-                      <p className="text-sm text-emerald-300">
-                        Campaign created successfully! Invite team members below.
-                      </p>
-                    </div>
-                  </div>
+                </div>
 
-                  {/* Invite Team Members Section */}
-                  <div>
-                    <label className="block text-sm font-medium text-zinc-300 mb-3">
-                      Invite Team Members
-                    </label>
-                    
-                    {addMemberError && (
-                      <div className="mb-3 rounded-lg border border-red-500/50 bg-red-500/10 p-3">
-                        <p className="text-sm text-red-400">{addMemberError}</p>
-                      </div>
+                {memberSearchError ? <p className="text-xs text-[#9e3434]">{memberSearchError}</p> : null}
+
+                {createdCampaignId && (isSearchingMembers || memberSearchResults.length > 0) ? (
+                  <div className="max-h-40 space-y-1 overflow-y-auto rounded-xl border border-[#e2d8c4] bg-white p-2">
+                    {isSearchingMembers ? (
+                      <p className="px-2 py-1.5 text-xs text-[#8a90a0]">Searching users...</p>
+                    ) : (
+                      memberSearchResults.map((candidate) => (
+                        <button
+                          key={candidate.id}
+                          type="button"
+                          onClick={() => addSearchCandidate(candidate)}
+                          className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-left transition hover:bg-[#f5f0e5]"
+                        >
+                          <div>
+                            <p className="text-sm text-[#1f2a44]">{candidate.display_name || candidate.email}</p>
+                            <p className="text-xs text-[#7b8395]">{candidate.email}</p>
+                          </div>
+                          <span className="inline-flex items-center gap-1 text-xs font-medium text-[#2a3d64]">
+                            <UserPlus className="h-3.5 w-3.5" />
+                            Add
+                          </span>
+                        </button>
+                      ))
                     )}
-                    
-                    {addMemberSuccess && (
-                      <div className="mb-3 rounded-lg border border-emerald-500/50 bg-emerald-500/10 p-3">
+                  </div>
+                ) : null}
+
+                {selectedMembers.length > 0 ? (
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-[#5f6778]">Selected members</p>
+                    {selectedMembers.map((member) => (
+                      <div
+                        key={member.id}
+                        className="flex items-center justify-between rounded-xl border border-[#e2d8c4] bg-white px-3 py-2"
+                      >
+                        <div>
+                          <p className="text-sm text-[#1f2a44]">{member.display_name || member.email}</p>
+                          <p className="text-xs text-[#7b8395]">{member.email}</p>
+                        </div>
                         <div className="flex items-center gap-2">
-                          <CheckCircle className="h-4 w-4 text-emerald-400" />
-                          <p className="text-sm text-emerald-300">{addMemberSuccess}</p>
+                          <select
+                            value={member.role}
+                            onChange={(event) =>
+                              updateSelectedRole(member.id, event.target.value as "Lead" | "Member")
+                            }
+                            className="rounded-md border border-[#ded4c2] bg-white px-2 py-1 text-xs text-[#1f2a44] focus:outline-none focus:ring-2 focus:ring-[#d5c59b]"
+                          >
+                            <option value="Member">Member</option>
+                            <option value="Lead">Lead</option>
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => removeSelectedCandidate(member.id)}
+                            className="rounded-md p-1 text-[#8a90a0] hover:bg-[#efe6d7] hover:text-[#4d5871]"
+                            aria-label={`Remove ${member.email}`}
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
                         </div>
                       </div>
-                    )}
+                    ))}
+                  </div>
+                ) : null}
 
-                    <div className="flex gap-2 mb-4">
-                      <input
-                        type="email"
-                        value={memberEmail}
-                        onChange={(e) => setMemberEmail(e.target.value)}
-                        placeholder="Enter email address"
-                        className="flex-1 rounded-lg border border-zinc-800 bg-zinc-950/50 px-4 py-2 text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-amber-400/50 focus:border-amber-400/50"
-                        disabled={isAddingMember}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !isAddingMember) {
-                            handleAddMember();
-                          }
-                        }}
-                      />
-                      <select
-                        value={memberRole}
-                        onChange={(e) => setMemberRole(e.target.value as "Member" | "Lead")}
-                        className="rounded-lg border border-zinc-800 bg-zinc-950/50 px-4 py-2 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-amber-400/50 focus:border-amber-400/50"
-                        disabled={isAddingMember}
-                      >
-                        <option value="Member">Member</option>
-                        <option value="Lead">Lead</option>
-                      </select>
-                      <button
-                        type="button"
-                        onClick={handleAddMember}
-                        disabled={isAddingMember || !memberEmail.trim()}
-                        className={cn(
-                          "rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-zinc-900 transition-colors whitespace-nowrap",
-                          isAddingMember || !memberEmail.trim()
-                            ? "opacity-50 cursor-not-allowed"
-                            : "hover:bg-amber-500"
-                        )}
-                      >
-                        {isAddingMember ? "Adding..." : "Add Member"}
-                      </button>
+                {members.length > 0 ? (
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium text-[#5f6778]">Current team ({members.length})</p>
+                    <div className="space-y-1">
+                      {members.map((member) => (
+                        <div key={member.id} className="flex items-center justify-between rounded-lg bg-[#f5f0e5] px-3 py-2">
+                          <span className="text-sm text-[#2a3d64]">{member.email}</span>
+                          <span className="text-xs font-medium text-[#5f6778]">{member.role}</span>
+                        </div>
+                      ))}
                     </div>
                   </div>
-
-                  {/* Team Members List */}
-                  {members.length > 0 && (
-                    <div>
-                      <label className="block text-sm font-medium text-zinc-300 mb-3">
-                        Team Members ({members.length})
-                      </label>
-                      <div className="space-y-2">
-                        {members.map((member) => (
-                          <div
-                            key={member.id}
-                            className="flex items-center justify-between rounded-lg border border-zinc-800 bg-zinc-950/50 px-4 py-3"
-                          >
-                            <div className="flex items-center gap-3">
-                              <div className="flex h-10 w-10 items-center justify-center rounded-full bg-zinc-700 text-sm font-medium text-zinc-100">
-                                {member.email.charAt(0).toUpperCase()}
-                              </div>
-                              <div>
-                                <p className="text-sm font-medium text-zinc-100">{member.email}</p>
-                                <p className="text-xs text-zinc-400">{member.role}</p>
-                              </div>
-                            </div>
-                            {member.role === "Lead" && (
-                              <div className="flex items-center gap-1 rounded-full bg-amber-400/20 border border-amber-400/30 px-2 py-1">
-                                <span className="text-xs font-medium text-amber-400">Lead</span>
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
+                ) : null}
+              </section>
             </div>
           </div>
 
-          {/* Footer */}
-          <div className="flex items-center justify-between border-t border-zinc-800 px-6 py-4">
+          <div className="flex items-center justify-between border-t border-[#e7dfcf] px-6 py-4">
             {!createdCampaignId ? (
               <>
                 <button
                   type="button"
                   onClick={handleClose}
-                  disabled={isSubmitting}
-                  className="rounded-lg border border-zinc-800 bg-zinc-950/50 px-4 py-2 text-sm font-medium text-zinc-300 hover:bg-zinc-800 transition-colors disabled:opacity-50"
+                  disabled={isBusy}
+                  className="rounded-lg border border-[#ded4c2] px-4 py-2 text-sm font-medium text-[#4d5871] transition hover:bg-[#f0ebde] disabled:opacity-50"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
-                  onClick={handleSubmit}
+                  onClick={handleSubmitCreate}
                   disabled={isSubmitting || !name.trim()}
                   className={cn(
-                    "rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-zinc-900 transition-colors",
+                    "rounded-lg px-4 py-2 text-sm font-semibold text-[#1f2a44] transition",
                     isSubmitting || !name.trim()
-                      ? "opacity-50 cursor-not-allowed"
-                      : "hover:bg-amber-500"
+                      ? "cursor-not-allowed bg-[#e8dcc0] opacity-60"
+                      : "bg-[#f1cf63] hover:bg-[#e6c257]",
                   )}
                 >
-                  {isSubmitting ? "Creating..." : "Create Campaign"}
+                  {isSubmitting ? "Creating..." : "Create Mission"}
                 </button>
               </>
             ) : (
@@ -470,24 +476,39 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
                 <button
                   type="button"
                   onClick={handleClose}
-                  disabled={isAddingMember}
-                  className="rounded-lg border border-zinc-800 bg-zinc-950/50 px-4 py-2 text-sm font-medium text-zinc-300 hover:bg-zinc-800 transition-colors disabled:opacity-50"
+                  disabled={isBusy}
+                  className="rounded-lg border border-[#ded4c2] px-4 py-2 text-sm font-medium text-[#4d5871] transition hover:bg-[#f0ebde] disabled:opacity-50"
                 >
-                  Skip
+                  Cancel
                 </button>
-                <button
-                  type="button"
-                  onClick={handleDone}
-                  disabled={isAddingMember}
-                  className={cn(
-                    "rounded-lg bg-amber-400 px-4 py-2 text-sm font-semibold text-zinc-900 transition-colors",
-                    isAddingMember
-                      ? "opacity-50 cursor-not-allowed"
-                      : "hover:bg-amber-500"
-                  )}
-                >
-                  Done
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={applySelectedMembers}
+                    disabled={isApplyingSelections || selectedMembers.length === 0}
+                    className={cn(
+                      "rounded-lg border px-4 py-2 text-sm font-medium transition",
+                      isApplyingSelections || selectedMembers.length === 0
+                        ? "cursor-not-allowed border-[#ddd4c3] text-[#9aa1b0] opacity-70"
+                        : "border-[#d5c59b] text-[#2a3d64] hover:bg-[#f5efdf]",
+                    )}
+                  >
+                    {isApplyingSelections
+                      ? "Adding..."
+                      : `Add Selected${selectedMembers.length > 0 ? ` (${selectedMembers.length})` : ""}`}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDone}
+                    disabled={isBusy}
+                    className={cn(
+                      "rounded-lg px-4 py-2 text-sm font-semibold text-[#1f2a44] transition",
+                      isBusy ? "cursor-not-allowed bg-[#e8dcc0] opacity-60" : "bg-[#f1cf63] hover:bg-[#e6c257]",
+                    )}
+                  >
+                    Done
+                  </button>
+                </div>
               </>
             )}
           </div>

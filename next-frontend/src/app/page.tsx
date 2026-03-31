@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useAuth, useUser, UserButton } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
-import { BookOpen, ChevronDown, Globe, Plus } from "lucide-react";
+import { Archive, BookOpen, ChevronDown, Globe, Plus } from "lucide-react";
 import Greeting from "@app/components/ui/Greeting";
 import { CreateCampaignModal } from "@app/components/dashboard/CreateCampaignModal";
 import { CampaignDirectory } from "@app/components/dashboard/CampaignDirectory";
@@ -317,7 +317,7 @@ export default function HomePage() {
       <header className="border-b border-[#e6dece] bg-[#fbf8f2]">
         <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-8 py-4">
           <div className="flex items-center gap-8">
-            <h1 className="text-xl font-semibold tracking-tight text-[#1f2a44]">Riley</h1>
+            <h1 className="text-xl font-semibold tracking-tight text-amber-400">Riley</h1>
             <nav className="flex items-center gap-1 text-sm">
               <button
                 type="button"
@@ -343,7 +343,6 @@ export default function HomePage() {
               >
                 <Globe className="h-3.5 w-3.5" />
                 Riley Global
-                <ChevronDown className="h-3 w-3 opacity-60" />
               </button>
             </nav>
           </div>
@@ -438,8 +437,20 @@ export default function HomePage() {
                   key={campaign.campaignId}
                   type="button"
                   onClick={() => handleEnterCampaign(campaign.campaignId)}
-                  className="group block rounded-lg bg-[#fbf8f2] p-5 text-left shadow-[0_1px_2px_rgba(31,42,68,0.08),0_10px_24px_rgba(31,42,68,0.06)] transition-all hover:-translate-y-0.5 hover:shadow-[0_2px_6px_rgba(31,42,68,0.12),0_14px_28px_rgba(31,42,68,0.08)]"
+                  className="group relative block rounded-lg bg-[#fbf8f2] p-5 text-left shadow-[0_1px_2px_rgba(31,42,68,0.08),0_10px_24px_rgba(31,42,68,0.06)] transition-all hover:-translate-y-0.5 hover:shadow-[0_2px_6px_rgba(31,42,68,0.12),0_14px_28px_rgba(31,42,68,0.08)]"
                 >
+                  <span
+                    role="button"
+                    aria-label={`Archive ${campaign.name}`}
+                    title="Archive campaign"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleArchive(campaign.campaignId);
+                    }}
+                    className="absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-md text-[#6f788a] opacity-0 transition-opacity hover:bg-[#ece5d8] hover:text-[#4d5871] group-hover:opacity-100"
+                  >
+                    <Archive className="h-3.5 w-3.5" />
+                  </span>
                   <div className="mb-3 flex items-start justify-between">
                     <span className="rounded-full bg-[#efe1a9] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#3a3f2a]">
                       {statusLabel}
