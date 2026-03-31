@@ -16,6 +16,7 @@ interface BackendCampaign {
   role?: "Lead" | "Member";
   access: "member" | "requestable";
   status?: "active" | "archived";
+  updated_at?: string | null;
   created_at?: string | null;
   owner_name?: string | null;
 }
@@ -85,7 +86,7 @@ function mapBackendToUserCampaign(campaign: BackendCampaign, index: number): Use
     access: campaign.access,
     ownerName: campaign.owner_name ?? undefined,
     description: campaign.description,
-    createdAt: campaign.created_at ?? null,
+    createdAt: campaign.updated_at ?? campaign.created_at ?? null,
   };
 }
 
@@ -103,16 +104,20 @@ function mapUserCampaignToBucket(campaign: UserCampaign): CampaignBucket {
 }
 
 function relativeTime(iso?: string | null): string {
-  if (!iso) return "Recently";
+  if (!iso) return "Today";
   const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Recently";
-  const diffMs = Date.now() - date.getTime();
-  const hours = Math.floor(diffMs / (1000 * 60 * 60));
-  const days = Math.floor(hours / 24);
-  if (hours < 1) return "Just now";
-  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
-  if (days === 1) return "Yesterday";
-  return `${days} days ago`;
+  if (Number.isNaN(date.getTime())) return "Today";
+
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const startOfTargetDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const diffDays = Math.floor(
+    (startOfToday.getTime() - startOfTargetDay.getTime()) / (1000 * 60 * 60 * 24),
+  );
+
+  if (diffDays <= 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+  return `${diffDays} days ago`;
 }
 
 function initials(name: string): string {
@@ -317,7 +322,7 @@ export default function HomePage() {
       <header className="border-b border-[#e6dece] bg-[#fbf8f2]">
         <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-8 py-4">
           <div className="flex items-center gap-8">
-            <h1 className="text-xl font-semibold tracking-tight text-amber-400">Riley</h1>
+            <h1 className="text-xl font-semibold tracking-tight text-[#d4ad47]">Riley</h1>
             <nav className="flex items-center gap-1 text-sm">
               <button
                 type="button"
@@ -451,11 +456,11 @@ export default function HomePage() {
                   >
                     <Archive className="h-3.5 w-3.5" />
                   </span>
-                  <div className="mb-3 flex items-start justify-between">
-                    <span className="rounded-full bg-[#efe1a9] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#3a3f2a]">
+                  <div className="mb-3 flex items-start justify-between pr-8">
+                    <span className="rounded-full bg-[#e6d8ad] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#3a3f2a]">
                       {statusLabel}
                     </span>
-                    <span className="text-[11px] text-[#8a90a0]">{relativeTime(campaign.createdAt)}</span>
+                    <span className="mr-2 text-[11px] text-[#8a90a0]">{relativeTime(campaign.createdAt)}</span>
                   </div>
                   <h4 className="mb-1 font-serif text-base font-semibold leading-snug text-[#1f2a44] group-hover:text-[#22386a]">
                     {campaign.name}
@@ -530,7 +535,7 @@ export default function HomePage() {
                 type="button"
                 onClick={handleConfirmArchive}
                 disabled={isArchiving}
-                className="rounded-md bg-[#f1cf63] px-3 py-1.5 text-sm font-semibold text-[#1f2a44] hover:bg-[#e6c257] disabled:opacity-60"
+                className="rounded-md bg-[#d4ad47] px-3 py-1.5 text-sm font-semibold text-[#1f2a44] hover:bg-[#bf993b] disabled:opacity-60"
               >
                 {isArchiving ? "Archiving..." : "Archive"}
               </button>

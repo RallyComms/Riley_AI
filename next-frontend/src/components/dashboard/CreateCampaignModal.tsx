@@ -40,6 +40,15 @@ interface UserSearchResponse {
   users: DirectoryUserResult[];
 }
 
+interface CampaignSearchScope {
+  id: string;
+  role?: "Lead" | "Member";
+}
+
+interface CampaignSearchScopeResponse {
+  campaigns: CampaignSearchScope[];
+}
+
 const THEME_COLORS = ["#0f766e", "#4f46e5", "#e11d48", "#059669", "#7c3aed", "#facc15"];
 
 export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: CreateCampaignModalProps) {
@@ -51,6 +60,7 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const [createdCampaignId, setCreatedCampaignId] = useState<string | null>(null);
+  const [searchTenantId, setSearchTenantId] = useState<string | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
 
   const [memberSearchQuery, setMemberSearchQuery] = useState("");
@@ -58,14 +68,12 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
   const [memberSearchError, setMemberSearchError] = useState<string | null>(null);
   const [isSearchingMembers, setIsSearchingMembers] = useState(false);
 
-  const [selectedMembers, setSelectedMembers] = useState<
-    Array<DirectoryUserResult & { role: "Lead" | "Member" }>
+  const [selectedUsers, setSelectedUsers] = useState<
+    Array<{ user_id: string; email: string; display_name: string; role: "Lead" | "Member" }>
   >([]);
-  const [isApplyingSelections, setIsApplyingSelections] = useState(false);
   const [selectionError, setSelectionError] = useState<string | null>(null);
-  const [selectionSuccess, setSelectionSuccess] = useState<string | null>(null);
 
-  const isBusy = isSubmitting || isSearchingMembers || isApplyingSelections;
+  const isBusy = isSubmitting || isSearchingMembers;
 
   const resetState = () => {
     setName("");
@@ -73,15 +81,14 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
     setSubmitError(null);
     setIsSubmitting(false);
     setCreatedCampaignId(null);
+    setSearchTenantId(null);
     setMembers([]);
     setMemberSearchQuery("");
     setMemberSearchResults([]);
     setMemberSearchError(null);
     setIsSearchingMembers(false);
-    setSelectedMembers([]);
-    setIsApplyingSelections(false);
+    setSelectedUsers([]);
     setSelectionError(null);
-    setSelectionSuccess(null);
   };
 
   const handleClose = () => {
@@ -98,6 +105,30 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
     setMembers(membersData.members || []);
   };
 
+  useEffect(() => {
+    if (!isOpen) return;
+    let cancelled = false;
+    const loadSearchScope = async () => {
+      try {
+        const token = await getToken();
+        if (!token) return;
+        const data = await apiFetch<CampaignSearchScopeResponse>("/api/v1/campaigns", {
+          token,
+          method: "GET",
+        });
+        if (cancelled) return;
+        const leadCampaign = (data.campaigns || []).find((campaign) => campaign.role === "Lead");
+        setSearchTenantId(leadCampaign?.id || null);
+      } catch {
+        if (!cancelled) setSearchTenantId(null);
+      }
+    };
+    void loadSearchScope();
+    return () => {
+      cancelled = true;
+    };
+  }, [getToken, isOpen]);
+
   const handleSubmitCreate = async () => {
     if (!name.trim()) {
       setSubmitError("Campaign name is required");
@@ -105,7 +136,6 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
     }
     setSubmitError(null);
     setSelectionError(null);
-    setSelectionSuccess(null);
     setIsSubmitting(true);
     try {
       const token = await getToken();
@@ -142,8 +172,22 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
       });
 
       setCreatedCampaignId(createdCampaign.id);
+      if (selectedUsers.length > 0) {
+        for (const selectedUser of selectedUsers) {
+          await apiFetch(`/api/v1/campaigns/${encodeURIComponent(createdCampaign.id)}/members`, {
+            token,
+            method: "POST",
+            body: {
+              email: selectedUser.email,
+              user_id: selectedUser.user_id,
+              role: selectedUser.role,
+            },
+          });
+        }
+      }
       await fetchMembers(createdCampaign.id, token);
-      setSelectionSuccess("Mission created. Add team members and roles below.");
+      resetState();
+      onClose();
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Failed to create campaign.");
     } finally {
@@ -152,17 +196,18 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
   };
 
   const existingMemberIds = useMemo(() => new Set((members || []).map((m) => m.id)), [members]);
-  const selectedMemberIds = useMemo(() => new Set(selectedMembers.map((m) => m.id)), [selectedMembers]);
+  const selectedUserIds = useMemo(() => new Set(selectedUsers.map((m) => m.user_id)), [selectedUsers]);
 
   useEffect(() => {
-    if (!createdCampaignId) {
-      setMemberSearchResults([]);
-      return;
-    }
     const query = memberSearchQuery.trim();
     if (query.length < 2) {
       setMemberSearchResults([]);
       setMemberSearchError(null);
+      return;
+    }
+    if (!searchTenantId) {
+      setMemberSearchResults([]);
+      setMemberSearchError("Unable to search users right now.");
       return;
     }
     const handle = window.setTimeout(async () => {
@@ -172,11 +217,11 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
         const token = await getToken();
         if (!token) return;
         const data = await apiFetch<UserSearchResponse>(
-          `/api/v1/campaigns/${encodeURIComponent(createdCampaignId)}/users/search?query=${encodeURIComponent(query)}&limit=10`,
+          `/api/v1/campaigns/${encodeURIComponent(searchTenantId)}/users/search?query=${encodeURIComponent(query)}&limit=10`,
           { token, method: "GET" },
         );
         const filtered = (data.users || []).filter(
-          (candidate) => !existingMemberIds.has(candidate.id) && !selectedMemberIds.has(candidate.id),
+          (candidate) => !existingMemberIds.has(candidate.id) && !selectedUserIds.has(candidate.id),
         );
         setMemberSearchResults(filtered);
       } catch (err) {
@@ -187,69 +232,33 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
       }
     }, 250);
     return () => window.clearTimeout(handle);
-  }, [createdCampaignId, existingMemberIds, getToken, memberSearchQuery, selectedMemberIds]);
+  }, [existingMemberIds, getToken, memberSearchQuery, searchTenantId, selectedUserIds]);
 
   const addSearchCandidate = (candidate: DirectoryUserResult) => {
-    setSelectedMembers((prev) => {
-      if (prev.some((member) => member.id === candidate.id)) return prev;
-      return [...prev, { ...candidate, role: "Member" }];
+    setSelectedUsers((prev) => {
+      if (prev.some((member) => member.user_id === candidate.id)) return prev;
+      return [
+        ...prev,
+        {
+          user_id: candidate.id,
+          email: candidate.email,
+          display_name: candidate.display_name,
+          role: "Member",
+        },
+      ];
     });
     setMemberSearchResults((prev) => prev.filter((item) => item.id !== candidate.id));
     setMemberSearchQuery("");
   };
 
   const removeSelectedCandidate = (candidateId: string) => {
-    setSelectedMembers((prev) => prev.filter((member) => member.id !== candidateId));
+    setSelectedUsers((prev) => prev.filter((member) => member.user_id !== candidateId));
   };
 
   const updateSelectedRole = (candidateId: string, role: "Lead" | "Member") => {
-    setSelectedMembers((prev) =>
-      prev.map((member) => (member.id === candidateId ? { ...member, role } : member)),
+    setSelectedUsers((prev) =>
+      prev.map((member) => (member.user_id === candidateId ? { ...member, role } : member)),
     );
-  };
-
-  const applySelectedMembers = async (): Promise<boolean> => {
-    if (!createdCampaignId || selectedMembers.length === 0) return true;
-
-    setIsApplyingSelections(true);
-    setSelectionError(null);
-    setSelectionSuccess(null);
-    try {
-      const token = await getToken();
-      if (!token) throw new Error("No authentication token available");
-
-      for (const member of selectedMembers) {
-        await apiFetch(`/api/v1/campaigns/${encodeURIComponent(createdCampaignId)}/members`, {
-          token,
-          method: "POST",
-          body: {
-            email: member.email,
-            user_id: member.id,
-            role: member.role,
-          },
-        });
-      }
-
-      await fetchMembers(createdCampaignId, token);
-      setSelectionSuccess(
-        `${selectedMembers.length} member${selectedMembers.length === 1 ? "" : "s"} added successfully.`,
-      );
-      setSelectedMembers([]);
-      return true;
-    } catch (err) {
-      setSelectionError(err instanceof Error ? err.message : "Failed to add selected members.");
-      return false;
-    } finally {
-      setIsApplyingSelections(false);
-    }
-  };
-
-  const handleDone = async () => {
-    if (!createdCampaignId) return;
-    const success = await applySelectedMembers();
-    if (!success) return;
-    resetState();
-    onClose();
   };
 
   if (!isOpen) return null;
@@ -300,10 +309,10 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
               {selectionError ? (
                 <div className="rounded-xl bg-[#fff0f0] px-4 py-3 text-sm text-[#9e3434]">{selectionError}</div>
               ) : null}
-              {selectionSuccess ? (
+              {createdCampaignId ? (
                 <div className="flex items-center gap-2 rounded-xl bg-[#edf7ee] px-4 py-3 text-sm text-[#2f6d3a]">
                   <CheckCircle2 className="h-4 w-4" />
-                  {selectionSuccess}
+                  Mission created successfully.
                 </div>
               ) : null}
 
@@ -317,7 +326,7 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
                     onChange={(event) => setName(event.target.value)}
                     placeholder="e.g., Clean Water Initiative 2025"
                     disabled={isSubmitting || !!createdCampaignId}
-                    className="w-full rounded-xl border border-[#e2d8c4] bg-white px-4 py-3 text-sm text-[#1f2a44] placeholder:text-[#8a90a0] focus:outline-none focus:ring-2 focus:ring-[#d5c59b] disabled:bg-[#f3efe6] disabled:text-[#8a90a0]"
+                    className="w-full rounded-xl border border-[#e2d8c4] bg-white px-4 py-3 text-sm text-[#1f2a44] placeholder:text-[#8a90a0] focus:outline-none focus:ring-2 focus:ring-[#c7a247] disabled:bg-[#f3efe6] disabled:text-[#8a90a0]"
                   />
                 </div>
                 <div>
@@ -328,7 +337,7 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
                     placeholder="Brief description of the campaign..."
                     rows={3}
                     disabled={isSubmitting || !!createdCampaignId}
-                    className="w-full resize-none rounded-xl border border-[#e2d8c4] bg-white px-4 py-3 text-sm text-[#1f2a44] placeholder:text-[#8a90a0] focus:outline-none focus:ring-2 focus:ring-[#d5c59b] disabled:bg-[#f3efe6] disabled:text-[#8a90a0]"
+                    className="w-full resize-none rounded-xl border border-[#e2d8c4] bg-white px-4 py-3 text-sm text-[#1f2a44] placeholder:text-[#8a90a0] focus:outline-none focus:ring-2 focus:ring-[#c7a247] disabled:bg-[#f3efe6] disabled:text-[#8a90a0]"
                   />
                 </div>
                 <div className="rounded-xl bg-[#f2ecdf] px-4 py-3 text-sm text-[#4f5970]">
@@ -339,11 +348,7 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
               <section className="space-y-4">
                 <div className="flex items-center justify-between">
                   <h3 className="text-sm font-semibold uppercase tracking-wide text-[#5f6778]">Team Members</h3>
-                  {createdCampaignId ? (
-                    <span className="text-xs text-[#6d7688]">Search and add users with roles</span>
-                  ) : (
-                    <span className="text-xs text-[#8a90a0]">Create mission first to enable user search</span>
-                  )}
+                  <span className="text-xs text-[#6d7688]">Search and add users with roles</span>
                 </div>
 
                 <div className="rounded-xl border border-[#e2d8c4] bg-white px-3 py-2">
@@ -353,12 +358,8 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
                       type="text"
                       value={memberSearchQuery}
                       onChange={(event) => setMemberSearchQuery(event.target.value)}
-                      placeholder={
-                        createdCampaignId
-                          ? "Search users by name or email..."
-                          : "Create mission first to search users..."
-                      }
-                      disabled={!createdCampaignId || isSearchingMembers}
+                      placeholder="Search users by name or email..."
+                      disabled={isSearchingMembers}
                       className="w-full bg-transparent py-1 text-sm text-[#1f2a44] placeholder:text-[#8a90a0] focus:outline-none disabled:text-[#9aa1b0]"
                     />
                   </div>
@@ -366,7 +367,7 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
 
                 {memberSearchError ? <p className="text-xs text-[#9e3434]">{memberSearchError}</p> : null}
 
-                {createdCampaignId && (isSearchingMembers || memberSearchResults.length > 0) ? (
+                {isSearchingMembers || memberSearchResults.length > 0 ? (
                   <div className="max-h-40 space-y-1 overflow-y-auto rounded-xl border border-[#e2d8c4] bg-white p-2">
                     {isSearchingMembers ? (
                       <p className="px-2 py-1.5 text-xs text-[#8a90a0]">Searching users...</p>
@@ -392,12 +393,12 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
                   </div>
                 ) : null}
 
-                {selectedMembers.length > 0 ? (
+                {selectedUsers.length > 0 ? (
                   <div className="space-y-2">
                     <p className="text-xs font-medium text-[#5f6778]">Selected members</p>
-                    {selectedMembers.map((member) => (
+                    {selectedUsers.map((member) => (
                       <div
-                        key={member.id}
+                        key={member.user_id}
                         className="flex items-center justify-between rounded-xl border border-[#e2d8c4] bg-white px-3 py-2"
                       >
                         <div>
@@ -408,16 +409,16 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
                           <select
                             value={member.role}
                             onChange={(event) =>
-                              updateSelectedRole(member.id, event.target.value as "Lead" | "Member")
+                              updateSelectedRole(member.user_id, event.target.value as "Lead" | "Member")
                             }
-                            className="rounded-md border border-[#ded4c2] bg-white px-2 py-1 text-xs text-[#1f2a44] focus:outline-none focus:ring-2 focus:ring-[#d5c59b]"
+                            className="rounded-md border border-[#ded4c2] bg-white px-2 py-1 text-xs text-[#1f2a44] focus:outline-none focus:ring-2 focus:ring-[#c7a247]"
                           >
                             <option value="Member">Member</option>
                             <option value="Lead">Lead</option>
                           </select>
                           <button
                             type="button"
-                            onClick={() => removeSelectedCandidate(member.id)}
+                            onClick={() => removeSelectedCandidate(member.user_id)}
                             className="rounded-md p-1 text-[#8a90a0] hover:bg-[#efe6d7] hover:text-[#4d5871]"
                             aria-label={`Remove ${member.email}`}
                           >
@@ -447,70 +448,27 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
           </div>
 
           <div className="flex items-center justify-between border-t border-[#e7dfcf] px-6 py-4">
-            {!createdCampaignId ? (
-              <>
-                <button
-                  type="button"
-                  onClick={handleClose}
-                  disabled={isBusy}
-                  className="rounded-lg border border-[#ded4c2] px-4 py-2 text-sm font-medium text-[#4d5871] transition hover:bg-[#f0ebde] disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSubmitCreate}
-                  disabled={isSubmitting || !name.trim()}
-                  className={cn(
-                    "rounded-lg px-4 py-2 text-sm font-semibold text-[#1f2a44] transition",
-                    isSubmitting || !name.trim()
-                      ? "cursor-not-allowed bg-[#e8dcc0] opacity-60"
-                      : "bg-[#f1cf63] hover:bg-[#e6c257]",
-                  )}
-                >
-                  {isSubmitting ? "Creating..." : "Create Mission"}
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={handleClose}
-                  disabled={isBusy}
-                  className="rounded-lg border border-[#ded4c2] px-4 py-2 text-sm font-medium text-[#4d5871] transition hover:bg-[#f0ebde] disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={applySelectedMembers}
-                    disabled={isApplyingSelections || selectedMembers.length === 0}
-                    className={cn(
-                      "rounded-lg border px-4 py-2 text-sm font-medium transition",
-                      isApplyingSelections || selectedMembers.length === 0
-                        ? "cursor-not-allowed border-[#ddd4c3] text-[#9aa1b0] opacity-70"
-                        : "border-[#d5c59b] text-[#2a3d64] hover:bg-[#f5efdf]",
-                    )}
-                  >
-                    {isApplyingSelections
-                      ? "Adding..."
-                      : `Add Selected${selectedMembers.length > 0 ? ` (${selectedMembers.length})` : ""}`}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleDone}
-                    disabled={isBusy}
-                    className={cn(
-                      "rounded-lg px-4 py-2 text-sm font-semibold text-[#1f2a44] transition",
-                      isBusy ? "cursor-not-allowed bg-[#e8dcc0] opacity-60" : "bg-[#f1cf63] hover:bg-[#e6c257]",
-                    )}
-                  >
-                    Done
-                  </button>
-                </div>
-              </>
-            )}
+            <button
+              type="button"
+              onClick={handleClose}
+              disabled={isBusy}
+              className="rounded-lg border border-[#ded4c2] px-4 py-2 text-sm font-medium text-[#4d5871] transition hover:bg-[#f0ebde] disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={handleSubmitCreate}
+              disabled={isSubmitting || !name.trim()}
+              className={cn(
+                "rounded-lg px-4 py-2 text-sm font-semibold text-[#1f2a44] transition",
+                isSubmitting || !name.trim()
+                  ? "cursor-not-allowed bg-[#e2d4ac] opacity-60"
+                  : "bg-[#d4ad47] hover:bg-[#bf993b]",
+              )}
+            >
+              {isSubmitting ? "Creating..." : "Create Mission"}
+            </button>
           </div>
         </motion.div>
       </div>
