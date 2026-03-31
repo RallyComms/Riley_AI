@@ -312,20 +312,20 @@ export default function ConversationsPage() {
   ) => (
     <div className="max-h-48 space-y-1 overflow-y-auto">
       {members.length === 0 ? (
-        <p className="py-2 text-xs text-zinc-500">{emptyLabel}</p>
+        <p className="py-2 text-xs text-slate-500">{emptyLabel}</p>
       ) : (
         members.map((m) => (
           <label
             key={m.user_id}
-            className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 hover:bg-zinc-800"
+            className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-slate-700 hover:bg-slate-100"
           >
             <input
               type="checkbox"
               checked={selectedIds.has(m.user_id)}
               onChange={() => onToggle(m.user_id)}
-              className="accent-blue-500"
+              className="accent-blue-600"
             />
-            <span className="text-sm text-zinc-200">{m.display_name || m.user_id}</span>
+            <span className="text-sm">{m.display_name || m.user_id}</span>
           </label>
         ))
       )}
@@ -362,34 +362,34 @@ export default function ConversationsPage() {
   );
 
   return (
-    <div className="min-h-screen bg-zinc-950 p-6 text-zinc-100">
-      <div className="mx-auto max-w-[1400px] space-y-4">
+    <div className="min-h-screen bg-[#F7F8FA] p-8 text-slate-800">
+      <div className="mx-auto max-w-[1400px] space-y-6">
         <header className="flex items-start justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-semibold">{campaignDisplayName}</h1>
-            <p className="text-lg font-medium text-zinc-100">Public Forum</p>
-            <p className="text-sm text-zinc-400">Visible to everyone in this campaign</p>
+            <h1 className="text-3xl font-bold text-slate-900">{campaignDisplayName}</h1>
+            <p className="mt-1 text-lg font-medium text-slate-700">Public Forum</p>
+            <p className="mt-1 text-sm text-slate-500">Visible to everyone in this campaign</p>
           </div>
           <Link
             href={`/campaign/${campaignId}`}
-            className="rounded border border-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-800"
+            className="rounded-lg bg-white px-3.5 py-2 text-sm text-slate-600 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50"
           >
             Back
           </Link>
         </header>
 
-        {error ? <p className="text-sm text-red-300">{error}</p> : null}
+        {error ? <p className="text-sm text-red-600">{error}</p> : null}
 
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
-          <section className="flex h-[78vh] flex-col overflow-hidden rounded border border-zinc-800 bg-zinc-900">
+        <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <section className="flex h-[78vh] flex-col overflow-hidden rounded-2xl bg-white px-0 shadow-[0_1px_3px_rgba(15,23,42,0.08),0_12px_28px_rgba(15,23,42,0.04)]">
             {showNewConversation ? (
-              <div className="space-y-4 p-4">
+              <div className="space-y-5 p-6">
                 <div className="flex items-center justify-between">
-                  <p className="text-base font-medium">New Conversation</p>
+                  <p className="text-base font-semibold text-slate-800">New Conversation</p>
                   <button
                     type="button"
                     onClick={() => setShowNewConversation(false)}
-                    className="text-xs text-zinc-400 hover:text-zinc-200"
+                    className="text-xs text-slate-500 hover:text-slate-700"
                   >
                     Cancel
                   </button>
@@ -398,10 +398,10 @@ export default function ConversationsPage() {
                   value={newConvName}
                   onChange={(e) => setNewConvName(e.target.value)}
                   placeholder="Conversation name (optional)"
-                  className="w-full rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+                  className="w-full rounded-xl bg-slate-50 px-3 py-2.5 text-sm text-slate-800 ring-1 ring-slate-200 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-200"
                 />
                 <div>
-                  <p className="mb-1 text-xs font-medium text-zinc-400">Select participants</p>
+                  <p className="mb-2 text-xs font-medium text-slate-500">Select participants</p>
                   {renderMemberPicker(
                     newConvMembers,
                     newConvSelectedIds,
@@ -413,27 +413,27 @@ export default function ConversationsPage() {
                   type="button"
                   onClick={handleCreateConversation}
                   disabled={newConvLoading || newConvSelectedIds.size === 0}
-                  className="rounded border border-blue-600/50 bg-blue-500/10 px-4 py-2 text-sm text-blue-300 hover:bg-blue-500/20 disabled:opacity-50"
+                  className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:opacity-50"
                 >
                   {newConvLoading ? "Creating..." : "Create Conversation"}
                 </button>
               </div>
             ) : showAddPeople && selectedConversation?.type === "private" ? (
-              <div className="space-y-4 p-4">
+              <div className="space-y-5 p-6">
                 <div className="flex items-center justify-between">
-                  <p className="text-base font-medium">
+                  <p className="text-base font-semibold text-slate-800">
                     Add People to {conversationLabel(selectedConversation)}
                   </p>
                   <button
                     type="button"
                     onClick={() => setShowAddPeople(false)}
-                    className="text-xs text-zinc-400 hover:text-zinc-200"
+                    className="text-xs text-slate-500 hover:text-slate-700"
                   >
                     Cancel
                   </button>
                 </div>
                 <div>
-                  <p className="mb-1 text-xs font-medium text-zinc-400">Select members to add</p>
+                  <p className="mb-2 text-xs font-medium text-slate-500">Select members to add</p>
                   {renderMemberPicker(
                     addableCampaignMembers,
                     addPeopleSelectedIds,
@@ -442,25 +442,25 @@ export default function ConversationsPage() {
                   )}
                 </div>
                 <div>
-                  <p className="mb-1 text-xs font-medium text-zinc-400">History access</p>
+                  <p className="mb-2 text-xs font-medium text-slate-500">History access</p>
                   <div className="flex gap-3">
-                    <label className="flex cursor-pointer items-center gap-1.5 text-sm text-zinc-200">
+                    <label className="flex cursor-pointer items-center gap-1.5 text-sm text-slate-700">
                       <input
                         type="radio"
                         name="history_access"
                         checked={addPeopleHistoryAccess === "from_join"}
                         onChange={() => setAddPeopleHistoryAccess("from_join")}
-                        className="accent-blue-500"
+                        className="accent-blue-600"
                       />
                       From now on
                     </label>
-                    <label className="flex cursor-pointer items-center gap-1.5 text-sm text-zinc-200">
+                    <label className="flex cursor-pointer items-center gap-1.5 text-sm text-slate-700">
                       <input
                         type="radio"
                         name="history_access"
                         checked={addPeopleHistoryAccess === "full"}
                         onChange={() => setAddPeopleHistoryAccess("full")}
-                        className="accent-blue-500"
+                        className="accent-blue-600"
                       />
                       Full history
                     </label>
@@ -470,21 +470,21 @@ export default function ConversationsPage() {
                   type="button"
                   onClick={handleAddPeople}
                   disabled={addPeopleLoading || addPeopleSelectedIds.size === 0}
-                  className="rounded border border-blue-600/50 bg-blue-500/10 px-4 py-2 text-sm text-blue-300 hover:bg-blue-500/20 disabled:opacity-50"
+                  className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:opacity-50"
                 >
                   {addPeopleLoading ? "Adding..." : "Add People"}
                 </button>
               </div>
             ) : (
               <>
-                <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+                <div className="flex items-center justify-between px-6 py-5">
                   <div>
-                    <p className="text-base font-medium">
+                    <p className="text-base font-semibold text-slate-800">
                       {selectedConversation?.type === "public"
                         ? "Public Forum"
                         : conversationLabel(selectedConversation)}
                     </p>
-                    <p className="mt-0.5 text-xs text-zinc-500">
+                    <p className="mt-1 text-xs text-slate-500">
                       {selectedConversation?.type === "public"
                         ? "Visible to everyone in this campaign"
                         : (selectedConversation?.participants || [])
@@ -497,7 +497,7 @@ export default function ConversationsPage() {
                       <button
                         type="button"
                         onClick={openAddPeople}
-                        className="rounded border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-700"
+                        className="rounded-lg bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-700 ring-1 ring-slate-200 transition hover:bg-slate-200"
                       >
                         Add People
                       </button>
@@ -505,7 +505,7 @@ export default function ConversationsPage() {
                         type="button"
                         onClick={handleLeaveConversation}
                         disabled={leaveLoading}
-                        className="rounded border border-red-800/50 bg-red-500/10 px-2.5 py-1 text-xs text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+                        className="rounded-lg bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 ring-1 ring-red-200 transition hover:bg-red-100 disabled:opacity-50"
                       >
                         {leaveLoading ? "Leaving..." : "Leave"}
                       </button>
@@ -513,34 +513,34 @@ export default function ConversationsPage() {
                   )}
                 </div>
 
-                <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
+                <div className="flex-1 space-y-3 overflow-y-auto px-6 py-4">
                   {messages.length === 0 ? (
-                    <p className="text-sm text-zinc-500">
+                    <p className="text-sm text-slate-500">
                       No messages yet. Start the conversation with your team.
                     </p>
                   ) : (
                     messages.map((message) => (
-                      <div key={message.id} className="rounded border border-zinc-800 bg-zinc-950/60 px-3 py-2">
-                        <p className="text-sm font-medium text-zinc-200">{message.author_display_name}</p>
-                        <p className="text-sm text-zinc-300">{message.content}</p>
-                        <p className="text-xs text-zinc-500">{new Date(message.created_at).toLocaleString()}</p>
+                      <div key={message.id} className="rounded-xl bg-slate-50 px-4 py-3 ring-1 ring-slate-200/70">
+                        <p className="text-sm font-medium text-slate-800">{message.author_display_name}</p>
+                        <p className="text-sm text-slate-700">{message.content}</p>
+                        <p className="text-xs text-slate-500">{new Date(message.created_at).toLocaleString()}</p>
                       </div>
                     ))
                   )}
                 </div>
 
-                <form onSubmit={handlePost} className="mt-auto border-t border-zinc-800 p-3">
+                <form onSubmit={handlePost} className="mt-auto px-6 pb-6 pt-4">
                   <div className="flex items-center gap-2">
                     <input
                       value={draft}
                       onChange={(e) => setDraft(e.target.value)}
                       placeholder="Message everyone in this campaign..."
-                      className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
+                      className="h-12 flex-1 rounded-xl bg-white px-4 text-sm text-slate-800 shadow-sm ring-1 ring-slate-200 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-200"
                     />
                     <button
                       type="submit"
                       disabled={loading || !selectedConversationId || !draft.trim()}
-                      className="rounded border border-emerald-600/40 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300 disabled:opacity-50"
+                      className="h-12 rounded-xl bg-blue-600 px-4 text-sm font-medium text-white shadow-sm transition hover:bg-blue-700 disabled:opacity-50"
                     >
                       Send
                     </button>
@@ -550,21 +550,21 @@ export default function ConversationsPage() {
             )}
           </section>
 
-          <aside className="flex h-[78vh] flex-col overflow-hidden rounded border border-zinc-800 bg-zinc-900">
-            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
-              <p className="text-sm text-zinc-300">Conversations</p>
+          <aside className="flex h-[78vh] flex-col overflow-hidden rounded-2xl bg-[#F2F4F7] px-0">
+            <div className="flex items-center justify-between px-4 py-4">
+              <p className="text-sm font-medium text-slate-700">Conversations</p>
               <button
                 type="button"
                 onClick={openNewConversation}
-                className="rounded border border-blue-600/50 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20"
+                className="rounded-lg bg-white px-2.5 py-1.5 text-xs font-medium text-blue-700 shadow-sm ring-1 ring-slate-200 transition hover:bg-slate-50"
               >
                 + New Conversation
               </button>
             </div>
 
-            <div className="flex-1 space-y-5 overflow-y-auto p-3">
+            <div className="flex-1 space-y-6 overflow-y-auto p-3 pt-1">
               <div className="space-y-2">
-                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Public</p>
+                <p className="px-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">Public</p>
                 {publicConversation ? (
                   <button
                     type="button"
@@ -573,31 +573,31 @@ export default function ConversationsPage() {
                       setShowNewConversation(false);
                       setShowAddPeople(false);
                     }}
-                    className={`w-full rounded border px-3 py-2 text-left text-sm ${
+                    className={`w-full rounded-xl px-3 py-2.5 text-left text-sm transition ${
                       publicConversation.id === selectedConversationId
-                        ? "border-blue-600/50 bg-blue-500/10 text-blue-200"
-                        : "border-zinc-800 bg-zinc-950/40 text-zinc-300 hover:bg-zinc-800"
+                        ? "bg-blue-50 text-blue-800 ring-1 ring-blue-100"
+                        : "text-slate-700 hover:bg-slate-100"
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <p className="font-medium">Public Forum</p>
+                      <p className="font-medium text-current">Public Forum</p>
                       {(publicConversation.unread_count || 0) > 0 ? (
-                        <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs font-semibold text-blue-300">
+                        <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-semibold text-blue-700">
                           {publicConversation.unread_count}
                         </span>
                       ) : null}
                     </div>
-                    <p className="text-xs text-zinc-500">Visible to everyone</p>
+                    <p className="text-xs text-slate-500">Visible to everyone</p>
                   </button>
                 ) : null}
               </div>
 
               <div className="space-y-2">
-                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                <p className="px-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
                   Direct Messages
                 </p>
                 {directMessageConversations.length === 0 ? (
-                  <p className="px-1 text-xs text-zinc-600">No direct messages yet.</p>
+                  <p className="px-1 text-xs text-slate-500">No direct messages yet.</p>
                 ) : (
                   directMessageConversations.map((conversation) => (
                     <button
@@ -608,16 +608,16 @@ export default function ConversationsPage() {
                         setShowNewConversation(false);
                         setShowAddPeople(false);
                       }}
-                      className={`w-full rounded border px-3 py-2 text-left text-sm ${
+                      className={`w-full rounded-xl px-3 py-2.5 text-left text-sm transition ${
                         conversation.id === selectedConversationId
-                          ? "border-blue-600/50 bg-blue-500/10 text-blue-200"
-                          : "border-zinc-800 bg-zinc-950/40 text-zinc-300 hover:bg-zinc-800"
+                          ? "bg-blue-50 text-blue-800 ring-1 ring-blue-100"
+                          : "text-slate-700 hover:bg-slate-100"
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <p className="font-medium">{conversationLabel(conversation)}</p>
+                        <p className="font-medium text-current">{conversationLabel(conversation)}</p>
                         {(conversation.unread_count || 0) > 0 ? (
-                          <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs font-semibold text-blue-300">
+                          <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-semibold text-blue-700">
                             {conversation.unread_count}
                           </span>
                         ) : null}
@@ -628,11 +628,11 @@ export default function ConversationsPage() {
               </div>
 
               <div className="space-y-2">
-                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                <p className="px-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">
                   Group Conversations
                 </p>
                 {groupConversations.length === 0 ? (
-                  <p className="px-1 text-xs text-zinc-600">No group conversations yet.</p>
+                  <p className="px-1 text-xs text-slate-500">No group conversations yet.</p>
                 ) : (
                   groupConversations.map((conversation) => (
                     <button
@@ -643,16 +643,16 @@ export default function ConversationsPage() {
                         setShowNewConversation(false);
                         setShowAddPeople(false);
                       }}
-                      className={`w-full rounded border px-3 py-2 text-left text-sm ${
+                      className={`w-full rounded-xl px-3 py-2.5 text-left text-sm transition ${
                         conversation.id === selectedConversationId
-                          ? "border-blue-600/50 bg-blue-500/10 text-blue-200"
-                          : "border-zinc-800 bg-zinc-950/40 text-zinc-300 hover:bg-zinc-800"
+                          ? "bg-blue-50 text-blue-800 ring-1 ring-blue-100"
+                          : "text-slate-700 hover:bg-slate-100"
                       }`}
                     >
                       <div className="flex items-center justify-between gap-2">
-                        <p className="font-medium">{conversationLabel(conversation)}</p>
+                        <p className="font-medium text-current">{conversationLabel(conversation)}</p>
                         {(conversation.unread_count || 0) > 0 ? (
-                          <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs font-semibold text-blue-300">
+                          <span className="rounded-full bg-blue-100 px-2 py-0.5 text-xs font-semibold text-blue-700">
                             {conversation.unread_count}
                           </span>
                         ) : null}
