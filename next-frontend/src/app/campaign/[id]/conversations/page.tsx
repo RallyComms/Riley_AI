@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth, useUser } from "@clerk/nextjs";
 import { apiFetch } from "@app/lib/api";
+import { useCampaignName } from "@app/lib/useCampaignName";
 
 type ConversationParticipant = {
   user_id: string;
@@ -43,6 +44,7 @@ export default function ConversationsPage() {
   const campaignId = String(params?.id || "");
   const { user } = useUser();
   const { getToken, isLoaded } = useAuth();
+  const { displayName: campaignDisplayName } = useCampaignName(campaignId);
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<string>("");
@@ -336,45 +338,50 @@ export default function ConversationsPage() {
     [campaignMembers, currentUserId],
   );
 
+  const privateConversations = useMemo(
+    () => conversations.filter((c) => c.type === "private"),
+    [conversations],
+  );
+
+  const directMessageConversations = useMemo(
+    () =>
+      privateConversations.filter((conversation) => {
+        const participants = (conversation.participants || []).filter((p) => p.user_id !== currentUserId);
+        return participants.length === 1;
+      }),
+    [privateConversations, currentUserId],
+  );
+
+  const groupConversations = useMemo(
+    () =>
+      privateConversations.filter((conversation) => {
+        const participants = (conversation.participants || []).filter((p) => p.user_id !== currentUserId);
+        return participants.length !== 1;
+      }),
+    [privateConversations, currentUserId],
+  );
+
   return (
     <div className="min-h-screen bg-zinc-950 p-6 text-zinc-100">
-      <div className="mx-auto max-w-7xl space-y-4">
-        <div className="flex items-center justify-between">
-          <h1 className="text-2xl font-semibold">Campaign Conversations</h1>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                setShowNewConversation(false);
-                setShowAddPeople(false);
-                setSelectedConversationId(publicConversation?.id || "");
-              }}
-              className="rounded border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-sm hover:bg-zinc-800"
-            >
-              Post to Campaign
-            </button>
-            <button
-              type="button"
-              onClick={openNewConversation}
-              className="rounded border border-blue-600/50 bg-blue-500/10 px-3 py-1.5 text-sm text-blue-300 hover:bg-blue-500/20"
-            >
-              New Conversation
-            </button>
-            <Link
-              href={`/campaign/${campaignId}`}
-              className="rounded border border-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-800"
-            >
-              Back
-            </Link>
+      <div className="mx-auto max-w-[1400px] space-y-4">
+        <header className="flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-semibold">{campaignDisplayName}</h1>
+            <p className="text-lg font-medium text-zinc-100">Public Forum</p>
+            <p className="text-sm text-zinc-400">Visible to everyone in this campaign</p>
           </div>
-        </div>
+          <Link
+            href={`/campaign/${campaignId}`}
+            className="rounded border border-zinc-700 px-3 py-1.5 text-sm hover:bg-zinc-800"
+          >
+            Back
+          </Link>
+        </header>
 
         {error ? <p className="text-sm text-red-300">{error}</p> : null}
 
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-          {/* Main panel */}
-          <section className="lg:col-span-2 rounded border border-zinc-800 bg-zinc-900">
-            {/* New Conversation modal */}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <section className="flex h-[78vh] flex-col overflow-hidden rounded border border-zinc-800 bg-zinc-900">
             {showNewConversation ? (
               <div className="space-y-4 p-4">
                 <div className="flex items-center justify-between">
@@ -412,7 +419,6 @@ export default function ConversationsPage() {
                 </button>
               </div>
             ) : showAddPeople && selectedConversation?.type === "private" ? (
-              /* Add People panel */
               <div className="space-y-4 p-4">
                 <div className="flex items-center justify-between">
                   <p className="text-base font-medium">
@@ -470,19 +476,21 @@ export default function ConversationsPage() {
                 </button>
               </div>
             ) : (
-              /* Message view */
               <>
                 <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
                   <div>
-                    <p className="text-sm text-zinc-400">
-                      {selectedConversation?.type === "public" ? "Public Feed" : "Messages"}
+                    <p className="text-base font-medium">
+                      {selectedConversation?.type === "public"
+                        ? "Public Forum"
+                        : conversationLabel(selectedConversation)}
                     </p>
-                    <p className="text-base font-medium">{conversationLabel(selectedConversation)}</p>
-                    {selectedConversation?.type === "private" && selectedConversation.participants && (
-                      <p className="mt-0.5 text-xs text-zinc-500">
-                        {selectedConversation.participants.map((p) => p.display_name || p.user_id).join(", ")}
-                      </p>
-                    )}
+                    <p className="mt-0.5 text-xs text-zinc-500">
+                      {selectedConversation?.type === "public"
+                        ? "Visible to everyone in this campaign"
+                        : (selectedConversation?.participants || [])
+                            .map((p) => p.display_name || p.user_id)
+                            .join(", ")}
+                    </p>
                   </div>
                   {selectedConversation?.type === "private" && (
                     <div className="flex items-center gap-2">
@@ -504,9 +512,12 @@ export default function ConversationsPage() {
                     </div>
                   )}
                 </div>
-                <div className="max-h-[60vh] space-y-2 overflow-y-auto px-4 py-3">
+
+                <div className="flex-1 space-y-2 overflow-y-auto px-4 py-3">
                   {messages.length === 0 ? (
-                    <p className="text-sm text-zinc-500">No messages yet.</p>
+                    <p className="text-sm text-zinc-500">
+                      No messages yet. Start the conversation with your team.
+                    </p>
                   ) : (
                     messages.map((message) => (
                       <div key={message.id} className="rounded border border-zinc-800 bg-zinc-950/60 px-3 py-2">
@@ -517,12 +528,13 @@ export default function ConversationsPage() {
                     ))
                   )}
                 </div>
-                <form onSubmit={handlePost} className="border-t border-zinc-800 p-3">
+
+                <form onSubmit={handlePost} className="mt-auto border-t border-zinc-800 p-3">
                   <div className="flex items-center gap-2">
                     <input
                       value={draft}
                       onChange={(e) => setDraft(e.target.value)}
-                      placeholder="Write a message..."
+                      placeholder="Message everyone in this campaign..."
                       className="flex-1 rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm"
                     />
                     <button
@@ -538,63 +550,117 @@ export default function ConversationsPage() {
             )}
           </section>
 
-          {/* Sidebar */}
-          <aside className="rounded border border-zinc-800 bg-zinc-900">
-            <div className="border-b border-zinc-800 px-4 py-3">
-              <p className="text-sm text-zinc-400">Conversations</p>
+          <aside className="flex h-[78vh] flex-col overflow-hidden rounded border border-zinc-800 bg-zinc-900">
+            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
+              <p className="text-sm text-zinc-300">Conversations</p>
+              <button
+                type="button"
+                onClick={openNewConversation}
+                className="rounded border border-blue-600/50 bg-blue-500/10 px-2.5 py-1 text-xs text-blue-300 hover:bg-blue-500/20"
+              >
+                + New Conversation
+              </button>
             </div>
-            <div className="space-y-2 p-3">
-              {conversations.length === 0 ? (
-                <div className="rounded border border-zinc-800 bg-zinc-950/40 p-3">
-                  <p className="text-sm font-medium text-zinc-100">Start a conversation</p>
-                  <p className="mt-1 text-xs text-zinc-500">
-                    No conversations yet. Create one or post to the campaign feed.
-                  </p>
-                  <div className="mt-3 flex gap-2">
-                    <button
-                      type="button"
-                      onClick={openNewConversation}
-                      className="rounded border border-blue-600/50 bg-blue-500/10 px-2.5 py-1.5 text-xs text-blue-300 hover:bg-blue-500/20"
-                    >
-                      Start a conversation
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedConversationId(publicConversation?.id || "")}
-                      className="rounded border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-xs hover:bg-zinc-800"
-                    >
-                      Post to campaign
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                conversations.map((conversation) => (
+
+            <div className="flex-1 space-y-5 overflow-y-auto p-3">
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">Public</p>
+                {publicConversation ? (
                   <button
-                    key={conversation.id}
                     type="button"
                     onClick={() => {
-                      setSelectedConversationId(conversation.id);
+                      setSelectedConversationId(publicConversation.id);
                       setShowNewConversation(false);
                       setShowAddPeople(false);
                     }}
                     className={`w-full rounded border px-3 py-2 text-left text-sm ${
-                      conversation.id === selectedConversationId
+                      publicConversation.id === selectedConversationId
                         ? "border-blue-600/50 bg-blue-500/10 text-blue-200"
                         : "border-zinc-800 bg-zinc-950/40 text-zinc-300 hover:bg-zinc-800"
                     }`}
                   >
                     <div className="flex items-center justify-between gap-2">
-                      <p className="font-medium">{conversationLabel(conversation)}</p>
-                      {(conversation.unread_count || 0) > 0 ? (
+                      <p className="font-medium">Public Forum</p>
+                      {(publicConversation.unread_count || 0) > 0 ? (
                         <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs font-semibold text-blue-300">
-                          {conversation.unread_count}
+                          {publicConversation.unread_count}
                         </span>
                       ) : null}
                     </div>
-                    <p className="text-xs uppercase tracking-wide text-zinc-500">{conversation.type}</p>
+                    <p className="text-xs text-zinc-500">Visible to everyone</p>
                   </button>
-                ))
-              )}
+                ) : null}
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  Direct Messages
+                </p>
+                {directMessageConversations.length === 0 ? (
+                  <p className="px-1 text-xs text-zinc-600">No direct messages yet.</p>
+                ) : (
+                  directMessageConversations.map((conversation) => (
+                    <button
+                      key={conversation.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedConversationId(conversation.id);
+                        setShowNewConversation(false);
+                        setShowAddPeople(false);
+                      }}
+                      className={`w-full rounded border px-3 py-2 text-left text-sm ${
+                        conversation.id === selectedConversationId
+                          ? "border-blue-600/50 bg-blue-500/10 text-blue-200"
+                          : "border-zinc-800 bg-zinc-950/40 text-zinc-300 hover:bg-zinc-800"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-medium">{conversationLabel(conversation)}</p>
+                        {(conversation.unread_count || 0) > 0 ? (
+                          <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs font-semibold text-blue-300">
+                            {conversation.unread_count}
+                          </span>
+                        ) : null}
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-zinc-500">
+                  Group Conversations
+                </p>
+                {groupConversations.length === 0 ? (
+                  <p className="px-1 text-xs text-zinc-600">No group conversations yet.</p>
+                ) : (
+                  groupConversations.map((conversation) => (
+                    <button
+                      key={conversation.id}
+                      type="button"
+                      onClick={() => {
+                        setSelectedConversationId(conversation.id);
+                        setShowNewConversation(false);
+                        setShowAddPeople(false);
+                      }}
+                      className={`w-full rounded border px-3 py-2 text-left text-sm ${
+                        conversation.id === selectedConversationId
+                          ? "border-blue-600/50 bg-blue-500/10 text-blue-200"
+                          : "border-zinc-800 bg-zinc-950/40 text-zinc-300 hover:bg-zinc-800"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="font-medium">{conversationLabel(conversation)}</p>
+                        {(conversation.unread_count || 0) > 0 ? (
+                          <span className="rounded-full bg-blue-500/20 px-2 py-0.5 text-xs font-semibold text-blue-300">
+                            {conversation.unread_count}
+                          </span>
+                        ) : null}
+                      </div>
+                    </button>
+                  ))
+                )}
+              </div>
             </div>
           </aside>
         </div>
