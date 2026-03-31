@@ -21,6 +21,8 @@ interface BackendCampaign {
   created_at?: string | null;
   owner_id?: string | null;
   owner_name?: string | null;
+  owner_username?: string | null;
+  owner_email?: string | null;
 }
 
 interface CampaignsResponse {
@@ -49,6 +51,32 @@ const THEME_COLORS = [
   "#facc15",
 ];
 
+type DirectoryUserLabelCandidate = {
+  display_name?: string | null;
+  username?: string | null;
+  email?: string | null;
+  user_id?: string | null;
+};
+
+function resolveUserLabel(candidate: DirectoryUserLabelCandidate): string {
+  const displayName = String(candidate.display_name || "").trim();
+  if (displayName) return displayName;
+
+  const username = String(candidate.username || "").trim();
+  if (username) return username;
+
+  const email = String(candidate.email || "").trim();
+  if (email) {
+    const prefix = email.split("@")[0]?.trim();
+    if (prefix) return prefix;
+  }
+
+  const userId = String(candidate.user_id || "").trim();
+  if (userId) return userId;
+
+  return "Unknown user";
+}
+
 function mapBackendToFrontend(backendCampaign: BackendCampaign, index: number): UserCampaign {
   const roleDisplay =
     backendCampaign.role === "Lead"
@@ -68,7 +96,12 @@ function mapBackendToFrontend(backendCampaign: BackendCampaign, index: number): 
     themeColor,
     campaignId: backendCampaign.id,
     access: backendCampaign.access,
-    ownerName: backendCampaign.owner_name ?? undefined,
+    ownerName: resolveUserLabel({
+      display_name: backendCampaign.owner_name,
+      username: backendCampaign.owner_username,
+      email: backendCampaign.owner_email,
+      user_id: backendCampaign.owner_id,
+    }),
   };
 }
 
