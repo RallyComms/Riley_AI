@@ -1074,13 +1074,20 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       const errorText = error instanceof Error 
         ? error.message 
         : "Unknown error occurred";
+      const normalizedErrorText = errorText.toLowerCase();
+      const isUsageLimitError =
+        normalizedErrorText.includes("usage limits") ||
+        normalizedErrorText.includes("temporarily unavailable due to usage limits") ||
+        normalizedErrorText.includes("reached your limit for deep/reports today");
       
       // apiFetch throws errors with format "HTTP <status>: <detail>" or "Network/CORS failure"
       // Display the exact error message to help with debugging
       const errorMessage: Message = {
         id: `error-${Date.now()}`,
         role: "assistant",
-        content: `Error: ${errorText}`,
+        content: isUsageLimitError
+          ? "You’ve reached your limit for Deep/Reports today."
+          : `Error: ${errorText}`,
       };
       // Replace thinking message with error message
       setMessages((prev) => {
@@ -1222,12 +1229,19 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       await loadReportJobs({ silent: true });
     } catch (error) {
       console.error("Failed to create Riley report job:", error);
+      const rawMessage = error instanceof Error ? error.message : "";
+      const normalized = rawMessage.toLowerCase();
+      const isQuotaError =
+        normalized.includes("reached your limit for deep/reports today") ||
+        normalized.includes("usage limits");
       setMessages((prev) => [
         ...prev,
         {
           id: `report-create-error-${Date.now()}`,
           role: "system",
-          content: "Could not start report generation. Please try again.",
+          content: isQuotaError
+            ? "You’ve reached your limit for Deep/Reports today."
+            : "Could not start report generation. Please try again.",
         },
       ]);
     } finally {
@@ -1974,7 +1988,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                       >
                         <div className="flex items-start gap-3">
                           <Icon className={cn("h-5 w-5 flex-shrink-0 mt-0.5", prompt.color)} />
-                          <span className={cn("font-medium", isGlobal ? "text-[#2b3343]" : "text-zinc-300")}>{prompt.text}</span>
+                          <span className={cn("font-medium", isGlobal ? "text-[#1f2a44]" : "text-zinc-300")}>{prompt.text}</span>
                         </div>
                       </button>
                     );
@@ -2030,7 +2044,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                             ? "bg-[#f0eadf] text-[#6f788a] italic border border-[#e3dac8]"
                             : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-300 italic"
                           : isGlobal
-                          ? "bg-[#f1eee8] border border-[#e3dac8] text-[#2b3343]"
+                          ? "bg-[#f1eee8] border border-[#e3dac8] text-[#1f2a44]"
                           : "bg-zinc-900/50 border border-zinc-800/50 text-zinc-100"
                       )}
                     >
@@ -2073,7 +2087,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         <TypewriterMarkdown content={message.content} />
                       ) : message.role === "assistant" ? (
                         // Static markdown for previous assistant messages
-                        <div className={cn("riley-md", isGlobal && "text-[#2b3343]")}>
+                        <div className={cn("riley-md", isGlobal && "text-[#1f2a44]")}>
                           <ReactMarkdown remarkPlugins={[remarkBreaks]}>
                             {message.content.replace(/<br\s*\/?>/gi, '\n\n')}
                           </ReactMarkdown>

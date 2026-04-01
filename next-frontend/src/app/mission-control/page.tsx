@@ -98,6 +98,12 @@ type CostData = {
   projected_monthly_curve: Array<{ day: number; projected_cost: number }>;
 };
 
+type QdrantMetricsData = {
+  total_vectors: number;
+  campaigns: Array<{ campaign_id: string; vectors: number; estimated_size_mb: number }>;
+  estimated_monthly_cost: number;
+};
+
 type AdoptionData = {
   timeframe?: MissionControlTimeframe;
   timeframe_label?: string;
@@ -273,6 +279,12 @@ const defaultSystem: SystemData = {
   report_failures_24h: 0,
   ingestion_failures_24h: 0,
   recent_failures: [],
+};
+
+const defaultQdrantMetrics: QdrantMetricsData = {
+  total_vectors: 0,
+  campaigns: [],
+  estimated_monthly_cost: 0,
 };
 
 function asNumber(value: unknown): number {
@@ -587,6 +599,23 @@ function normalizeSystem(raw: unknown): SystemData {
   };
 }
 
+function normalizeQdrantMetrics(raw: unknown): QdrantMetricsData {
+  const src = asRecord(raw);
+  const campaigns = asArray(src.campaigns);
+  return {
+    total_vectors: asNumber(src.total_vectors),
+    estimated_monthly_cost: asNumber(src.estimated_monthly_cost),
+    campaigns: campaigns.map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        campaign_id: asString(item.campaign_id, `campaign_${idx + 1}`),
+        vectors: asNumber(item.vectors),
+        estimated_size_mb: asNumber(item.estimated_size_mb),
+      };
+    }),
+  };
+}
+
 function safeDateLabel(value: string): string {
   if (!value) return "";
   const d = new Date(value);
@@ -659,6 +688,8 @@ export default function MissionControlPage() {
   const [adoption, setAdoption] = useState<AdoptionData>(defaultAdoption);
   const [workflow, setWorkflow] = useState<WorkflowData>(defaultWorkflow);
   const [system, setSystem] = useState<SystemData>(defaultSystem);
+  const [qdrantMetrics, setQdrantMetrics] = useState<QdrantMetricsData>(defaultQdrantMetrics);
+  const [qdrantMetricsLoading, setQdrantMetricsLoading] = useState(false);
   const [resolvingFailureIds, setResolvingFailureIds] = useState<Record<string, boolean>>({});
   const cacheRef = useRef<Map<string, unknown>>(new Map());
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
@@ -835,6 +866,30 @@ export default function MissionControlPage() {
     }
     void fetchMissionControlTab("cost", { background: true });
   }, [fetchMissionControlTab, isLoaded, timeframe]);
+
+  const fetchQdrantMetrics = useCallback(async () => {
+    if (!isLoaded) return;
+    setQdrantMetricsLoading(true);
+    try {
+      const token = await getToken();
+      if (!token) throw new Error("Authentication required.");
+      const payload = await apiFetch("/api/v1/metrics/qdrant", { token, method: "GET" });
+      setQdrantMetrics(normalizeQdrantMetrics(payload));
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 403) {
+        setAccessDenied(true);
+        return;
+      }
+      setError(err instanceof Error ? err.message : "Failed to load Qdrant metrics.");
+    } finally {
+      setQdrantMetricsLoading(false);
+    }
+  }, [getToken, isLoaded]);
+
+  useEffect(() => {
+    if (!isLoaded || activeTab !== "cost") return;
+    void fetchQdrantMetrics();
+  }, [activeTab, fetchQdrantMetrics, isLoaded]);
 
   const topKpis = useMemo(() => {
     return [
@@ -1233,6 +1288,42 @@ export default function MissionControlPage() {
                           ])}
                         />
                       </div>
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                      <div className="mb-3 flex items-center justify-between gap-2">
+                        <p className="text-sm font-semibold">Qdrant Usage</p>
+                        <button
+                          type="button"
+                          onClick={() => void fetchQdrantMetrics()}
+                          className="rounded border border-slate-300 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50"
+                        >
+                          Refresh Qdrant
+                        </button>
+                      </div>
+                      <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+                        <Metric label="Total Vectors" value={qdrantMetrics.total_vectors} />
+                        <Metric
+                          label="Estimated Storage"
+                          value={`${qdrantMetrics.campaigns.reduce((sum, row) => sum + asNumber(row.estimated_size_mb), 0).toFixed(2)} MB`}
+                        />
+                        <Metric
+                          label="Estimated Monthly Cost"
+                          value={`$${asNumber(qdrantMetrics.estimated_monthly_cost).toFixed(2)}`}
+                        />
+                      </div>
+                      {qdrantMetricsLoading ? (
+                        <p className="text-sm text-slate-500">Loading Qdrant usage...</p>
+                      ) : (
+                        <SimpleTable
+                          emptyLabel="No campaign vector usage available."
+                          columns={["Campaign", "Vectors", "Estimated Size (MB)"]}
+                          rows={qdrantMetrics.campaigns.map((row) => [
+                            row.campaign_id,
+                            String(row.vectors),
+                            asNumber(row.estimated_size_mb).toFixed(2),
+                          ])}
+                        />
+                      )}
                     </div>
                   </div>
                 )}

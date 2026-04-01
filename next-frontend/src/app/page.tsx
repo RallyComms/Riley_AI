@@ -64,6 +64,7 @@ interface UserCampaign {
   ownerName?: string;
   description?: string | null;
   createdAt?: string | null;
+  status?: "active" | "archived";
 }
 
 const THEME_COLORS = ["#0f766e", "#4f46e5", "#e11d48", "#059669", "#7c3aed", "#facc15"];
@@ -88,6 +89,7 @@ function mapBackendToUserCampaign(campaign: BackendCampaign, index: number): Use
     ownerName: campaign.owner_name ?? undefined,
     description: campaign.description,
     createdAt: campaign.updated_at ?? campaign.created_at ?? null,
+    status: campaign.status,
   };
 }
 
@@ -160,7 +162,6 @@ export default function HomePage() {
   const [teamMetaByCampaignId, setTeamMetaByCampaignId] = useState<Record<string, TeamMeta>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [statusFilter, setStatusFilter] = useState<"all" | "active" | "planning">("all");
 
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [isDirectoryOpen, setIsDirectoryOpen] = useState(false);
@@ -253,11 +254,10 @@ export default function HomePage() {
   }, [isLoaded, user?.id, getToken]);
 
   const visibleCampaigns = useMemo(() => {
-    const memberCampaigns = directoryCampaigns.filter((campaign) => campaign.access === "member");
-    if (statusFilter === "all") return memberCampaigns;
-    if (statusFilter === "active") return memberCampaigns;
-    return [];
-  }, [directoryCampaigns, statusFilter]);
+    return directoryCampaigns.filter(
+      (campaign) => campaign.access === "member" && campaign.status !== "archived",
+    );
+  }, [directoryCampaigns]);
 
   const handleCampaignCreated = (newCampaign: CampaignBucket) => {
     setDirectoryCampaigns((prev) => [
@@ -404,39 +404,6 @@ export default function HomePage() {
 
         <div className="mb-6 flex items-center justify-between">
           <h3 className="font-serif text-xl font-medium text-[#1f2a44]">Your Campaigns</h3>
-          <div className="flex items-center gap-2 text-xs">
-            <button
-              type="button"
-              onClick={() => setStatusFilter("all")}
-              className={`rounded-md px-3 py-1.5 ${
-                statusFilter === "all" ? "bg-[#efe6d7] text-[#1f2a44]" : "text-[#6f788a] hover:bg-[#efe6d7]"
-              }`}
-            >
-              All
-            </button>
-            <button
-              type="button"
-              onClick={() => setStatusFilter("active")}
-              className={`rounded-md px-3 py-1.5 ${
-                statusFilter === "active"
-                  ? "bg-[#efe6d7] text-[#1f2a44]"
-                  : "text-[#6f788a] hover:bg-[#efe6d7]"
-              }`}
-            >
-              Active
-            </button>
-            <button
-              type="button"
-              onClick={() => setStatusFilter("planning")}
-              className={`rounded-md px-3 py-1.5 ${
-                statusFilter === "planning"
-                  ? "bg-[#efe6d7] text-[#1f2a44]"
-                  : "text-[#6f788a] hover:bg-[#efe6d7]"
-              }`}
-            >
-              Planning
-            </button>
-          </div>
         </div>
 
         {isLoading ? (
@@ -449,7 +416,7 @@ export default function HomePage() {
           <div className="rounded-lg bg-[#fff3f3] p-5 text-sm text-[#9e3434]">{error}</div>
         ) : visibleCampaigns.length === 0 ? (
           <div className="rounded-lg bg-[#f0eadf] p-8 text-center text-sm text-[#5b6578]">
-            No campaigns available for this filter.
+            No active campaigns available.
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">

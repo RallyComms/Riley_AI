@@ -117,9 +117,12 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
           method: "GET",
         });
         if (cancelled) return;
-        const leadCampaign = (data.campaigns || []).find((campaign) => campaign.role === "Lead");
-        setSearchTenantId(leadCampaign?.id || null);
-      } catch {
+        const campaigns = data.campaigns || [];
+        const leadCampaign = campaigns.find((c) => c.role === "Lead");
+        const anyCampaign = campaigns.length > 0 ? campaigns[0] : null;
+        setSearchTenantId(leadCampaign?.id || anyCampaign?.id || null);
+      } catch (err) {
+        console.error("[CreateMission] Failed to load search scope:", err);
         if (!cancelled) setSearchTenantId(null);
       }
     };
@@ -198,6 +201,8 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
   const existingMemberIds = useMemo(() => new Set((members || []).map((m) => m.id)), [members]);
   const selectedUserIds = useMemo(() => new Set(selectedUsers.map((m) => m.user_id)), [selectedUsers]);
 
+  const effectiveSearchId = createdCampaignId || searchTenantId;
+
   useEffect(() => {
     const query = memberSearchQuery.trim();
     if (query.length < 2) {
@@ -205,26 +210,25 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
       setMemberSearchError(null);
       return;
     }
-    if (!searchTenantId) {
+    if (!effectiveSearchId) {
       setMemberSearchResults([]);
-      setMemberSearchError("Unable to search users right now.");
+      setMemberSearchError("No campaign available for user search. Create the mission first, then add members.");
       return;
     }
     const handle = window.setTimeout(async () => {
+      const searchUrl = `/api/v1/campaigns/${encodeURIComponent(effectiveSearchId)}/users/search?query=${encodeURIComponent(query)}&limit=10`;
       try {
         setIsSearchingMembers(true);
         setMemberSearchError(null);
         const token = await getToken();
         if (!token) return;
-        const data = await apiFetch<UserSearchResponse>(
-          `/api/v1/campaigns/${encodeURIComponent(searchTenantId)}/users/search?query=${encodeURIComponent(query)}&limit=10`,
-          { token, method: "GET" },
-        );
+        const data = await apiFetch<UserSearchResponse>(searchUrl, { token, method: "GET" });
         const filtered = (data.users || []).filter(
           (candidate) => !existingMemberIds.has(candidate.id) && !selectedUserIds.has(candidate.id),
         );
         setMemberSearchResults(filtered);
       } catch (err) {
+        console.error("[CreateMission] User search failed:", { url: searchUrl, error: err });
         setMemberSearchResults([]);
         setMemberSearchError(err instanceof Error ? err.message : "Failed to search users.");
       } finally {
@@ -232,7 +236,7 @@ export function CreateCampaignModal({ isOpen, onClose, onCampaignCreated }: Crea
       }
     }, 250);
     return () => window.clearTimeout(handle);
-  }, [existingMemberIds, getToken, memberSearchQuery, searchTenantId, selectedUserIds]);
+  }, [effectiveSearchId, existingMemberIds, getToken, memberSearchQuery, selectedUserIds]);
 
   const addSearchCandidate = (candidate: DirectoryUserResult) => {
     setSelectedUsers((prev) => {
