@@ -2180,6 +2180,60 @@ class GraphService:
                 "archived_at": record.get("archived_at"),
             }
 
+    async def is_campaign_archived(self, campaign_id: str) -> bool:
+        """Return whether campaign is archived; raise if missing."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (c:Campaign {id: $campaign_id})
+            RETURN coalesce(c.status, "active") as status
+            """
+            result = await session.run(query, campaign_id=campaign_id)
+            record = await result.single()
+            if not record:
+                raise ValueError(f"Campaign {campaign_id} not found")
+            return str(record.get("status") or "active").strip().lower() == "archived"
+
+    async def hard_delete_campaign_graph_data(self, campaign_id: str) -> None:
+        """Hard delete campaign graph data and campaign-scoped related nodes."""
+        async with self._driver.session() as session:
+            await session.run(
+                """
+                MATCH (:Campaign {id: $campaign_id})<-[:POSTED_IN]-(m:TeamMessage)
+                DETACH DELETE m
+                """,
+                campaign_id=campaign_id,
+            )
+            await session.run(
+                """
+                MATCH (:ChatThread {tenant_id: $campaign_id})<-[:IN_THREAD]-(m:ThreadMessage)
+                DETACH DELETE m
+                """,
+                campaign_id=campaign_id,
+            )
+            await session.run(
+                """
+                MATCH (:Conversation {campaign_id: $campaign_id})<-[:IN_CONVERSATION]-(m:ConversationMessage)
+                DETACH DELETE m
+                """,
+                campaign_id=campaign_id,
+            )
+            await session.run(
+                """
+                MATCH (n)
+                WHERE coalesce(n.campaign_id, "") = $campaign_id
+                   OR coalesce(n.tenant_id, "") = $campaign_id
+                DETACH DELETE n
+                """,
+                campaign_id=campaign_id,
+            )
+            await session.run(
+                """
+                MATCH (c:Campaign {id: $campaign_id})
+                DETACH DELETE c
+                """,
+                campaign_id=campaign_id,
+            )
+
     async def create_access_request(
         self, tenant_id: str, requester_user_id: str, message: Optional[str] = None
     ) -> Dict[str, Any]:
@@ -5032,8 +5086,10 @@ class GraphService:
                 ORDER BY coalesce(u.updated_at, u.status_updated_at, datetime({epochMillis: 0})) DESC
                 LIMIT $limit
                 """,
-                search_text=normalized_query,
-                limit=capped_limit,
+                {
+                    "search_text": normalized_query,
+                    "limit": capped_limit,
+                },
             )
             users: List[Dict[str, str]] = []
             async for record in result:

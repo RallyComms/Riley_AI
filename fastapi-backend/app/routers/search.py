@@ -8,6 +8,11 @@ from qdrant_client.http.models import Filter, FieldCondition, MatchValue
 from app.core.config import get_settings
 from app.dependencies.auth import verify_clerk_token, check_tenant_membership
 from app.services.genai_client import get_genai_client
+from app.services.llm_cost_guardrail import (
+    GUARDRAIL_USER_MESSAGE,
+    LLMCostGuardrailExceeded,
+    enforce_monthly_llm_cost_guardrail,
+)
 from app.services.qdrant import vector_service
 
 
@@ -89,8 +94,11 @@ async def _embed_query_text(content: str) -> List[float]:
     Wraps _embed_query_text_sync in a threadpool for async execution.
     """
     try:
+        await enforce_monthly_llm_cost_guardrail()
         # Run blocking GenAI call in threadpool to avoid blocking event loop
         return await run_in_threadpool(_embed_query_text_sync, content)
+    except LLMCostGuardrailExceeded as exc:
+        raise RuntimeError(GUARDRAIL_USER_MESSAGE) from exc
     except RuntimeError:
         # Re-raise RuntimeError as-is
         raise

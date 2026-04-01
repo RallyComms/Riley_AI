@@ -26,6 +26,8 @@ from app.services.provider_fallback import (
 from app.services.qdrant import vector_service
 from app.services.rerank import rerank_candidates_with_metrics
 from app.services.analytics_contract import infer_provider_from_model
+from app.services.llm_cost_guardrail import enforce_monthly_llm_cost_guardrail
+from app.services.llm_cost_guardrail import LLMCostGuardrailExceeded
 from app.services.pricing_registry import estimate_storage_cost, estimate_text_generation_cost
 from app.services.storage import StorageService
 from app.services.token_utils import estimate_tokens
@@ -1172,6 +1174,7 @@ async def _embed_query_text(content: str) -> List[float]:
         return values
 
     try:
+        await enforce_monthly_llm_cost_guardrail()
         return await run_in_threadpool(_embed_sync)
     except Exception as exc:
         raise RuntimeError(f"Query embedding failed: {exc}") from exc
@@ -1180,6 +1183,8 @@ async def _embed_query_text(content: str) -> List[float]:
 async def _call_openai_report_model(
     *, prompt: str, model_name: str, timeout_seconds: int
 ) -> Tuple[str, Dict[str, int]]:
+    await enforce_monthly_llm_cost_guardrail()
+
     settings = get_settings()
     if not settings.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -1237,8 +1242,12 @@ def _has_exact_usage(usage: Dict[str, Any]) -> bool:
 
 
 def _is_retryable_report_error(exc: Exception) -> bool:
+    if isinstance(exc, LLMCostGuardrailExceeded):
+        return False
     name = type(exc).__name__.lower()
     message = str(exc).lower()
+    if "usage limits" in message:
+        return False
     if "timeout" in name:
         return True
     if "ratelimit" in name or "toomanyrequests" in name:
@@ -1746,6 +1755,8 @@ async def run_report_job(*, report_job_id: str, graph: GraphService) -> None:
                     generation_model_used,
                 )
                 break
+            except LLMCostGuardrailExceeded as exc:
+                raise RuntimeError(str(exc)) from exc
             except Exception as exc:
                 failure = classify_gemini_generation_failure(exc)
                 logger.warning(

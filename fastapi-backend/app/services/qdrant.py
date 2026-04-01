@@ -1554,6 +1554,191 @@ class VectorService:
         )
         return True
 
+    async def hard_delete_campaign_vectors(self, campaign_id: str) -> Dict[str, Any]:
+        """Hard delete vectors for a campaign across shared collections."""
+        if campaign_id == "global" or not campaign_id or not campaign_id.strip():
+            raise ValueError(f"Cannot delete vectors for campaign_id '{campaign_id}'. Protected campaign.")
+
+        settings = get_settings()
+        vector_count_deleted = 0
+        file_urls: List[str] = []
+
+        async def _collect_points(collection_name: str, qdrant_filter: Filter) -> List[Any]:
+            points: List[Any] = []
+            offset = None
+            while True:
+                scroll_result = await self._client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=qdrant_filter,
+                    limit=500,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                batch = scroll_result[0]
+                if not batch:
+                    break
+                points.extend(batch)
+                offset = scroll_result[1]
+                if offset is None:
+                    break
+            return points
+
+        async def _delete_points(collection_name: str, point_ids: List[str]) -> None:
+            nonlocal vector_count_deleted
+            if not point_ids:
+                return
+            await self._client.delete(
+                collection_name=collection_name,
+                points_selector=models.PointIdsList(points=point_ids),
+            )
+            vector_count_deleted += len(point_ids)
+
+        # Tier 2 (shared private collection): delete all points where client_id == campaign_id.
+        tier2_filter = Filter(
+            must=[FieldCondition(key="client_id", match=MatchValue(value=campaign_id))]
+        )
+        tier2_points = await _collect_points(settings.QDRANT_COLLECTION_TIER_2, tier2_filter)
+        tier2_ids = [str(point.id) for point in tier2_points]
+        for point in tier2_points:
+            url = (point.payload or {}).get("url")
+            if url:
+                file_urls.append(url)
+        await _delete_points(settings.QDRANT_COLLECTION_TIER_2, tier2_ids)
+
+        # Tier 1 (global archive copies): delete file points sourced from this campaign.
+        tier1_filter = Filter(
+            should=[
+                FieldCondition(key="source_campaign_id", match=MatchValue(value=campaign_id)),
+                FieldCondition(key="client_id", match=MatchValue(value=campaign_id)),
+                FieldCondition(key="tenant_id", match=MatchValue(value=campaign_id)),
+            ]
+        )
+        tier1_points = await _collect_points(settings.QDRANT_COLLECTION_TIER_1, tier1_filter)
+        tier1_ids = [str(point.id) for point in tier1_points]
+        parent_file_ids: List[str] = []
+        for point in tier1_points:
+            payload = point.payload or {}
+            if payload.get("record_type") != "chunk":
+                parent_file_ids.append(str(point.id))
+            url = payload.get("url")
+            if url:
+                file_urls.append(url)
+        await _delete_points(settings.QDRANT_COLLECTION_TIER_1, tier1_ids)
+
+        # Remove chunk vectors linked to promoted parent files.
+        for parent_file_id in set(parent_file_ids):
+            deleted_chunks = await self._delete_chunk_points_for_parent(
+                collection_name=settings.QDRANT_COLLECTION_TIER_1,
+                parent_file_id=parent_file_id,
+            )
+            vector_count_deleted += int(deleted_chunks or 0)
+
+        return {
+            "vector_count_deleted": vector_count_deleted,
+            "file_urls": list(dict.fromkeys(file_urls)),
+        }
+
+    @staticmethod
+    def _resolve_campaign_id_from_payload(payload: Dict[str, Any]) -> str:
+        """Resolve campaign identity from Qdrant payload fields."""
+        for key in ("client_id", "source_campaign_id", "tenant_id"):
+            value = str(payload.get(key) or "").strip()
+            if value and value.lower() != "global":
+                return value
+        return ""
+
+    @staticmethod
+    def _extract_collection_points_count(collection_info: Any) -> int:
+        """Best-effort count extraction across Qdrant response versions."""
+        for key in ("points_count", "vectors_count"):
+            value = getattr(collection_info, key, None)
+            if value is not None:
+                try:
+                    return int(value)
+                except Exception:
+                    pass
+        if hasattr(collection_info, "model_dump"):
+            dumped = collection_info.model_dump() or {}
+            for key in ("points_count", "vectors_count"):
+                value = dumped.get(key)
+                if value is not None:
+                    try:
+                        return int(value)
+                    except Exception:
+                        pass
+        return 0
+
+    async def get_qdrant_usage_metrics(self) -> Dict[str, Any]:
+        """Aggregate Qdrant usage for Mission Control reporting."""
+        settings = get_settings()
+        collections = [settings.QDRANT_COLLECTION_TIER_1, settings.QDRANT_COLLECTION_TIER_2]
+        vector_bytes = max(1, int(settings.EMBEDDING_DIM)) * 4
+
+        qdrant_cost_per_gb_month_usd = float(settings.QDRANT_COST_PER_GB_MONTH_USD or 0.25)
+
+        campaign_vector_counts: Dict[str, int] = {}
+        total_vectors = 0
+
+        for collection_name in collections:
+            try:
+                info = await self._client.get_collection(collection_name=collection_name)
+                total_vectors += self._extract_collection_points_count(info)
+            except Exception:
+                logger.exception("qdrant_usage_collection_info_failed collection=%s", collection_name)
+
+            offset = None
+            while True:
+                try:
+                    points, next_offset = await self._client.scroll(
+                        collection_name=collection_name,
+                        limit=500,
+                        offset=offset,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                except Exception:
+                    logger.exception("qdrant_usage_collection_scan_failed collection=%s", collection_name)
+                    break
+
+                if not points:
+                    break
+
+                for point in points:
+                    payload = point.payload or {}
+                    campaign_id = self._resolve_campaign_id_from_payload(payload)
+                    if not campaign_id:
+                        continue
+                    campaign_vector_counts[campaign_id] = campaign_vector_counts.get(campaign_id, 0) + 1
+
+                offset = next_offset
+                if offset is None:
+                    break
+
+        if total_vectors <= 0:
+            total_vectors = int(sum(campaign_vector_counts.values()))
+
+        campaigns = []
+        for campaign_id, vectors in campaign_vector_counts.items():
+            estimated_size_mb = (float(vectors) * float(vector_bytes)) / float(1024 * 1024)
+            campaigns.append(
+                {
+                    "campaign_id": campaign_id,
+                    "vectors": int(vectors),
+                    "estimated_size_mb": round(estimated_size_mb, 2),
+                }
+            )
+        campaigns.sort(key=lambda row: int(row.get("vectors") or 0), reverse=True)
+
+        total_estimated_size_mb = (float(total_vectors) * float(vector_bytes)) / float(1024 * 1024)
+        estimated_monthly_cost = (total_estimated_size_mb / 1024.0) * qdrant_cost_per_gb_month_usd
+
+        return {
+            "total_vectors": int(total_vectors),
+            "campaigns": campaigns,
+            "estimated_monthly_cost": round(float(estimated_monthly_cost), 2),
+        }
+
     async def delete_tenant_data(self, tenant_id: str) -> List[str]:
         """Delete all data for a tenant from Qdrant and return list of file URLs.
         

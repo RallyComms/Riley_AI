@@ -817,14 +817,31 @@ async def terminate_campaign(
             detail="Cannot terminate 'global' tenant. This is a protected system tenant."
         )
     await _require_lead_for_campaign(tenant_id, current_user, graph)
+    is_archived = await graph.is_campaign_archived(tenant_id)
+    if not is_archived:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Campaign must be archived before permanent deletion.",
+        )
     
     try:
-        # Step 1: Get all file URLs from Qdrant before deletion
-        file_urls = await vector_service.delete_tenant_data(tenant_id)
+        # Step 1: Delete campaign graph data
+        await graph.hard_delete_campaign_graph_data(tenant_id)
+
+        # Step 2: Delete vectors from shared Qdrant collections
+        vector_result = await vector_service.hard_delete_campaign_vectors(tenant_id)
+        file_urls = vector_result.get("file_urls", []) if isinstance(vector_result, dict) else []
+        vector_count_deleted = int((vector_result or {}).get("vector_count_deleted") or 0)
         
-        # Step 2: Delete all files from GCS
+        # Step 3: Delete all files from GCS
         if file_urls:
             await StorageService.delete_batch(file_urls)
+
+        logger.info(
+            "campaign_deleted campaign_id=%s vector_count_deleted=%d",
+            tenant_id,
+            vector_count_deleted,
+        )
         
         return TerminationResponse(
             status="success",

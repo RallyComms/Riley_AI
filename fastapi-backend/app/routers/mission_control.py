@@ -11,6 +11,7 @@ from app.core.config import get_settings
 from app.dependencies.auth import verify_clerk_token, verify_mission_control_admin
 from app.dependencies.graph_dep import get_graph
 from app.services.graph import GraphService
+from app.services.qdrant import vector_service
 
 router = APIRouter()
 SUPPORTED_TIMEFRAMES = {"24h", "7d", "30d"}
@@ -1494,4 +1495,17 @@ async def mission_control_rebuild_rollups(
 ) -> Dict[str, Any]:
     result = await graph.rebuild_analytics_daily_rollups(days_back=days_back)
     return {"status": "ok", "days_back": days_back, "rollups": result}
+
+
+@router.get("/metrics/qdrant")
+async def mission_control_qdrant_metrics(
+    _: Dict = Depends(verify_mission_control_admin),
+) -> Dict[str, Any]:
+    """Return Qdrant usage and estimated monthly storage cost."""
+    usage = await vector_service.get_qdrant_usage_metrics()
+    return {
+        "total_vectors": int(usage.get("total_vectors") or 0),
+        "campaigns": usage.get("campaigns") or [],
+        "estimated_monthly_cost": round(float(usage.get("estimated_monthly_cost") or 0.0), 2),
+    }
 

@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 from app.services.genai_client import get_genai_client
+from app.services.llm_cost_guardrail import enforce_monthly_llm_cost_guardrail
 
 
 @dataclass
@@ -215,6 +216,8 @@ async def generate_text_with_gemini(*, prompt: str, model_name: str, timeout_sec
 async def generate_text_with_gemini_with_usage(
     *, prompt: str, model_name: str, timeout_seconds: int
 ) -> Tuple[str, Dict[str, Any]]:
+    await enforce_monthly_llm_cost_guardrail()
+
     def _generate_sync() -> Tuple[str, Dict[str, Any]]:
         client = get_genai_client()
         response = client.models.generate_content(model=model_name, contents=prompt)

@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     # Qdrant vector configuration
     # NOTE: Keep as a string for env override; code maps to qdrant_client Distance enum.
     QDRANT_DISTANCE: str = "Cosine"
+    QDRANT_COST_PER_GB_MONTH_USD: float = 0.25
     BM25_ENABLED: bool = True
     HYBRID_SEARCH_ENABLED: bool = True
     RERANK_ENABLED: bool = True
@@ -150,6 +151,8 @@ class Settings(BaseSettings):
     MISSION_CONTROL_ROLLUP_AUTO_REFRESH_ENABLED: bool = True
     MISSION_CONTROL_ROLLUP_REFRESH_MINUTES: int = 15
     MISSION_CONTROL_ROLLUP_DAYS_BACK: int = 35
+    # Global LLM spend guardrail (USD per calendar month).
+    MAX_MONTHLY_COST: float = 2000.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -18,6 +18,7 @@ from google.api_core.exceptions import AlreadyExists
 
 from app.core.config import get_settings
 from app.services.genai_client import get_genai_client
+from app.services.llm_cost_guardrail import enforce_monthly_llm_cost_guardrail
 from app.services.ocr import (
     gcs_uri_from_url,
     is_image_ext,
@@ -580,6 +581,7 @@ async def _generate_embedding(text: str) -> List[float]:
             raise RuntimeError(error_msg) from exc
     
     try:
+        await enforce_monthly_llm_cost_guardrail()
         # Truncate text to 9000 characters to avoid token limits
         truncated_text = text[:9000]
         

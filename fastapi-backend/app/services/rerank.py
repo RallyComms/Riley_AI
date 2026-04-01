@@ -6,6 +6,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.core.config import get_settings
+from app.services.llm_cost_guardrail import enforce_monthly_llm_cost_guardrail
 from app.services.pricing_registry import estimate_single_unit_cost
 from app.services.token_utils import estimate_tokens, truncate_text_to_token_budget
 
@@ -392,6 +393,7 @@ async def rerank_candidates_with_metrics(
 
     started = time.perf_counter()
     try:
+        await enforce_monthly_llm_cost_guardrail()
         if provider == "gemini":
             if not settings.GOOGLE_API_KEY:
                 raise RuntimeError("GOOGLE_API_KEY is required for gemini reranker")

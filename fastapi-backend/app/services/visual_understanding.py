@@ -6,6 +6,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from app.core.config import get_settings
+from app.services.llm_cost_guardrail import enforce_monthly_llm_cost_guardrail
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,8 @@ async def summarize_visual_content(
     timeout_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Summarize visual communication of an image using OpenAI multimodal."""
+    await enforce_monthly_llm_cost_guardrail()
+
     settings = get_settings()
     api_key = settings.OPENAI_API_KEY
     if not api_key:

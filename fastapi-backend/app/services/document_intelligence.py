@@ -15,6 +15,10 @@ from qdrant_client.http.models import FieldCondition, Filter, MatchValue
 from app.core.config import get_settings
 from app.services.genai_client import get_genai_client
 from app.services.graph import GraphService
+from app.services.llm_cost_guardrail import (
+    LLMCostGuardrailExceeded,
+    enforce_monthly_llm_cost_guardrail,
+)
 from app.services.qdrant import vector_service
 
 logger = logging.getLogger(__name__)
@@ -200,6 +204,8 @@ async def _call_openai_document_intel(
     model_name: str,
     timeout_seconds: int,
 ) -> Dict[str, Any]:
+    await enforce_monthly_llm_cost_guardrail()
+
     settings = get_settings()
     if not settings.OPENAI_API_KEY:
         raise RuntimeError("OPENAI_API_KEY is not configured")
@@ -277,6 +283,8 @@ async def _call_gemini_document_intel(
     model_name: str,
     timeout_seconds: int,
 ) -> Dict[str, Any]:
+    await enforce_monthly_llm_cost_guardrail()
+
     def _run_sync() -> Dict[str, Any]:
         client = get_genai_client()
         response = client.models.generate_content(model=model_name, contents=prompt)
@@ -581,8 +589,12 @@ async def _load_document_context(
 
 
 def _is_retryable_doc_intel_error(exc: Exception) -> bool:
+    if isinstance(exc, LLMCostGuardrailExceeded):
+        return False
     name = type(exc).__name__.lower()
     message = str(exc).lower()
+    if "usage limits" in message:
+        return False
     if "timeout" in name:
         return True
     if "ratelimit" in name or "toomanyrequests" in name:

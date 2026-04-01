@@ -13,6 +13,11 @@ from app.core.config import get_settings
 from app.dependencies.auth import check_tenant_membership, verify_clerk_token
 from app.dependencies.graph_dep import get_graph
 from app.services.graph import GraphService
+from app.services.llm_cost_guardrail import (
+    USER_OPERATION_LIMIT_MESSAGE,
+    UserOperationLimitExceeded,
+    enforce_reports_monthly_limit,
+)
 from app.services.riley_reports import create_report_job
 
 router = APIRouter()
@@ -150,6 +155,10 @@ async def create_riley_report(
 ) -> RileyReportJobResponse:
     user_id = current_user.get("id", "unknown")
     await check_tenant_membership(user_id, request.tenant_id, http_request)
+    try:
+        await enforce_reports_monthly_limit(user_id=user_id)
+    except UserOperationLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail=USER_OPERATION_LIMIT_MESSAGE) from exc
     active_count = await graph.count_active_riley_report_jobs_for_tenant(tenant_id=request.tenant_id)
     if active_count >= 1:
         raise HTTPException(

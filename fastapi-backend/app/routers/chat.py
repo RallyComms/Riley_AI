@@ -24,6 +24,14 @@ from app.services.provider_fallback import (
 from app.services.qdrant import vector_service
 from app.services.rerank import rerank_candidates_with_metrics
 from app.services.analytics_contract import infer_provider_from_model
+from app.services.llm_cost_guardrail import (
+    GUARDRAIL_USER_MESSAGE,
+    LLMCostGuardrailExceeded,
+    USER_OPERATION_LIMIT_MESSAGE,
+    UserOperationLimitExceeded,
+    enforce_deep_daily_limit,
+    enforce_monthly_llm_cost_guardrail,
+)
 from app.services.pricing_registry import estimate_text_generation_cost
 from app.services.token_utils import estimate_tokens
 
@@ -208,8 +216,11 @@ async def _embed_query_text(content: str) -> List[float]:
     model_name = settings.EMBEDDING_MODEL
 
     try:
+        await enforce_monthly_llm_cost_guardrail()
         # Run blocking GenAI call in threadpool to avoid blocking event loop
         return await run_in_threadpool(embed_query_text, content)
+    except LLMCostGuardrailExceeded:
+        raise
     except RuntimeError:
         # Re-raise RuntimeError as-is
         raise
@@ -658,6 +669,8 @@ def _extract_openai_usage(response_json: Dict[str, Any]) -> Dict[str, int]:
 async def _generate_riley_answer_openai(
     *, prompt: str, model_name: str, timeout_seconds: int
 ) -> tuple[str, Dict[str, int]]:
+    await enforce_monthly_llm_cost_guardrail()
+
     try:
         import httpx  # type: ignore
     except ImportError as exc:
@@ -774,6 +787,12 @@ async def chat(
     
     settings = get_settings()
     normalized_mode: Literal["fast", "deep"] = "deep" if request.mode == "deep" else "fast"
+    is_deep_request = bool(deep or normalized_mode == "deep")
+    if is_deep_request:
+        try:
+            await enforce_deep_daily_limit(user_id=user_id)
+        except UserOperationLimitExceeded as exc:
+            raise HTTPException(status_code=429, detail=USER_OPERATION_LIMIT_MESSAGE) from exc
     rerank_candidates_limit = max(1, int(settings.RERANK_CANDIDATES))
     rerank_top_k = max(1, int(settings.RERANK_TOP_K))
     target_private_limit = 40 if normalized_mode == "deep" else 10
@@ -792,6 +811,8 @@ async def chat(
     # Step A: Embed the query
     try:
         query_vector = await _embed_query_text(request.query)
+    except LLMCostGuardrailExceeded as exc:
+        raise HTTPException(status_code=503, detail=GUARDRAIL_USER_MESSAGE) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=f"Embedding failed: {exc}") from exc
 
@@ -1335,7 +1356,7 @@ Context Data:
     system_prompt += f"\nUser Question: {request.query}"
 
     # Step F: Generate response using Riley primary provider (Gemini) with OpenAI fallback.
-    use_deep_model = bool(deep or normalized_mode == "deep")
+    use_deep_model = is_deep_request
     primary_model = _get_riley_model_name(deep=use_deep_model)
     fallback_model = settings.RILEY_OPENAI_FALLBACK_MODEL
     response_text: Optional[str] = None
@@ -1367,6 +1388,8 @@ Context Data:
             generation_usage["completion_tokens"] = int(generation_usage["output_tokens"])
         generation_usage_is_exact = gemini_usage_exact
         generation_model_used = primary_model
+    except LLMCostGuardrailExceeded as exc:
+        raise HTTPException(status_code=503, detail=GUARDRAIL_USER_MESSAGE) from exc
     except Exception as exc:
         last_error = exc
         failure = classify_gemini_generation_failure(exc)
