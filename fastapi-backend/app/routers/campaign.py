@@ -782,79 +782,12 @@ async def search_campaign_users(
     query: str = Query(..., min_length=2, max_length=120),
     limit: int = Query(8, ge=1, le=20),
     current_user: Dict = Depends(verify_tenant_access),
-    graph: GraphService = Depends(get_graph),
 ) -> DirectoryUserSearchResponse:
-    """Search Clerk users for direct campaign member add (Lead only)."""
-    await _require_lead_for_campaign(tenant_id, current_user, graph)
+    """Search Clerk users globally for direct campaign member add."""
     clerk_users = search_users(query=query, limit=limit)
-    riley_users = await graph.search_users_for_campaign_add(query=query, limit=limit)
-
-    def _normalize_candidate(candidate: Any) -> Optional[Dict[str, str]]:
-        if not isinstance(candidate, dict):
-            return None
-
-        candidate_id = str(candidate.get("id") or candidate.get("user_id") or "").strip()
-        if not candidate_id:
-            return None
-
-        candidate_email = str(candidate.get("email") or "").strip()
-        if not candidate_email:
-            email_addresses = candidate.get("email_addresses")
-            if isinstance(email_addresses, list):
-                for email_obj in email_addresses:
-                    if not isinstance(email_obj, dict):
-                        continue
-                    resolved = str(email_obj.get("email_address") or "").strip()
-                    if resolved:
-                        candidate_email = resolved
-                        break
-        if not candidate_email:
-            return None
-
-        first_name = str(candidate.get("first_name") or "").strip()
-        last_name = str(candidate.get("last_name") or "").strip()
-        full_name = f"{first_name} {last_name}".strip()
-        username = str(candidate.get("username") or "").strip()
-        email_prefix = candidate_email.split("@")[0].strip() if "@" in candidate_email else candidate_email
-        display_name = (
-            str(candidate.get("display_name") or "").strip()
-            or full_name
-            or username
-            or email_prefix
-            or candidate_email
-            or candidate_id
-        )
-
-        return {
-            "id": candidate_id,
-            "email": candidate_email,
-            "display_name": display_name,
-        }
-
-    users_by_id: Dict[str, Dict[str, str]] = {}
-    for candidate in clerk_users:
-        normalized = _normalize_candidate(candidate)
-        if not normalized:
-            continue
-        users_by_id[normalized["id"]] = normalized
-
-    for candidate in riley_users:
-        normalized = _normalize_candidate(candidate)
-        if not normalized:
-            continue
-        candidate_id = normalized["id"]
-        existing = users_by_id.get(candidate_id)
-        if existing is None:
-            users_by_id[candidate_id] = normalized
-            continue
-        riley_display_name = normalized["display_name"]
-        if riley_display_name:
-            existing["display_name"] = riley_display_name
-        if not existing.get("email"):
-            existing["email"] = normalized["email"]
-
-    merged_users = list(users_by_id.values())[: max(1, min(int(limit), 20))]
-    return DirectoryUserSearchResponse(users=[DirectoryUserResult(**u) for u in merged_users])
+    users = [DirectoryUserResult(**u) for u in clerk_users[: max(1, min(int(limit), 20))]]
+    logger.info("campaign_user_search_completed query=%s count=%d", query.strip().lower(), len(users))
+    return DirectoryUserSearchResponse(users=users)
 
 
 @router.delete("/campaign/{tenant_id}", response_model=TerminationResponse)
