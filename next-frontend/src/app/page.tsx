@@ -4,7 +4,6 @@ import { useEffect, useMemo, useState } from "react";
 import { useAuth, useUser, UserButton } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import { Archive, BookOpen, ChevronDown, Globe, Plus } from "lucide-react";
-import Greeting from "@app/components/ui/Greeting";
 import { CreateCampaignModal } from "@app/components/dashboard/CreateCampaignModal";
 import { CampaignDirectory } from "@app/components/dashboard/CampaignDirectory";
 import { apiFetch } from "@app/lib/api";
@@ -143,6 +142,13 @@ function resolveUserLabel(member: CampaignMember): string {
   }
 
   return String(member.user_id || "").trim() || "Unknown user";
+}
+
+function getGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return "Good morning";
+  if (hour < 17) return "Good afternoon";
+  return "Good evening";
 }
 
 export default function HomePage() {
@@ -389,7 +395,7 @@ export default function HomePage() {
       <main className="mx-auto w-full max-w-6xl px-8 py-10">
         <div className="mb-10">
           <h2 className="font-serif text-4xl font-semibold tracking-tight text-[#1f2a44]">
-            Good morning, <Greeting />
+            {getGreeting()}, {user?.firstName || user?.username || "there"}
           </h2>
           <p className="mt-2 text-sm text-[#5b6578]">
             You have {visibleCampaigns.length} active campaigns across your portfolio.

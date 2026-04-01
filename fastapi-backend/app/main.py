@@ -22,6 +22,7 @@ from app.routers import (
     campaign_intel_worker,
     comparisons,
     mission_control,
+    clerk_webhooks,
 )
 from app.dependencies.auth import verify_clerk_token
 from app.services.graph import GraphService
@@ -91,11 +92,15 @@ def get_allowed_origins() -> list[str]:
     Returns:
         List of allowed origin strings (sanitized and deduplicated)
     """
-    default_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+    required_origins = [
+        "https://rileyplatform.com",
+        "https://www.rileyplatform.com",
+    ]
+    dev_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
     
     allowed_origins_env = os.getenv("ALLOWED_ORIGINS")
     if not allowed_origins_env:
-        return default_origins
+        return [*required_origins, *dev_origins]
     
     # Parse: split on commas, strip whitespace, drop empty strings
     origins = [
@@ -104,11 +109,16 @@ def get_allowed_origins() -> list[str]:
         if origin.strip()
     ]
     
-    # If parsing resulted in empty list, fall back to defaults
+    # If parsing resulted in empty list, fall back to required + dev defaults
     if not origins:
-        return default_origins
-    
-    return origins
+        return [*required_origins, *dev_origins]
+
+    # Always include required production origins and de-duplicate
+    merged = []
+    for origin in [*origins, *required_origins]:
+        if origin not in merged:
+            merged.append(origin)
+    return merged
 
 # Get and log allowed origins
 allowed_origins = get_allowed_origins()
@@ -122,6 +132,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Clerk webhook route (signature-verified, no Clerk JWT dependency)
+app.include_router(clerk_webhooks.router, prefix="/api/v1")
 
 # CRITICAL: This puts the search route at /api/v1/search
 # All /api/v1/* routes require Clerk JWT authentication

@@ -142,6 +142,7 @@ class Settings(BaseSettings):
     
     # Clerk Backend API secret key (for user directory lookups)
     CLERK_SECRET_KEY: Optional[str] = None
+    CLERK_WEBHOOK_SECRET: Optional[str] = None
     # Mission Control admin allowlists (comma-separated values).
     MISSION_CONTROL_ADMIN_USER_IDS: Optional[str] = None
     MISSION_CONTROL_ADMIN_EMAILS: Optional[str] = None

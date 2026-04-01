@@ -4937,6 +4937,59 @@ class GraphService:
                 avatar_url=avatar_url,
             )
 
+    async def sync_user_from_clerk(
+        self,
+        *,
+        user_id: str,
+        email: Optional[str],
+        username: Optional[str],
+        display_name: str,
+        avatar_url: Optional[str],
+    ) -> None:
+        """Create/update User from Clerk webhook source-of-truth."""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("clerk user id is required")
+
+        async with self._driver.session() as session:
+            query = """
+            MERGE (u:User {id: $user_id})
+            ON CREATE SET u.created_at = datetime()
+            SET
+                u.email = $email,
+                u.username = $username,
+                u.display_name = $display_name,
+                u.avatar_url = $avatar_url,
+                u.updated_at = datetime(),
+                u.is_active = true,
+                u.deleted_at = NULL
+            """
+            await session.run(
+                query,
+                user_id=normalized_user_id,
+                email=(str(email or "").strip() or None),
+                username=(str(username or "").strip() or None),
+                display_name=str(display_name or "").strip() or normalized_user_id,
+                avatar_url=(str(avatar_url or "").strip() or None),
+            )
+
+    async def mark_user_deleted_from_clerk(self, *, user_id: str) -> None:
+        """Soft-deactivate User when Clerk sends user.deleted."""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("clerk user id is required")
+
+        async with self._driver.session() as session:
+            query = """
+            MERGE (u:User {id: $user_id})
+            ON CREATE SET u.created_at = datetime()
+            SET
+                u.is_active = false,
+                u.deleted_at = datetime(),
+                u.updated_at = datetime()
+            """
+            await session.run(query, user_id=normalized_user_id)
+
     async def search_users_for_campaign_add(
         self,
         *,
@@ -4960,11 +5013,11 @@ class GraphService:
                         ELSE split(u.email, "@")[0]
                     END as email_prefix
                 WHERE
-                    (u.id IS NOT NULL AND toLower(u.id) CONTAINS $query)
-                    OR (u.email IS NOT NULL AND toLower(u.email) CONTAINS $query)
-                    OR (email_prefix IS NOT NULL AND toLower(email_prefix) CONTAINS $query)
-                    OR (u.username IS NOT NULL AND toLower(u.username) CONTAINS $query)
-                    OR (u.display_name IS NOT NULL AND toLower(u.display_name) CONTAINS $query)
+                    (u.id IS NOT NULL AND toLower(u.id) CONTAINS $search_text)
+                    OR (u.email IS NOT NULL AND toLower(u.email) CONTAINS $search_text)
+                    OR (email_prefix IS NOT NULL AND toLower(email_prefix) CONTAINS $search_text)
+                    OR (u.username IS NOT NULL AND toLower(u.username) CONTAINS $search_text)
+                    OR (u.display_name IS NOT NULL AND toLower(u.display_name) CONTAINS $search_text)
                 RETURN
                     u.id as id,
                     coalesce(u.email, "") as email,
@@ -4979,7 +5032,7 @@ class GraphService:
                 ORDER BY coalesce(u.updated_at, u.status_updated_at, datetime({epochMillis: 0})) DESC
                 LIMIT $limit
                 """,
-                query=normalized_query,
+                search_text=normalized_query,
                 limit=capped_limit,
             )
             users: List[Dict[str, str]] = []
@@ -4995,6 +5048,11 @@ class GraphService:
                         "display_name": str(record.get("display_name") or user_id).strip() or user_id,
                     }
                 )
+            logger.info(
+                "campaign_user_search_completed query=%s count=%d",
+                normalized_query,
+                len(users),
+            )
             return users
 
     async def get_campaign_member_ids(self, campaign_id: str) -> List[str]:

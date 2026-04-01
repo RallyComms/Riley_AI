@@ -1668,22 +1668,26 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           )}
         >
           <div className="flex items-center gap-2">
-            <div
-              className={cn(
-                "h-7 w-7 rounded-full flex items-center justify-center",
-                isGlobal ? "bg-[#eadfb7] text-[#6d560f]" : "bg-amber-500/10 text-amber-400"
-              )}
-            >
-              <Sparkles className="h-4 w-4" />
-            </div>
-            <h1 className={cn("text-lg font-bold", isGlobal ? "text-[#1f2a44]" : "text-white")}>Riley</h1>
-            <span className={cn(isGlobal ? "text-[#9ba2b1]" : "text-zinc-600")}>|</span>
-            <span className={cn(
-              "text-sm font-medium",
-              isGlobal ? "text-[#6f788a]" : "text-amber-500/90"
-            )}>
-              {isGlobal ? "Rally Global Brain" : contextName}
-            </span>
+            {isGlobal ? (
+              <div>
+                <h1 className="text-lg font-semibold text-[#1f2a44]">Riley</h1>
+                <p className="text-xs text-[#6f788a]">Rally Global Brain</p>
+              </div>
+            ) : (
+              <>
+                <div
+                  className={cn(
+                    "h-7 w-7 rounded-full flex items-center justify-center",
+                    "bg-amber-500/10 text-amber-400"
+                  )}
+                >
+                  <Sparkles className="h-4 w-4" />
+                </div>
+                <h1 className="text-lg font-bold text-white">Riley</h1>
+                <span className="text-zinc-600">|</span>
+                <span className="text-sm font-medium text-amber-500/90">{contextName}</span>
+              </>
+            )}
             {!isSidebarOpen && (
               <button
                 type="button"
@@ -1949,6 +1953,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 </p>
 
                 {/* Prompt Starters */}
+                {!isGlobal && (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {promptStarters.map((prompt, idx) => {
                     const Icon = prompt.icon;
@@ -1975,11 +1980,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     );
                   })}
                 </div>
+                )}
               </div>
             </div>
           ) : (
             /* Message Stream */
-            <div className="max-w-3xl mx-auto w-full px-6 py-8 space-y-6">
+            <div className={cn("mx-auto w-full px-6 py-8 space-y-6", isGlobal ? "max-w-[700px]" : "max-w-3xl")}>
               {messages.map((message, index) => {
                 const isLastMessage = index === messages.length - 1;
                 const isLiveAnimatingAssistant = message.role === "assistant" && message.id === animatingAssistantMessageId;
@@ -2090,7 +2096,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           </a>
                         </div>
                       )}
-                      {message.reportSuggestionPrompt && (
+                      {message.reportSuggestionPrompt && !isGlobal && (
                         <div className="mt-2 flex flex-wrap justify-end gap-2">
                           <button
                             type="button"
@@ -2115,7 +2121,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           </button>
                         </div>
                       )}
-                      {message.role === "assistant" && message.content && (
+                      {message.role === "assistant" && message.content && !isGlobal && (
                         <div className="mt-2 flex justify-end">
                           <button
                             type="button"
