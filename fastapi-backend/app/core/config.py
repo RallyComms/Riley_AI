@@ -153,6 +153,19 @@ class Settings(BaseSettings):
     MISSION_CONTROL_ROLLUP_DAYS_BACK: int = 35
     # Global LLM spend guardrail (USD per calendar month).
     MAX_MONTHLY_COST: float = 2000.0
+    # Cloud infrastructure billing export (BigQuery) for Mission Control.
+    # Expected table format: project.dataset.table
+    GCP_BILLING_PROJECT_ID: Optional[str] = None
+    GCP_BILLING_EXPORT_TABLE: Optional[str] = None
+    GCP_BILLING_ACCOUNT_ID: Optional[str] = None
+    # Fixed monthly SaaS cost components for total platform spend visibility.
+    CLERK_MONTHLY_COST_USD: float = 0.0
+    VERCEL_MONTHLY_COST_USD: float = 0.0
+    QDRANT_BASE_MONTHLY_COST_USD: float = 0.0
+    OTHER_FIXED_MONTHLY_COST_USD: float = 0.0
+    # Qdrant forecasting warning thresholds for Mission Control.
+    QDRANT_PROJECTED_MONTHLY_COST_TARGET_USD: float = 100.0
+    QDRANT_GROWTH_WARNING_PERCENT: float = 20.0
 
     model_config = SettingsConfigDict(
         env_file=".env",

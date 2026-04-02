@@ -10,7 +10,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from app.core.config import get_settings
 from app.dependencies.auth import verify_clerk_token, verify_mission_control_admin
 from app.dependencies.graph_dep import get_graph
+from app.services.cloud_billing import cloud_billing_service
 from app.services.graph import GraphService
+from app.services.llm_cost_guardrail import get_current_month_llm_cost_usd
 from app.services.qdrant import vector_service
 
 router = APIRouter()
@@ -205,6 +207,200 @@ def _metadata_json_to_dict(value: Any) -> Dict[str, Any]:
     return {}
 
 
+def _guardrail_status_from_percent(percent_budget_used: float) -> str:
+    pct = max(0.0, float(percent_budget_used or 0.0))
+    if pct >= 100.0:
+        return "exceeded"
+    if pct >= 85.0:
+        return "red"
+    if pct >= 60.0:
+        return "yellow"
+    return "green"
+
+
+def _is_llm_event_row(*, provider: Optional[str], model: Optional[str]) -> bool:
+    """Return True when an analytics event row should count as LLM spend."""
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_model = str(model or "").strip().lower()
+    return (
+        normalized_provider in {"google_gemini", "gemini", "openai"}
+        or "gemini" in normalized_model
+        or "gpt" in normalized_model
+    )
+
+
+def _map_llm_feature_category(
+    *,
+    source_event_type_raw: Optional[str],
+    source_entity: Optional[str],
+    model: Optional[str],
+    metadata: Optional[Dict[str, Any]],
+    settings: Any,
+) -> Dict[str, str]:
+    """Map raw LLM analytics events into Mission Control product feature buckets.
+
+    Mapping priority (highest -> lowest confidence):
+    1) Explicit metadata/source markers (mode/service/endpoint/source_event_type_raw)
+    2) Inference heuristics (model-name match)
+    3) Fallback bucket ("Other LLM")
+
+    Mapping uses existing AnalyticsEvent fields:
+    - source_event_type_raw
+    - source_entity
+    - model
+    - metadata_json (parsed)
+
+    For chat_generation_completed, explicit metadata mode is preferred over model-name inference.
+    Legacy rows without mode metadata still fall back to model-based inference.
+    Unmatched LLM events are intentionally grouped under "Other LLM" to avoid silent drops.
+    """
+    raw = str(source_event_type_raw or "").strip().lower()
+    entity = str(source_entity or "").strip().lower()
+    model_name = str(model or "").strip().lower()
+    metadata_dict = metadata or {}
+    mode_hint = str(
+        metadata_dict.get("mode")
+        or metadata_dict.get("request_mode")
+        or metadata_dict.get("chat_mode")
+        or ""
+    ).strip().lower()
+    service_hint = str(
+        metadata_dict.get("service")
+        or metadata_dict.get("feature")
+        or metadata_dict.get("operation")
+        or ""
+    ).strip().lower()
+    endpoint_hint = str(
+        metadata_dict.get("endpoint")
+        or metadata_dict.get("route")
+        or metadata_dict.get("path")
+        or ""
+    ).strip().lower()
+    deep_model = str(getattr(settings, "RILEY_DEEP_MODEL", "") or "").strip().lower()
+    fast_model = str(getattr(settings, "RILEY_MODEL", "") or "").strip().lower()
+
+    if raw == "chat_generation_completed":
+        if mode_hint in {"deep", "deep_chat", "deep-mode", "report_deep"} or "deep" in endpoint_hint:
+            return {"feature": "Deep Chat", "confidence": "explicit"}
+        if mode_hint in {"fast", "fast_chat", "fast-mode", "chat"} or "fast" in endpoint_hint:
+            return {"feature": "Fast Chat", "confidence": "explicit"}
+        if (deep_model and model_name == deep_model) or ("pro" in model_name and "flash" not in model_name):
+            return {"feature": "Deep Chat", "confidence": "inferred"}
+        if (fast_model and model_name == fast_model) or ("flash" in model_name):
+            return {"feature": "Fast Chat", "confidence": "inferred"}
+        return {"feature": "Other LLM", "confidence": "fallback_other"}
+
+    if raw in {
+        "report_generation_attempt_completed",
+        "report_provider_fallback_triggered",
+        "report_provider_fallback_succeeded",
+        "report_provider_fallback_failed",
+        "report_job_status_changed",
+        "report_job_created",
+    } or "report" in service_hint or entity == "rileyreportjob":
+        return {"feature": "Reports", "confidence": "explicit"}
+
+    if (
+        raw == "embedding_indexing_completed"
+        or "embedding" in raw
+        or ("ingestion" in entity and "embedding" in model_name)
+        or "embedding" in service_hint
+        or "ingestion" in service_hint
+    ):
+        return {"feature": "Ingestion / Embeddings", "confidence": "explicit"}
+
+    if raw in {"rerank_completed", "rerank_failed"} or raw.startswith("rerank_") or "rerank" in service_hint:
+        return {"feature": "Rerank / Retrieval Enhancement", "confidence": "explicit"}
+
+    if (
+        "doc_intel" in raw
+        or "document_intelligence" in raw
+        or "documentintel" in entity
+        or "document_intelligence" in service_hint
+        or "doc_intel" in service_hint
+    ):
+        return {"feature": "Document Intelligence", "confidence": "explicit"}
+
+    if "vision" in raw or "visual" in raw or "vision" in entity or "vision" in service_hint:
+        return {"feature": "Vision", "confidence": "explicit"}
+
+    return {"feature": "Other LLM", "confidence": "fallback_other"}
+
+
+def _rollup_llm_feature_cost(
+    *,
+    rows: List[Dict[str, Any]],
+    settings: Any,
+) -> Dict[str, Any]:
+    ordered_features = [
+        "Fast Chat",
+        "Deep Chat",
+        "Reports",
+        "Ingestion / Embeddings",
+        "Document Intelligence",
+        "Rerank / Retrieval Enhancement",
+        "Vision",
+        "Other LLM",
+    ]
+    totals: Dict[str, float] = {feature: 0.0 for feature in ordered_features}
+    confidence_totals: Dict[str, float] = {"explicit": 0.0, "inferred": 0.0, "fallback_other": 0.0}
+    per_feature_confidence: Dict[str, Dict[str, float]] = {
+        feature: {"explicit": 0.0, "inferred": 0.0, "fallback_other": 0.0} for feature in ordered_features
+    }
+    for row in rows:
+        mapping = _map_llm_feature_category(
+            source_event_type_raw=row.get("source_event_type_raw"),
+            source_entity=row.get("source_entity"),
+            model=row.get("model"),
+            metadata=_metadata_json_to_dict(row.get("metadata_json")),
+            settings=settings,
+        )
+        feature = str(mapping.get("feature") or "Other LLM")
+        confidence = str(mapping.get("confidence") or "fallback_other")
+        cost_value = float(row.get("cost_estimate_usd") or 0.0)
+        totals[feature] = float(totals.get(feature) or 0.0) + cost_value
+        confidence_totals[confidence] = float(confidence_totals.get(confidence) or 0.0) + cost_value
+        if feature in per_feature_confidence and confidence in per_feature_confidence[feature]:
+            per_feature_confidence[feature][confidence] = float(per_feature_confidence[feature][confidence] or 0.0) + cost_value
+    total_cost = float(sum(totals.values()))
+    rows_out: List[Dict[str, Any]] = [
+        {
+            "feature": feature,
+            "spend": round(float(totals.get(feature) or 0.0), 4),
+            "percent_of_llm": round(
+                ((float(totals.get(feature) or 0.0) / total_cost) * 100.0) if total_cost > 0 else 0.0,
+                2,
+            ),
+            "attribution_confidence": max(
+                per_feature_confidence.get(feature, {"explicit": 0.0, "inferred": 0.0, "fallback_other": 0.0}).items(),
+                key=lambda item: float(item[1] or 0.0),
+            )[0],
+        }
+        for feature in ordered_features
+    ]
+    explicit_spend = float(confidence_totals.get("explicit") or 0.0)
+    inferred_spend = float(confidence_totals.get("inferred") or 0.0)
+    fallback_other_spend = float(confidence_totals.get("fallback_other") or 0.0)
+    inferred_or_other_spend = inferred_spend + fallback_other_spend
+    other_llm_spend = float(totals.get("Other LLM") or 0.0)
+    return {
+        "rows": rows_out,
+        "mapping_confidence": {
+            "explicit_spend": round(explicit_spend, 4),
+            "inferred_spend": round(inferred_spend, 4),
+            "fallback_other_spend": round(fallback_other_spend, 4),
+            "total_llm_spend": round(total_cost, 4),
+            "explicit_percent": round(((explicit_spend / total_cost) * 100.0) if total_cost > 0 else 0.0, 2),
+            "inferred_or_other_percent": round(
+                ((inferred_or_other_spend / total_cost) * 100.0) if total_cost > 0 else 0.0,
+                2,
+            ),
+            "other_llm_spend": round(other_llm_spend, 4),
+            "other_llm_percent": round(((other_llm_spend / total_cost) * 100.0) if total_cost > 0 else 0.0, 2),
+        },
+    }
+
+
 @router.get("/mission-control/access")
 async def mission_control_access(
     user: Dict = Depends(verify_clerk_token),
@@ -306,16 +502,24 @@ async def mission_control_overview(
         """,
         window_start_iso=window_start_iso,
     )
-    month_cost = await _single_value(
+    month_event_cost_rows = await _rows(
         graph,
         """
-        MATCH (r:AnalyticsDailySystemRollup)
-        WHERE r.event_date >= $month_start_day
-          AND r.event_date <= $today_day
-        RETURN coalesce(sum(toFloat(r.total_cost_estimate_usd)), 0.0) as value
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($month_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+        RETURN
+          coalesce(e.provider, "") as provider,
+          coalesce(e.model, "") as model,
+          toFloat(e.cost_estimate_usd) as cost_estimate_usd
         """,
-        month_start_day=date.today().replace(day=1).isoformat(),
-        today_day=today_day,
+        month_start_iso=datetime.now(timezone.utc).replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0,
+        ).isoformat(),
     )
     pending_access_requests = await _single_value(
         graph,
@@ -348,6 +552,23 @@ async def mission_control_overview(
         ORDER BY day ASC
         """,
         window_start_day=window_start_day,
+    )
+    llm_trend_cost_rows = await _rows(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($window_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+          AND (
+            toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+            OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+            OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+          )
+        WITH date(datetime(e.occurred_at)) as event_day, coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as cost
+        RETURN toString(event_day) as day, round(cost, 4) as cost
+        ORDER BY day ASC
+        """,
+        window_start_iso=window_start_iso,
     )
     campaign_usage_rows = await _rows(
         graph,
@@ -415,9 +636,17 @@ async def mission_control_overview(
     now = datetime.now(timezone.utc)
     days_in_month = monthrange(now.year, now.month)[1]
     month_elapsed_days = max(1, now.day)
-    current_month_estimated_cost = float(month_cost.get("value") or 0.0)
-    forecast_month_end_cost = round(
-        (current_month_estimated_cost / float(month_elapsed_days)) * float(days_in_month),
+    current_month_llm_spend = round(float(await get_current_month_llm_cost_usd()), 2)
+    current_month_non_llm_event_spend = round(
+        sum(
+            float(row.get("cost_estimate_usd") or 0.0)
+            for row in month_event_cost_rows
+            if not _is_llm_event_row(provider=row.get("provider"), model=row.get("model"))
+        ),
+        2,
+    )
+    forecast_month_end_llm_spend = round(
+        (current_month_llm_spend / float(month_elapsed_days)) * float(days_in_month),
         2,
     )
     total_reports = int(report_success.get("total") or 0)
@@ -430,6 +659,10 @@ async def mission_control_overview(
         else 0.0
     )
 
+    llm_cost_by_day = {
+        str(row.get("day") or ""): round(float(row.get("cost") or 0.0), 4)
+        for row in llm_trend_cost_rows
+    }
     return {
         "active_users_7d": int(active_users.get("value") or 0),
         "active_campaigns_7d": int(active_campaigns.get("value") or 0),
@@ -437,8 +670,16 @@ async def mission_control_overview(
         "reports_today": int(activity_metrics.get("reports") or 0),
         "avg_response_latency_ms": avg_response_latency_ms,
         "report_success_rate": report_success_rate,
-        "current_month_estimated_cost": round(current_month_estimated_cost, 2),
-        "forecast_month_end_cost": forecast_month_end_cost,
+        # Data source note: LLM spend fields are computed from AnalyticsEvent provider/model
+        # filters used by llm_cost_guardrail.py (Gemini/OpenAI family only).
+        "current_month_llm_spend": current_month_llm_spend,
+        "forecast_month_end_llm_spend": forecast_month_end_llm_spend,
+        # Data source note: non-LLM event spend tracks operational event-attributed cost
+        # (e.g., cloud_run/gcs/vision) and is kept separate from cloud billing totals.
+        "current_month_non_llm_event_spend": current_month_non_llm_event_spend,
+        # Backward-compatible aliases retained for existing frontend consumers.
+        "current_month_estimated_cost": current_month_llm_spend,
+        "forecast_month_end_cost": forecast_month_end_llm_spend,
         "pending_access_requests": int(pending_access_requests.get("value") or 0),
         "overdue_deadlines": int(overdue_deadlines.get("value") or 0),
         "failed_reports_24h": int(activity_metrics.get("failed_reports") or 0),
@@ -449,7 +690,7 @@ async def mission_control_overview(
                 "day": row.get("day"),
                 "chats": int(row.get("chats") or 0),
                 "reports": int(row.get("reports") or 0),
-                "cost": round(float(row.get("cost") or 0.0), 4),
+                "cost": round(float(llm_cost_by_day.get(str(row.get("day") or ""), 0.0)), 4),
                 "failures": int(row.get("failures") or 0),
             }
             for row in _fill_day_series(
@@ -684,12 +925,21 @@ async def mission_control_cost_summary(
     _: Dict = Depends(verify_mission_control_admin),
     graph: GraphService = Depends(get_graph),
 ) -> Dict[str, Any]:
+    settings = get_settings()
     window = _resolve_timeframe(timeframe)
     await _maybe_schedule_rollup_refresh(graph)
     window_start_day = _window_start_day(int(window["window_days"]))
     window_start_iso = _window_start_iso(int(window["window_hours"]))
+    last_7d_start_iso = (datetime.now(timezone.utc) - timedelta(days=6)).isoformat()
     today_day = date.today().isoformat()
     month_start_day = date.today().replace(day=1).isoformat()
+    month_start_iso = datetime.now(timezone.utc).replace(
+        day=1,
+        hour=0,
+        minute=0,
+        second=0,
+        microsecond=0,
+    ).isoformat()
     month_to_date_cost = await _single_value(
         graph,
         """
@@ -720,6 +970,11 @@ async def mission_control_cost_summary(
         MATCH (e:AnalyticsEvent)
         WHERE e.occurred_at >= $window_start_iso
           AND e.cost_estimate_usd IS NOT NULL
+          AND (
+            toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+            OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+            OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+          )
         RETURN
           coalesce(sum(CASE WHEN coalesce(e.cost_confidence, "proxy_only") = "exact_usage"
                             THEN toFloat(e.cost_estimate_usd) ELSE 0.0 END), 0.0) as exact_usage_cost_30d,
@@ -819,8 +1074,181 @@ async def mission_control_cost_summary(
         """,
         window_start_day=window_start_day,
     )
-    window_cost = round(float(totals.get("window_cost") or 0.0), 2)
-    current_month_cost = round(float(month_to_date_cost.get("value") or 0.0), 2)
+    # Data source note: canonical LLM/non-LLM event spend split from raw AnalyticsEvent
+    # so LLM cards do not accidentally include cloud_run / storage / worker-runtime costs.
+    llm_month_summary = await _single_value(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($month_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+        RETURN
+          coalesce(sum(CASE
+            WHEN (
+              toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+              OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+              OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+            ) THEN toFloat(e.cost_estimate_usd) ELSE 0.0 END), 0.0) as llm_month_cost,
+          coalesce(sum(CASE
+            WHEN (
+              toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+              OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+              OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+            ) THEN 0.0 ELSE toFloat(e.cost_estimate_usd) END), 0.0) as non_llm_month_cost
+        """,
+        month_start_iso=month_start_iso,
+    )
+    llm_window_summary = await _single_value(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($window_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+        RETURN
+          coalesce(sum(CASE
+            WHEN (
+              toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+              OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+              OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+            ) THEN toFloat(e.cost_estimate_usd) ELSE 0.0 END), 0.0) as llm_window_cost,
+          coalesce(sum(CASE
+            WHEN (
+              toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+              OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+              OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+            ) THEN 0.0 ELSE toFloat(e.cost_estimate_usd) END), 0.0) as non_llm_window_cost
+        """,
+        window_start_iso=window_start_iso,
+    )
+    llm_last_7d_summary = await _single_value(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($last_7d_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+          AND (
+            toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+            OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+            OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+          )
+        RETURN coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as llm_last_7d_cost
+        """,
+        last_7d_start_iso=last_7d_start_iso,
+    )
+    llm_provider_rows = await _rows(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($window_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+          AND (
+            toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+            OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+            OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+          )
+        WITH coalesce(e.provider, "unknown") as provider, coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as cost
+        RETURN provider, round(cost, 4) as cost
+        ORDER BY cost DESC
+        LIMIT 25
+        """,
+        window_start_iso=window_start_iso,
+    )
+    non_llm_provider_rows = await _rows(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($window_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+          AND NOT (
+            toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+            OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+            OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+          )
+        WITH coalesce(e.provider, "unknown") as provider, coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as cost
+        RETURN provider, round(cost, 4) as cost
+        ORDER BY cost DESC
+        LIMIT 25
+        """,
+        window_start_iso=window_start_iso,
+    )
+    llm_cost_by_campaign_rows = await _rows(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($window_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+          AND (
+            toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+            OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+            OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+          )
+          AND e.campaign_id IS NOT NULL
+          AND trim(e.campaign_id) <> ""
+          AND e.campaign_id <> "global"
+          AND e.campaign_id <> "unknown_campaign"
+        WITH e.campaign_id as campaign_id, coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as cost
+        ORDER BY cost DESC
+        LIMIT 25
+        OPTIONAL MATCH (c:Campaign)
+        WHERE c.id = campaign_id OR c.tenant_id = campaign_id
+        RETURN campaign_id, coalesce(c.name, c.title, "") as campaign_name, round(cost, 4) as cost
+        """,
+        window_start_iso=window_start_iso,
+    )
+    llm_cost_by_user_rows = await _rows(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($window_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+          AND (
+            toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+            OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+            OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+          )
+          AND coalesce(e.user_id, "") <> ""
+          AND coalesce(e.user_id, "") <> "unknown_user"
+          AND coalesce(e.user_id, "") <> "system:deadline-reminder"
+        WITH coalesce(e.user_id, "") as user_id, coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as cost
+        ORDER BY cost DESC
+        LIMIT 25
+        OPTIONAL MATCH (u:User {id: user_id})
+        WITH user_id, u, cost,
+             CASE
+                 WHEN u["email"] IS NULL OR trim(u["email"]) = "" THEN NULL
+                 ELSE split(u["email"], "@")[0]
+             END as email_prefix
+        RETURN
+          user_id,
+          coalesce(u["display_name"], "") as user_display_name,
+          coalesce(u["username"], "") as username,
+          coalesce(u["email"], "") as email,
+          coalesce(email_prefix, "") as email_prefix,
+          round(cost, 4) as cost
+        """,
+        window_start_iso=window_start_iso,
+    )
+    llm_cost_trend_rows = await _rows(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($window_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+          AND (
+            toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+            OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+            OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+          )
+        WITH date(datetime(e.occurred_at)) as event_day, coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as cost
+        RETURN toString(event_day) as day, round(cost, 4) as cost
+        ORDER BY day ASC
+        """,
+        window_start_iso=window_start_iso,
+    )
+    window_cost = round(float(llm_window_summary.get("llm_window_cost") or 0.0), 2)
+    current_month_cost = round(float(llm_month_summary.get("llm_month_cost") or 0.0), 2)
+    current_month_non_llm_event_spend = round(float(llm_month_summary.get("non_llm_month_cost") or 0.0), 2)
+    non_llm_event_window_spend = round(float(llm_window_summary.get("non_llm_window_cost") or 0.0), 2)
     chats_30d = int(activity_counts.get("chats") or 0)
     reports_30d = int(activity_counts.get("reports") or 0)
     cost_per_chat = round(window_cost / float(chats_30d), 6) if chats_30d else 0.0
@@ -830,6 +1258,158 @@ async def mission_control_cost_summary(
     month_elapsed_days = max(1, now.day)
     daily_burn_rate = round(current_month_cost / float(month_elapsed_days), 4)
     projected_month_end_cost = round(daily_burn_rate * float(days_in_month), 2)
+    monthly_llm_budget_limit = round(float(settings.MAX_MONTHLY_COST or 2000.0), 2)
+    current_month_llm_spend = round(float(await get_current_month_llm_cost_usd()), 2)
+    projected_month_end_llm_spend = round(
+        (current_month_llm_spend / float(month_elapsed_days)) * float(days_in_month),
+        2,
+    )
+    percent_budget_used = round(
+        (current_month_llm_spend / monthly_llm_budget_limit) * 100.0,
+        2,
+    ) if monthly_llm_budget_limit > 0 else 0.0
+    guardrail_status = _guardrail_status_from_percent(percent_budget_used)
+    cloud_usage = await cloud_billing_service.get_cloud_infra_cost_metrics()
+    current_month_cloud_spend = round(float(cloud_usage.get("current_month_cloud_cost") or 0.0), 2)
+    projected_month_end_cloud_spend = round(float(cloud_usage.get("projected_month_end_cloud_cost") or 0.0), 2)
+    qdrant_variable_projected_month_end_spend = 0.0
+    try:
+        qdrant_usage = await vector_service.get_qdrant_usage_metrics()
+        qdrant_variable_projected_month_end_spend = round(float(qdrant_usage.get("estimated_monthly_cost") or 0.0), 2)
+    except Exception as exc:
+        logger.warning("mission_control_qdrant_total_spend_unavailable error=%s", exc)
+    qdrant_variable_current_month_spend = round(
+        (qdrant_variable_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        2,
+    ) if days_in_month > 0 else 0.0
+    qdrant_fixed_projected_month_end_spend = round(float(settings.QDRANT_BASE_MONTHLY_COST_USD or 0.0), 2)
+    qdrant_fixed_current_month_spend = round(
+        (qdrant_fixed_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        2,
+    ) if days_in_month > 0 else 0.0
+    fixed_saas_clerk_projected_month_end_spend = round(float(settings.CLERK_MONTHLY_COST_USD or 0.0), 2)
+    fixed_saas_vercel_projected_month_end_spend = round(float(settings.VERCEL_MONTHLY_COST_USD or 0.0), 2)
+    fixed_saas_other_projected_month_end_spend = round(float(settings.OTHER_FIXED_MONTHLY_COST_USD or 0.0), 2)
+    other_fixed_saas_projected_month_end_spend = round(
+        fixed_saas_clerk_projected_month_end_spend
+        + fixed_saas_vercel_projected_month_end_spend
+        + fixed_saas_other_projected_month_end_spend,
+        2,
+    )
+    fixed_saas_clerk_current_month_spend = round(
+        (fixed_saas_clerk_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        2,
+    ) if days_in_month > 0 else 0.0
+    fixed_saas_vercel_current_month_spend = round(
+        (fixed_saas_vercel_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        2,
+    ) if days_in_month > 0 else 0.0
+    fixed_saas_other_current_month_spend = round(
+        (fixed_saas_other_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        2,
+    ) if days_in_month > 0 else 0.0
+    other_fixed_saas_current_month_spend = round(
+        (other_fixed_saas_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        2,
+    ) if days_in_month > 0 else 0.0
+    current_month_actual_or_metered_spend = round(
+        current_month_llm_spend + current_month_cloud_spend,
+        2,
+    )
+    current_month_estimated_accrual_spend = round(
+        qdrant_variable_current_month_spend
+        + qdrant_fixed_current_month_spend
+        + other_fixed_saas_current_month_spend,
+        2,
+    )
+    current_month_blended_total_spend = round(
+        current_month_actual_or_metered_spend + current_month_estimated_accrual_spend,
+        2,
+    )
+    projected_month_end_total_spend = round(
+        projected_month_end_llm_spend
+        + projected_month_end_cloud_spend
+        + qdrant_variable_projected_month_end_spend
+        + qdrant_fixed_projected_month_end_spend
+        + other_fixed_saas_projected_month_end_spend,
+        2,
+    )
+    total_spend_breakdown = [
+        {
+            "category": "LLM",
+            "current": current_month_llm_spend,
+            "current_semantics": "actual_or_metered_mtd",
+            "projected": projected_month_end_llm_spend,
+        },
+        {
+            "category": "Cloud Infrastructure",
+            "current": current_month_cloud_spend,
+            "current_semantics": "actual_or_metered_mtd",
+            "projected": projected_month_end_cloud_spend,
+        },
+        {
+            "category": "Qdrant Variable",
+            "current": qdrant_variable_current_month_spend,
+            "current_semantics": "estimated_accrual_mtd",
+            "projected": qdrant_variable_projected_month_end_spend,
+        },
+        {
+            "category": "Qdrant Fixed",
+            "current": qdrant_fixed_current_month_spend,
+            "current_semantics": "estimated_accrual_mtd",
+            "projected": qdrant_fixed_projected_month_end_spend,
+        },
+        {
+            "category": "Other Fixed SaaS",
+            "current": other_fixed_saas_current_month_spend,
+            "current_semantics": "estimated_accrual_mtd",
+            "projected": other_fixed_saas_projected_month_end_spend,
+        },
+    ]
+    llm_month_rows = await _rows(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($month_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+          AND (
+            toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+            OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+            OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+          )
+        RETURN
+          e.source_event_type_raw as source_event_type_raw,
+          e.source_entity as source_entity,
+          e.model as model,
+          e.metadata_json as metadata_json,
+          toFloat(e.cost_estimate_usd) as cost_estimate_usd
+        """,
+        month_start_iso=month_start_iso,
+    )
+    llm_last_30d_rows = await _rows(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($last_30d_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+          AND (
+            toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+            OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+            OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+          )
+        RETURN
+          e.source_event_type_raw as source_event_type_raw,
+          e.source_entity as source_entity,
+          e.model as model,
+          e.metadata_json as metadata_json,
+          toFloat(e.cost_estimate_usd) as cost_estimate_usd
+        """,
+        last_30d_start_iso=(datetime.now(timezone.utc) - timedelta(days=30)).isoformat(),
+    )
+    current_month_feature_rollup = _rollup_llm_feature_cost(rows=llm_month_rows, settings=settings)
+    last_30d_feature_rollup = _rollup_llm_feature_cost(rows=llm_last_30d_rows, settings=settings)
+    current_month_llm_cost_by_feature = list(current_month_feature_rollup.get("rows") or [])
+    last_30d_llm_cost_by_feature = list(last_30d_feature_rollup.get("rows") or [])
     projected_curve = []
     for day in range(1, days_in_month + 1):
         projected_value = daily_burn_rate * float(day)
@@ -850,12 +1430,83 @@ async def mission_control_cost_summary(
             "estimated_units": round(float(confidence_totals.get("estimated_units_cost_30d") or 0.0), 4),
             "proxy_only": round(float(confidence_totals.get("proxy_only_cost_30d") or 0.0), 4),
         },
+        # Data source note: provider_cost_30d is LLM-only (Gemini/OpenAI-family events).
         "provider_cost_30d": [
             {"provider": row.get("provider"), "cost": float(row.get("cost") or 0.0)}
-            for row in by_provider_rollup_rows
+            for row in llm_provider_rows
+        ],
+        # Data source note: tracked_non_llm_event_spend values are event-attributed non-LLM
+        # operational estimates and are excluded from total-spend rollups to avoid cloud overlap.
+        "current_month_non_llm_event_spend": current_month_non_llm_event_spend,
+        "window_non_llm_event_spend": non_llm_event_window_spend,
+        "tracked_non_llm_event_provider_breakdown_30d": [
+            {"provider": row.get("provider"), "cost": float(row.get("cost") or 0.0)}
+            for row in non_llm_provider_rows
         ],
         "cost_per_chat": cost_per_chat,
         "cost_per_report": cost_per_report,
+        "monthly_llm_budget_limit": monthly_llm_budget_limit,
+        "current_month_llm_spend": current_month_llm_spend,
+        "projected_month_end_llm_spend": projected_month_end_llm_spend,
+        "percent_budget_used": percent_budget_used,
+        "guardrail_status": guardrail_status,
+        "current_month_cloud_spend": current_month_cloud_spend,
+        "projected_month_end_cloud_spend": projected_month_end_cloud_spend,
+        "cloud_cost_is_available": bool(cloud_usage.get("is_available")),
+        "cloud_cost_unavailable_reason": str(cloud_usage.get("unavailable_reason") or ""),
+        "cloud_cost_last_data_timestamp": cloud_usage.get("last_data_timestamp"),
+        "cloud_cost_billing_data_lag_hours": (
+            float(cloud_usage.get("billing_data_lag_hours") or 0.0)
+            if cloud_usage.get("billing_data_lag_hours") is not None
+            else None
+        ),
+        "current_month_qdrant_variable_spend": qdrant_variable_current_month_spend,
+        "projected_month_end_qdrant_variable_spend": qdrant_variable_projected_month_end_spend,
+        "current_month_qdrant_fixed_spend": qdrant_fixed_current_month_spend,
+        "projected_month_end_qdrant_fixed_spend": qdrant_fixed_projected_month_end_spend,
+        "current_month_other_fixed_saas_spend": other_fixed_saas_current_month_spend,
+        "projected_month_end_other_fixed_saas_spend": other_fixed_saas_projected_month_end_spend,
+        "fixed_saas_component_breakdown": [
+            {
+                "component": "Clerk",
+                "current_mtd": fixed_saas_clerk_current_month_spend,
+                "projected_month_end": fixed_saas_clerk_projected_month_end_spend,
+            },
+            {
+                "component": "Vercel",
+                "current_mtd": fixed_saas_vercel_current_month_spend,
+                "projected_month_end": fixed_saas_vercel_projected_month_end_spend,
+            },
+            {
+                "component": "Other Fixed SaaS",
+                "current_mtd": fixed_saas_other_current_month_spend,
+                "projected_month_end": fixed_saas_other_projected_month_end_spend,
+            },
+        ],
+        # Backward-compatible aliases (deprecated)
+        "current_month_qdrant_spend": qdrant_variable_current_month_spend,
+        "projected_month_end_qdrant_spend": qdrant_variable_projected_month_end_spend,
+        "current_month_fixed_saas_spend": (
+            qdrant_fixed_current_month_spend + other_fixed_saas_current_month_spend
+        ),
+        "projected_month_end_fixed_saas_spend": (
+            qdrant_fixed_projected_month_end_spend + other_fixed_saas_projected_month_end_spend
+        ),
+        # Total-spend semantics:
+        # - actual_or_metered_mtd: measured/metered MTD categories (Cloud may lag billing export ingestion)
+        # - estimated_accrual_mtd: prorated/accrual estimates for fixed + variable components
+        # - blended_total_mtd: sum(actual_or_metered_mtd + estimated_accrual_mtd)
+        "current_month_actual_or_metered_spend": current_month_actual_or_metered_spend,
+        "current_month_estimated_accrual_spend": current_month_estimated_accrual_spend,
+        "current_month_blended_total_spend": current_month_blended_total_spend,
+        # Backward-compatible alias (deprecated): this is blended, not pure actual.
+        "current_month_total_spend": current_month_blended_total_spend,
+        "projected_month_end_total_spend": projected_month_end_total_spend,
+        "total_spend_breakdown": total_spend_breakdown,
+        "current_month_llm_cost_by_feature": current_month_llm_cost_by_feature,
+        "last_30d_llm_cost_by_feature": last_30d_llm_cost_by_feature,
+        "current_month_llm_feature_mapping_confidence": current_month_feature_rollup.get("mapping_confidence") or {},
+        "last_30d_llm_feature_mapping_confidence": last_30d_feature_rollup.get("mapping_confidence") or {},
         "cost_by_campaign_30d": [
             {
                 "campaign_id": row.get("campaign_id"),
@@ -863,7 +1514,7 @@ async def mission_control_cost_summary(
                 "campaign_secondary": _safe_campaign_secondary(row.get("campaign_id")),
                 "cost": round(float(row.get("cost") or 0.0), 4),
             }
-            for row in cost_by_campaign_rows
+            for row in llm_cost_by_campaign_rows
         ],
         "cost_by_user_30d": [
             {
@@ -885,11 +1536,11 @@ async def mission_control_cost_summary(
                 ),
                 "cost": round(float(row.get("cost") or 0.0), 4),
             }
-            for row in cost_by_user_rows
+            for row in llm_cost_by_user_rows
         ],
         "cost_trend_30d": [
             {"day": row.get("day"), "cost": round(float(row.get("cost") or 0.0), 4)}
-            for row in _fill_day_series(rows=cost_trend_rows, window_days=window["window_days"], value_fields=["cost"], caster=float)
+            for row in _fill_day_series(rows=llm_cost_trend_rows, window_days=window["window_days"], value_fields=["cost"], caster=float)
         ],
         "projected_monthly_curve": projected_curve,
     }
@@ -1500,12 +2151,150 @@ async def mission_control_rebuild_rollups(
 @router.get("/metrics/qdrant")
 async def mission_control_qdrant_metrics(
     _: Dict = Depends(verify_mission_control_admin),
+    graph: GraphService = Depends(get_graph),
 ) -> Dict[str, Any]:
     """Return Qdrant usage and estimated monthly storage cost."""
     usage = await vector_service.get_qdrant_usage_metrics()
+    campaign_rows = usage.get("campaigns") or []
+    campaign_ids = [
+        str(row.get("campaign_id") or "").strip()
+        for row in campaign_rows
+        if str(row.get("campaign_id") or "").strip()
+    ]
+    campaign_name_by_id = await graph.get_campaign_names_by_ids(campaign_ids) if campaign_ids else {}
+    enriched_campaigns: List[Dict[str, Any]] = []
+    for row in campaign_rows:
+        campaign_id = str(row.get("campaign_id") or "").strip()
+        resolved_name = str(campaign_name_by_id.get(campaign_id) or campaign_id or "unknown_campaign")
+        enriched_campaigns.append(
+            {
+                "campaign_id": campaign_id,
+                "campaign_name": resolved_name,
+                "vectors": int(row.get("vectors") or 0),
+                "estimated_size_mb": round(float(row.get("estimated_size_mb") or 0.0), 2),
+            }
+        )
+    total_vectors = int(usage.get("total_vectors") or 0)
+    total_estimated_size_mb = round(float(usage.get("total_estimated_size_mb") or 0.0), 2)
+    estimated_monthly_cost = round(float(usage.get("estimated_monthly_cost") or 0.0), 2)
+    projection_available = False
+    projection_unavailable_reason: Optional[str] = None
+    projected_next_month_storage_mb = 0.0
+    projected_next_month_cost = 0.0
+    growth_percent = 0.0
+    growth_mb_per_day = 0.0
+    projection_confidence = "unavailable"
+    projection_snapshot_count = 0
+    projection_min_snapshots_required = 7
+    projection_window_days_used = 0
+    projection_method = "recent-window-linear-growth"
+    warning_state = "normal"
+    warning_reasons: List[str] = []
+
+    try:
+        await graph.upsert_qdrant_usage_snapshot(
+            total_vectors=total_vectors,
+            total_estimated_size_mb=total_estimated_size_mb,
+            estimated_monthly_cost=estimated_monthly_cost,
+        )
+    except Exception as exc:
+        logger.warning("mission_control_qdrant_snapshot_upsert_failed error=%s", exc)
+
+    trend_series = await graph.list_qdrant_usage_snapshots(days_back=60, limit=120)
+    projection_snapshot_count = len(trend_series)
+    if projection_snapshot_count >= projection_min_snapshots_required:
+        # Forecast from recent history (last 7-14 snapshots), not first-vs-last ever.
+        recent_window_size = min(14, projection_snapshot_count)
+        recent_window = trend_series[-recent_window_size:]
+        projection_window_days_used = recent_window_size
+        first = recent_window[0]
+        last = recent_window[-1]
+        first_date = str(first.get("date") or "")
+        last_date = str(last.get("date") or "")
+        try:
+            first_dt = datetime.fromisoformat(first_date)
+            last_dt = datetime.fromisoformat(last_date)
+            days_between = max(1, (last_dt - first_dt).days)
+            size_start = float(first.get("total_estimated_size_mb") or 0.0)
+            size_end = float(last.get("total_estimated_size_mb") or 0.0)
+            growth_mb_per_day = (size_end - size_start) / float(days_between)
+
+            next_month_year = datetime.now(timezone.utc).year + (1 if datetime.now(timezone.utc).month == 12 else 0)
+            next_month_num = 1 if datetime.now(timezone.utc).month == 12 else datetime.now(timezone.utc).month + 1
+            next_month_days = monthrange(next_month_year, next_month_num)[1]
+            projected_next_month_storage_mb = round(
+                max(0.0, size_end + (growth_mb_per_day * float(next_month_days))),
+                2,
+            )
+            qdrant_cost_per_gb_month_usd = float(get_settings().QDRANT_COST_PER_GB_MONTH_USD or 0.25)
+            projected_next_month_cost = round(
+                (projected_next_month_storage_mb / 1024.0) * qdrant_cost_per_gb_month_usd,
+                2,
+            )
+            growth_percent = round(
+                ((size_end - size_start) / size_start) * 100.0 if size_start > 0 else 0.0,
+                2,
+            )
+            projection_available = True
+            projection_confidence = "high" if projection_snapshot_count >= 10 else "low"
+        except Exception as exc:
+            projection_unavailable_reason = f"Projection unavailable due to invalid snapshot timeline: {exc}"
+            projection_confidence = "unavailable"
+    else:
+        projection_unavailable_reason = (
+            f"Collecting history: {projection_snapshot_count}/{projection_min_snapshots_required} daily snapshots available."
+        )
+        projection_confidence = "unavailable"
+
+    settings = get_settings()
+    growth_warning_threshold = float(settings.QDRANT_GROWTH_WARNING_PERCENT or 20.0)
+    projected_cost_target = float(settings.QDRANT_PROJECTED_MONTHLY_COST_TARGET_USD or 0.0)
+    # Only trigger warning state when projection confidence is sufficient.
+    if projection_available and projection_confidence == "high":
+        if growth_percent > growth_warning_threshold:
+            warning_reasons.append("growth_threshold_exceeded")
+        if projected_cost_target > 0 and projected_next_month_cost > projected_cost_target:
+            warning_reasons.append("projected_cost_target_exceeded")
+    if warning_reasons:
+        warning_state = "warning"
+
     return {
-        "total_vectors": int(usage.get("total_vectors") or 0),
-        "campaigns": usage.get("campaigns") or [],
-        "estimated_monthly_cost": round(float(usage.get("estimated_monthly_cost") or 0.0), 2),
+        "total_vectors": total_vectors,
+        "total_estimated_size_mb": total_estimated_size_mb,
+        "campaigns": enriched_campaigns,
+        "estimated_monthly_cost": estimated_monthly_cost,
+        "trend_series": trend_series,
+        "projection_available": projection_available,
+        "projection_unavailable_reason": projection_unavailable_reason,
+        "projection_confidence": projection_confidence,
+        "projection_snapshot_count": projection_snapshot_count,
+        "projection_min_snapshots_required": projection_min_snapshots_required,
+        "projection_window_days_used": projection_window_days_used,
+        "projection_method": projection_method,
+        "projected_next_month_storage_mb": projected_next_month_storage_mb,
+        "projected_next_month_cost": projected_next_month_cost,
+        "growth_percent": growth_percent,
+        "growth_mb_per_day": round(float(growth_mb_per_day), 4),
+        "warning_state": warning_state,
+        "warning_reasons": warning_reasons,
+    }
+
+
+@router.get("/metrics/cloud-infrastructure-cost")
+async def mission_control_cloud_infrastructure_cost(
+    _: Dict = Depends(verify_mission_control_admin),
+) -> Dict[str, Any]:
+    """Return Cloud Infrastructure billing metrics from configured GCP billing export."""
+    usage = await cloud_billing_service.get_cloud_infra_cost_metrics()
+    return {
+        "current_month_cloud_cost": round(float(usage.get("current_month_cloud_cost") or 0.0), 2),
+        "projected_month_end_cloud_cost": round(float(usage.get("projected_month_end_cloud_cost") or 0.0), 2),
+        "daily_cloud_cost_series": usage.get("daily_cloud_cost_series") or [],
+        "cloud_cost_breakdown": usage.get("cloud_cost_breakdown") or [],
+        "is_available": bool(usage.get("is_available")),
+        "unavailable_reason": usage.get("unavailable_reason"),
+        "last_data_timestamp": usage.get("last_data_timestamp"),
+        "billing_data_lag_hours": usage.get("billing_data_lag_hours"),
+        "billing_source": str(usage.get("billing_source") or ""),
     }
 

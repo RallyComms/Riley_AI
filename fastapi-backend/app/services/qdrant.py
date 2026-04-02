@@ -1736,6 +1736,7 @@ class VectorService:
         return {
             "total_vectors": int(total_vectors),
             "campaigns": campaigns,
+            "total_estimated_size_mb": round(float(total_estimated_size_mb), 2),
             "estimated_monthly_cost": round(float(estimated_monthly_cost), 2),
         }
 

@@ -1909,6 +1909,67 @@ class GraphService:
                     mapping[campaign_id] = campaign_name or campaign_id
             return mapping
 
+    async def upsert_qdrant_usage_snapshot(
+        self,
+        *,
+        total_vectors: int,
+        total_estimated_size_mb: float,
+        estimated_monthly_cost: float,
+    ) -> None:
+        """Persist one daily Qdrant usage snapshot for forecasting."""
+        snapshot_date = datetime.now(timezone.utc).date().isoformat()
+        async with self._driver.session() as session:
+            query = """
+            MERGE (s:QdrantUsageSnapshot {snapshot_date: $snapshot_date})
+            ON CREATE SET s.created_at = datetime()
+            SET
+              s.total_vectors = $total_vectors,
+              s.total_estimated_size_mb = $total_estimated_size_mb,
+              s.estimated_monthly_cost = $estimated_monthly_cost,
+              s.updated_at = datetime()
+            """
+            await session.run(
+                query,
+                snapshot_date=snapshot_date,
+                total_vectors=max(0, int(total_vectors or 0)),
+                total_estimated_size_mb=max(0.0, float(total_estimated_size_mb or 0.0)),
+                estimated_monthly_cost=max(0.0, float(estimated_monthly_cost or 0.0)),
+            )
+
+    async def list_qdrant_usage_snapshots(self, *, days_back: int = 60, limit: int = 120) -> List[Dict[str, Any]]:
+        """Return historical Qdrant usage snapshots ordered by day ascending."""
+        safe_days_back = max(2, int(days_back))
+        safe_limit = max(2, int(limit))
+        start_day = (datetime.now(timezone.utc).date() - timedelta(days=safe_days_back - 1)).isoformat()
+        async with self._driver.session() as session:
+            query = """
+            MATCH (s:QdrantUsageSnapshot)
+            WHERE s.snapshot_date >= $start_day
+            RETURN
+              s.snapshot_date as date,
+              coalesce(toInteger(s.total_vectors), 0) as total_vectors,
+              coalesce(toFloat(s.total_estimated_size_mb), 0.0) as total_estimated_size_mb,
+              coalesce(toFloat(s.estimated_monthly_cost), 0.0) as estimated_monthly_cost
+            ORDER BY s.snapshot_date ASC
+            LIMIT $limit
+            """
+            result = await session.run(
+                query,
+                start_day=start_day,
+                limit=safe_limit,
+            )
+            rows: List[Dict[str, Any]] = []
+            async for record in result:
+                rows.append(
+                    {
+                        "date": str(record.get("date") or "").strip(),
+                        "total_vectors": int(record.get("total_vectors") or 0),
+                        "total_estimated_size_mb": round(float(record.get("total_estimated_size_mb") or 0.0), 4),
+                        "estimated_monthly_cost": round(float(record.get("estimated_monthly_cost") or 0.0), 4),
+                    }
+                )
+            return rows
+
     async def clear_chat_history(self, session_id: str, tenant_id: str, user_id: str) -> None:
         """Clear all messages for a chat session.
         
