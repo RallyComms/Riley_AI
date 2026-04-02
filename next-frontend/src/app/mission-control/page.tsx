@@ -25,6 +25,9 @@ type OverviewData = {
   reports_today: number;
   avg_response_latency_ms: number;
   report_success_rate: number;
+  current_month_llm_spend?: number;
+  forecast_month_end_llm_spend?: number;
+  current_month_non_llm_event_spend?: number;
   current_month_estimated_cost: number;
   forecast_month_end_cost: number;
   pending_access_requests: number;
@@ -96,12 +99,105 @@ type CostData = {
   cost_by_user_30d: Array<{ user_id: string; user_label?: string; user_secondary?: string; cost: number }>;
   cost_trend_30d: Array<{ day: string; cost: number }>;
   projected_monthly_curve: Array<{ day: number; projected_cost: number }>;
+  monthly_llm_budget_limit: number;
+  current_month_llm_spend: number;
+  projected_month_end_llm_spend: number;
+  percent_budget_used: number;
+  guardrail_status: "green" | "yellow" | "red" | "exceeded";
+  current_month_cloud_spend: number;
+  projected_month_end_cloud_spend: number;
+  cloud_cost_is_available: boolean;
+  cloud_cost_unavailable_reason?: string;
+  cloud_cost_last_data_timestamp?: string;
+  cloud_cost_billing_data_lag_hours?: number;
+  current_month_qdrant_spend: number;
+  projected_month_end_qdrant_spend: number;
+  current_month_fixed_saas_spend: number;
+  projected_month_end_fixed_saas_spend: number;
+  current_month_actual_or_metered_spend: number;
+  current_month_estimated_accrual_spend: number;
+  current_month_blended_total_spend: number;
+  current_month_total_spend: number; // deprecated alias; represents blended MTD
+  projected_month_end_total_spend: number;
+  total_spend_breakdown: Array<{
+    category: string;
+    current: number;
+    projected: number;
+    current_semantics?: "actual_or_metered_mtd" | "estimated_accrual_mtd";
+  }>;
+  fixed_saas_component_breakdown: Array<{
+    component: string;
+    current_mtd: number;
+    projected_month_end: number;
+  }>;
+  current_month_llm_cost_by_feature: Array<{
+    feature: string;
+    spend: number;
+    percent_of_llm: number;
+    attribution_confidence?: "explicit" | "inferred" | "fallback_other";
+  }>;
+  last_30d_llm_cost_by_feature: Array<{
+    feature: string;
+    spend: number;
+    percent_of_llm: number;
+    attribution_confidence?: "explicit" | "inferred" | "fallback_other";
+  }>;
+  current_month_llm_feature_mapping_confidence: {
+    explicit_spend: number;
+    inferred_spend: number;
+    fallback_other_spend: number;
+    total_llm_spend: number;
+    explicit_percent: number;
+    inferred_or_other_percent: number;
+    other_llm_spend: number;
+    other_llm_percent: number;
+  };
+  last_30d_llm_feature_mapping_confidence: {
+    explicit_spend: number;
+    inferred_spend: number;
+    fallback_other_spend: number;
+    total_llm_spend: number;
+    explicit_percent: number;
+    inferred_or_other_percent: number;
+    other_llm_spend: number;
+    other_llm_percent: number;
+  };
+  current_month_non_llm_event_spend: number;
+  window_non_llm_event_spend: number;
+  tracked_non_llm_event_provider_breakdown_30d: Array<{ provider: string; cost: number }>;
 };
 
 type QdrantMetricsData = {
   total_vectors: number;
-  campaigns: Array<{ campaign_id: string; vectors: number; estimated_size_mb: number }>;
+  total_estimated_size_mb: number;
+  campaigns: Array<{ campaign_id: string; campaign_name?: string; vectors: number; estimated_size_mb: number }>;
   estimated_monthly_cost: number;
+  trend_series: Array<{ date: string; total_vectors: number; total_estimated_size_mb: number; estimated_monthly_cost: number }>;
+  projection_available: boolean;
+  projection_unavailable_reason?: string;
+  projection_confidence: "unavailable" | "low" | "high";
+  projection_snapshot_count: number;
+  projection_min_snapshots_required: number;
+  projection_window_days_used: number;
+  projection_method: string;
+  projected_next_month_storage_mb: number;
+  projected_next_month_cost: number;
+  growth_percent: number;
+  growth_mb_per_day: number;
+  warning_state: "normal" | "warning";
+  warning_reasons: string[];
+};
+
+type CloudInfrastructureCostData = {
+  current_month_cloud_cost: number;
+  projected_month_end_cloud_cost: number;
+  daily_cloud_cost_series: Array<{ date: string; cost: number }>;
+  cloud_cost_breakdown: Array<{ service: string; cost: number }>;
+  is_available: boolean;
+  unavailable_reason?: string;
+  last_data_timestamp?: string;
+  billing_data_lag_hours?: number;
+  billing_source?: string;
 };
 
 type AdoptionData = {
@@ -251,6 +347,53 @@ const defaultCost: CostData = {
   cost_by_user_30d: [],
   cost_trend_30d: [],
   projected_monthly_curve: [],
+  monthly_llm_budget_limit: 0,
+  current_month_llm_spend: 0,
+  projected_month_end_llm_spend: 0,
+  percent_budget_used: 0,
+  guardrail_status: "green",
+  current_month_cloud_spend: 0,
+  projected_month_end_cloud_spend: 0,
+  cloud_cost_is_available: false,
+  cloud_cost_unavailable_reason: "",
+  cloud_cost_last_data_timestamp: "",
+  cloud_cost_billing_data_lag_hours: 0,
+  current_month_qdrant_spend: 0,
+  projected_month_end_qdrant_spend: 0,
+  current_month_fixed_saas_spend: 0,
+  projected_month_end_fixed_saas_spend: 0,
+  current_month_actual_or_metered_spend: 0,
+  current_month_estimated_accrual_spend: 0,
+  current_month_blended_total_spend: 0,
+  current_month_total_spend: 0,
+  projected_month_end_total_spend: 0,
+  total_spend_breakdown: [],
+  fixed_saas_component_breakdown: [],
+  current_month_llm_cost_by_feature: [],
+  last_30d_llm_cost_by_feature: [],
+  current_month_llm_feature_mapping_confidence: {
+    explicit_spend: 0,
+    inferred_spend: 0,
+    fallback_other_spend: 0,
+    total_llm_spend: 0,
+    explicit_percent: 0,
+    inferred_or_other_percent: 0,
+    other_llm_spend: 0,
+    other_llm_percent: 0,
+  },
+  last_30d_llm_feature_mapping_confidence: {
+    explicit_spend: 0,
+    inferred_spend: 0,
+    fallback_other_spend: 0,
+    total_llm_spend: 0,
+    explicit_percent: 0,
+    inferred_or_other_percent: 0,
+    other_llm_spend: 0,
+    other_llm_percent: 0,
+  },
+  current_month_non_llm_event_spend: 0,
+  window_non_llm_event_spend: 0,
+  tracked_non_llm_event_provider_breakdown_30d: [],
 };
 
 const defaultAdoption: AdoptionData = {
@@ -283,8 +426,35 @@ const defaultSystem: SystemData = {
 
 const defaultQdrantMetrics: QdrantMetricsData = {
   total_vectors: 0,
+  total_estimated_size_mb: 0,
   campaigns: [],
   estimated_monthly_cost: 0,
+  trend_series: [],
+  projection_available: false,
+  projection_unavailable_reason: "",
+  projection_confidence: "unavailable",
+  projection_snapshot_count: 0,
+  projection_min_snapshots_required: 7,
+  projection_window_days_used: 0,
+  projection_method: "",
+  projected_next_month_storage_mb: 0,
+  projected_next_month_cost: 0,
+  growth_percent: 0,
+  growth_mb_per_day: 0,
+  warning_state: "normal",
+  warning_reasons: [],
+};
+
+const defaultCloudInfrastructureCost: CloudInfrastructureCostData = {
+  current_month_cloud_cost: 0,
+  projected_month_end_cloud_cost: 0,
+  daily_cloud_cost_series: [],
+  cloud_cost_breakdown: [],
+  is_available: false,
+  unavailable_reason: "",
+  last_data_timestamp: "",
+  billing_data_lag_hours: 0,
+  billing_source: "",
 };
 
 function asNumber(value: unknown): number {
@@ -330,6 +500,9 @@ function normalizeOverview(raw: unknown): OverviewData {
     reports_today: asNumber(src.reports_today),
     avg_response_latency_ms: asNumber(src.avg_response_latency_ms),
     report_success_rate: asNumber(src.report_success_rate),
+    current_month_llm_spend: asNumber(src.current_month_llm_spend),
+    forecast_month_end_llm_spend: asNumber(src.forecast_month_end_llm_spend),
+    current_month_non_llm_event_spend: asNumber(src.current_month_non_llm_event_spend),
     current_month_estimated_cost: asNumber(src.current_month_estimated_cost),
     forecast_month_end_cost: asNumber(src.forecast_month_end_cost),
     pending_access_requests: asNumber(src.pending_access_requests),
@@ -483,6 +656,104 @@ function normalizeCost(raw: unknown): CostData {
         projected_cost: asNumber(item.projected_cost),
       };
     }),
+    monthly_llm_budget_limit: asNumber(src.monthly_llm_budget_limit),
+    current_month_llm_spend: asNumber(src.current_month_llm_spend),
+    projected_month_end_llm_spend: asNumber(src.projected_month_end_llm_spend),
+    percent_budget_used: asNumber(src.percent_budget_used),
+    guardrail_status: asString(src.guardrail_status, "green") as CostData["guardrail_status"],
+    current_month_cloud_spend: asNumber(src.current_month_cloud_spend),
+    projected_month_end_cloud_spend: asNumber(src.projected_month_end_cloud_spend),
+    cloud_cost_is_available: Boolean(src.cloud_cost_is_available),
+    cloud_cost_unavailable_reason: asString(src.cloud_cost_unavailable_reason, ""),
+    cloud_cost_last_data_timestamp: asString(src.cloud_cost_last_data_timestamp, ""),
+    cloud_cost_billing_data_lag_hours: asNumber(src.cloud_cost_billing_data_lag_hours),
+    current_month_qdrant_spend: asNumber(src.current_month_qdrant_spend),
+    projected_month_end_qdrant_spend: asNumber(src.projected_month_end_qdrant_spend),
+    current_month_fixed_saas_spend: asNumber(src.current_month_fixed_saas_spend),
+    projected_month_end_fixed_saas_spend: asNumber(src.projected_month_end_fixed_saas_spend),
+    current_month_actual_or_metered_spend: asNumber(src.current_month_actual_or_metered_spend),
+    current_month_estimated_accrual_spend: asNumber(src.current_month_estimated_accrual_spend),
+    current_month_blended_total_spend: asNumber(src.current_month_blended_total_spend),
+    current_month_total_spend: asNumber(src.current_month_total_spend),
+    projected_month_end_total_spend: asNumber(src.projected_month_end_total_spend),
+    total_spend_breakdown: asArray(src.total_spend_breakdown).map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        category: asString(item.category, `category_${idx + 1}`),
+        current: asNumber(item.current),
+        projected: asNumber(item.projected),
+        current_semantics: asString(item.current_semantics, "estimated_accrual_mtd") as
+          | "actual_or_metered_mtd"
+          | "estimated_accrual_mtd",
+      };
+    }),
+    fixed_saas_component_breakdown: asArray(src.fixed_saas_component_breakdown).map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        component: asString(item.component, `component_${idx + 1}`),
+        current_mtd: asNumber(item.current_mtd),
+        projected_month_end: asNumber(item.projected_month_end),
+      };
+    }),
+    current_month_llm_cost_by_feature: asArray(src.current_month_llm_cost_by_feature).map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        feature: asString(item.feature, `feature_${idx + 1}`),
+        spend: asNumber(item.spend),
+        percent_of_llm: asNumber(item.percent_of_llm),
+        attribution_confidence: asString(item.attribution_confidence, "fallback_other") as
+          | "explicit"
+          | "inferred"
+          | "fallback_other",
+      };
+    }),
+    last_30d_llm_cost_by_feature: asArray(src.last_30d_llm_cost_by_feature).map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        feature: asString(item.feature, `feature_${idx + 1}`),
+        spend: asNumber(item.spend),
+        percent_of_llm: asNumber(item.percent_of_llm),
+        attribution_confidence: asString(item.attribution_confidence, "fallback_other") as
+          | "explicit"
+          | "inferred"
+          | "fallback_other",
+      };
+    }),
+    current_month_llm_feature_mapping_confidence: (() => {
+      const item = asRecord(src.current_month_llm_feature_mapping_confidence);
+      return {
+        explicit_spend: asNumber(item.explicit_spend),
+        inferred_spend: asNumber(item.inferred_spend),
+        fallback_other_spend: asNumber(item.fallback_other_spend),
+        total_llm_spend: asNumber(item.total_llm_spend),
+        explicit_percent: asNumber(item.explicit_percent),
+        inferred_or_other_percent: asNumber(item.inferred_or_other_percent),
+        other_llm_spend: asNumber(item.other_llm_spend),
+        other_llm_percent: asNumber(item.other_llm_percent),
+      };
+    })(),
+    last_30d_llm_feature_mapping_confidence: (() => {
+      const item = asRecord(src.last_30d_llm_feature_mapping_confidence);
+      return {
+        explicit_spend: asNumber(item.explicit_spend),
+        inferred_spend: asNumber(item.inferred_spend),
+        fallback_other_spend: asNumber(item.fallback_other_spend),
+        total_llm_spend: asNumber(item.total_llm_spend),
+        explicit_percent: asNumber(item.explicit_percent),
+        inferred_or_other_percent: asNumber(item.inferred_or_other_percent),
+        other_llm_spend: asNumber(item.other_llm_spend),
+        other_llm_percent: asNumber(item.other_llm_percent),
+      };
+    })(),
+    current_month_non_llm_event_spend: asNumber(src.current_month_non_llm_event_spend),
+    window_non_llm_event_spend: asNumber(src.window_non_llm_event_spend),
+    tracked_non_llm_event_provider_breakdown_30d: asArray(src.tracked_non_llm_event_provider_breakdown_30d).map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        provider: asString(item.provider, `provider_${idx + 1}`),
+        cost: asNumber(item.cost),
+      };
+    }),
   };
 }
 
@@ -602,17 +873,71 @@ function normalizeSystem(raw: unknown): SystemData {
 function normalizeQdrantMetrics(raw: unknown): QdrantMetricsData {
   const src = asRecord(raw);
   const campaigns = asArray(src.campaigns);
+  const trendRows = asArray(src.trend_series);
   return {
     total_vectors: asNumber(src.total_vectors),
+    total_estimated_size_mb: asNumber(src.total_estimated_size_mb),
     estimated_monthly_cost: asNumber(src.estimated_monthly_cost),
     campaigns: campaigns.map((row, idx) => {
       const item = asRecord(row);
       return {
         campaign_id: asString(item.campaign_id, `campaign_${idx + 1}`),
+        campaign_name: asString(item.campaign_name, ""),
         vectors: asNumber(item.vectors),
         estimated_size_mb: asNumber(item.estimated_size_mb),
       };
     }),
+    trend_series: trendRows.map((row) => {
+      const item = asRecord(row);
+      return {
+        date: asString(item.date, ""),
+        total_vectors: asNumber(item.total_vectors),
+        total_estimated_size_mb: asNumber(item.total_estimated_size_mb),
+        estimated_monthly_cost: asNumber(item.estimated_monthly_cost),
+      };
+    }),
+    projection_available: Boolean(src.projection_available),
+    projection_unavailable_reason: asString(src.projection_unavailable_reason, ""),
+    projection_confidence: asString(src.projection_confidence, "unavailable") as QdrantMetricsData["projection_confidence"],
+    projection_snapshot_count: asNumber(src.projection_snapshot_count),
+    projection_min_snapshots_required: Math.max(0, asNumber(src.projection_min_snapshots_required) || 7),
+    projection_window_days_used: asNumber(src.projection_window_days_used),
+    projection_method: asString(src.projection_method, ""),
+    projected_next_month_storage_mb: asNumber(src.projected_next_month_storage_mb),
+    projected_next_month_cost: asNumber(src.projected_next_month_cost),
+    growth_percent: asNumber(src.growth_percent),
+    growth_mb_per_day: asNumber(src.growth_mb_per_day),
+    warning_state: asString(src.warning_state, "normal") as QdrantMetricsData["warning_state"],
+    warning_reasons: asArray(src.warning_reasons).map((item) => asString(item, "")),
+  };
+}
+
+function normalizeCloudInfrastructureCost(raw: unknown): CloudInfrastructureCostData {
+  const src = asRecord(raw);
+  const dailyRows = asArray(src.daily_cloud_cost_series);
+  const breakdownRows = asArray(src.cloud_cost_breakdown);
+  return {
+    current_month_cloud_cost: asNumber(src.current_month_cloud_cost),
+    projected_month_end_cloud_cost: asNumber(src.projected_month_end_cloud_cost),
+    daily_cloud_cost_series: dailyRows.map((row) => {
+      const item = asRecord(row);
+      return {
+        date: asString(item.date, ""),
+        cost: asNumber(item.cost),
+      };
+    }),
+    cloud_cost_breakdown: breakdownRows.map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        service: asString(item.service, `service_${idx + 1}`),
+        cost: asNumber(item.cost),
+      };
+    }),
+    is_available: Boolean(src.is_available),
+    unavailable_reason: asString(src.unavailable_reason, ""),
+    last_data_timestamp: asString(src.last_data_timestamp, ""),
+    billing_data_lag_hours: asNumber(src.billing_data_lag_hours),
+    billing_source: asString(src.billing_source, ""),
   };
 }
 
@@ -636,6 +961,39 @@ function renderCampaignLabel(name: string, _campaignId: string, _secondary?: str
 
 function renderUserLabel(userLabel: string, userId: string, _secondary?: string): string {
   return asString(userLabel, asString(userId, "unknown_user"));
+}
+
+function resolveGuardrailStyle(status: CostData["guardrail_status"]): {
+  label: string;
+  badgeClass: string;
+  panelClass: string;
+} {
+  if (status === "exceeded") {
+    return {
+      label: "Limit reached",
+      badgeClass: "bg-rose-100 text-rose-700 border border-rose-200",
+      panelClass: "border-rose-200 bg-rose-50",
+    };
+  }
+  if (status === "red") {
+    return {
+      label: "Near limit",
+      badgeClass: "bg-orange-100 text-orange-700 border border-orange-200",
+      panelClass: "border-orange-200 bg-orange-50/70",
+    };
+  }
+  if (status === "yellow") {
+    return {
+      label: "Watch usage",
+      badgeClass: "bg-amber-100 text-amber-700 border border-amber-200",
+      panelClass: "border-amber-200 bg-amber-50/70",
+    };
+  }
+  return {
+    label: "Healthy",
+    badgeClass: "bg-emerald-100 text-emerald-700 border border-emerald-200",
+    panelClass: "border-emerald-200 bg-emerald-50/70",
+  };
 }
 
 type TabLoadingState = Record<MissionControlTab, boolean>;
@@ -690,6 +1048,8 @@ export default function MissionControlPage() {
   const [system, setSystem] = useState<SystemData>(defaultSystem);
   const [qdrantMetrics, setQdrantMetrics] = useState<QdrantMetricsData>(defaultQdrantMetrics);
   const [qdrantMetricsLoading, setQdrantMetricsLoading] = useState(false);
+  const [cloudInfraCost, setCloudInfraCost] = useState<CloudInfrastructureCostData>(defaultCloudInfrastructureCost);
+  const [cloudInfraCostLoading, setCloudInfraCostLoading] = useState(false);
   const [resolvingFailureIds, setResolvingFailureIds] = useState<Record<string, boolean>>({});
   const cacheRef = useRef<Map<string, unknown>>(new Map());
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
@@ -886,10 +1246,34 @@ export default function MissionControlPage() {
     }
   }, [getToken, isLoaded]);
 
+  const fetchCloudInfrastructureCost = useCallback(async () => {
+    if (!isLoaded) return;
+    setCloudInfraCostLoading(true);
+    try {
+      const token = await getToken();
+      if (!token) throw new Error("Authentication required.");
+      const payload = await apiFetch("/api/v1/metrics/cloud-infrastructure-cost", { token, method: "GET" });
+      setCloudInfraCost(normalizeCloudInfrastructureCost(payload));
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 403) {
+        setAccessDenied(true);
+        return;
+      }
+      setCloudInfraCost({
+        ...defaultCloudInfrastructureCost,
+        is_available: false,
+        unavailable_reason: err instanceof Error ? err.message : "Cloud billing data unavailable.",
+      });
+    } finally {
+      setCloudInfraCostLoading(false);
+    }
+  }, [getToken, isLoaded]);
+
   useEffect(() => {
     if (!isLoaded || activeTab !== "cost") return;
     void fetchQdrantMetrics();
-  }, [activeTab, fetchQdrantMetrics, isLoaded]);
+    void fetchCloudInfrastructureCost();
+  }, [activeTab, fetchCloudInfrastructureCost, fetchQdrantMetrics, isLoaded]);
 
   const topKpis = useMemo(() => {
     return [
@@ -912,12 +1296,30 @@ export default function MissionControlPage() {
         },
       },
       { label: "Report Success Rate", value: `${overview.report_success_rate}%`, icon: ShieldCheck },
-      { label: "Month Est. Cost", value: `$${asNumber(overview.current_month_estimated_cost).toFixed(2)}`, icon: DollarSign },
+      { label: "LLM Spend (MTD)", value: `$${asNumber(overview.current_month_llm_spend).toFixed(2)}`, icon: DollarSign },
     ];
   }, [overview, timeframeLabel]);
 
   const activeTabLoading = tabLoading[activeTab];
   const activeTabLabel = tabs.find((tab) => tab.id === activeTab)?.label || "Active tab";
+  const guardrailStyle = resolveGuardrailStyle(cost.guardrail_status);
+  const showGlobalGuardrailWarning = cost.guardrail_status === "red" || cost.guardrail_status === "exceeded";
+  const cloudLagHours = asNumber(cost.cloud_cost_billing_data_lag_hours);
+  const cloudBillingLagged = cost.cloud_cost_is_available && cloudLagHours >= 24;
+  const cloudFreshnessBadgeLabel = !cost.cloud_cost_is_available
+    ? "Cloud billing unavailable"
+    : cloudBillingLagged
+      ? "Cloud billing lagged"
+      : "Cloud billing fresh";
+  const cloudFreshnessBadgeClass = !cost.cloud_cost_is_available
+    ? "border-amber-300 bg-amber-50 text-amber-800"
+    : cloudBillingLagged
+      ? "border-yellow-300 bg-yellow-50 text-yellow-800"
+      : "border-emerald-300 bg-emerald-50 text-emerald-800";
+  const currentMonthFeatureConfidence = cost.current_month_llm_feature_mapping_confidence;
+  const showFeatureAttributionNote =
+    asNumber(currentMonthFeatureConfidence.inferred_or_other_percent) >= 15 ||
+    asNumber(currentMonthFeatureConfidence.other_llm_percent) >= 10;
 
   const handleResolveFailure = useCallback(async (failureId: string) => {
     const normalized = asString(failureId, "");
@@ -955,6 +1357,13 @@ export default function MissionControlPage() {
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Admin Surface</p>
             <h1 className="mt-2 text-4xl font-semibold tracking-tight">Mission Control</h1>
             <p className="mt-2 text-sm text-slate-600">Executive analytics and platform health for Riley.</p>
+            {showGlobalGuardrailWarning ? (
+              <div className="mt-3">
+                <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-semibold ${guardrailStyle.badgeClass}`}>
+                  LLM Budget {guardrailStyle.label} ({asNumber(cost.percent_budget_used).toFixed(2)}% used)
+                </span>
+              </div>
+            ) : null}
           </div>
           <div className="flex items-center gap-3">
             <div className="rounded-lg border border-slate-300 bg-white p-1">
@@ -1046,7 +1455,8 @@ export default function MissionControlPage() {
                       <Metric label={`Chats (${timeframeLabel})`} value={overview.chats_today} />
                       <Metric label={`Reports (${timeframeLabel})`} value={overview.reports_today} />
                       <Metric label="Avg Response Latency (ms)" value={overview.avg_response_latency_ms} />
-                      <Metric label="Forecast Month-End Cost" value={`$${asNumber(overview.forecast_month_end_cost).toFixed(2)}`} />
+                      <Metric label="Forecast Month-End LLM Spend" value={`$${asNumber(overview.forecast_month_end_llm_spend).toFixed(2)}`} />
+                      <Metric label="Tracked Non-LLM Event Spend (MTD)" value={`$${asNumber(overview.current_month_non_llm_event_spend).toFixed(2)}`} />
                       <Metric
                         label="Pending Campaign Join Requests"
                         value={overview.pending_access_requests}
@@ -1068,9 +1478,9 @@ export default function MissionControlPage() {
                         ]}
                       />
                       <LineChartCard
-                        title={`Cost and Failures (${timeframeLabel})`}
+                        title={`LLM Spend and Failures (${timeframeLabel})`}
                         series={[
-                          { name: "Cost ($)", color: "#b45309", points: overview.timeseries_30d.map((p) => ({ x: safeDateLabel(p.day), y: p.cost })) },
+                          { name: "LLM Spend ($)", color: "#b45309", points: overview.timeseries_30d.map((p) => ({ x: safeDateLabel(p.day), y: p.cost })) },
                           { name: "Failures", color: "#b91c1c", points: overview.timeseries_30d.map((p) => ({ x: safeDateLabel(p.day), y: p.failures })) },
                         ]}
                       />
@@ -1217,30 +1627,247 @@ export default function MissionControlPage() {
 
                 {activeTab === "cost" && (
                   <div className="space-y-4">
+                    {/* Data source: Aggregated display-only total from separate category feeds:
+                        LLM (AnalyticsEvent LLM-only) + Cloud Billing + Qdrant estimate + Fixed SaaS config. */}
+                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                      <div className="mb-3 flex items-center justify-between gap-2">
+                        <p className="text-sm font-semibold">Total Monthly Spend</p>
+                        <span className="text-xs text-slate-500">
+                          Blended view: metered/actual + estimated accrual categories
+                        </span>
+                      </div>
+                      <div className="mb-3 flex items-center gap-2">
+                        <span className={`rounded-full border px-2.5 py-1 text-xs font-semibold ${cloudFreshnessBadgeClass}`}>
+                          {cloudFreshnessBadgeLabel}
+                        </span>
+                        {(!cost.cloud_cost_is_available || cloudBillingLagged) && (
+                          <span className="text-xs text-slate-600">
+                            Total spend may be delayed/incomplete until Cloud billing data catches up.
+                          </span>
+                        )}
+                      </div>
+                      {!cost.cloud_cost_is_available && cost.cloud_cost_unavailable_reason ? (
+                        <div className="mb-3 rounded border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                          Cloud freshness source unavailable: {cost.cloud_cost_unavailable_reason}
+                        </div>
+                      ) : null}
+                      <div className="mb-3 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                        Cloud MTD is billing-export metered and may lag. Qdrant and fixed SaaS MTD are estimated accruals.
+                      </div>
+                      <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+                        <Metric
+                          label="Blended MTD Spend (Actual/Metered + Estimated)"
+                          value={`$${asNumber(cost.current_month_blended_total_spend || cost.current_month_total_spend).toFixed(2)}`}
+                        />
+                        <Metric
+                          label="Actual or Metered MTD"
+                          value={`$${asNumber(cost.current_month_actual_or_metered_spend).toFixed(2)}`}
+                        />
+                        <Metric
+                          label="Estimated Accrual MTD"
+                          value={`$${asNumber(cost.current_month_estimated_accrual_spend).toFixed(2)}`}
+                        />
+                      </div>
+                      <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-1">
+                        <Metric label="Projected Month-End Spend" value={`$${asNumber(cost.projected_month_end_total_spend).toFixed(2)}`} />
+                      </div>
+                      <SimpleTable
+                        emptyLabel="No total spend category breakdown available."
+                        columns={["Category", "Current MTD (Semantics)", "Projected (Month-End)"]}
+                        rows={cost.total_spend_breakdown.map((row) => [
+                          row.category,
+                          `${`$${asNumber(row.current).toFixed(2)}`} (${row.current_semantics === "actual_or_metered_mtd" ? "actual/metered" : "estimated accrual"})`,
+                          `$${asNumber(row.projected).toFixed(2)}`,
+                        ])}
+                      />
+                      <div className="mt-3 rounded border border-slate-200 bg-slate-50 p-3">
+                        <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                          Other Fixed SaaS Composition
+                        </p>
+                        <p className="mb-2 text-xs text-slate-500">
+                          Includes Clerk, Vercel, and Other only. Qdrant Fixed is tracked separately in the total category breakdown.
+                        </p>
+                        <SimpleTable
+                          emptyLabel="No fixed SaaS composition configured."
+                          columns={["Component", "Current MTD (estimated accrual)", "Projected (Month-End)"]}
+                          rows={cost.fixed_saas_component_breakdown.map((row) => [
+                            row.component,
+                            `$${asNumber(row.current_mtd).toFixed(2)}`,
+                            `$${asNumber(row.projected_month_end).toFixed(2)}`,
+                          ])}
+                        />
+                      </div>
+                    </div>
+                    <div className={`rounded-lg border p-4 ${guardrailStyle.panelClass}`}>
+                      {/* Data source: LLM-only spend and budget status from guardrail-compatible
+                          AnalyticsEvent provider/model filters (Gemini/OpenAI family). */}
+                      <div className="mb-3 flex items-center justify-between gap-3">
+                        <p className="text-sm font-semibold text-slate-900">LLM Guardrail Status</p>
+                        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${guardrailStyle.badgeClass}`}>
+                          {guardrailStyle.label}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-5">
+                        <Metric label="Monthly LLM Budget Limit" value={`$${asNumber(cost.monthly_llm_budget_limit).toFixed(2)}`} />
+                        <Metric label="Current Month LLM Spend" value={`$${asNumber(cost.current_month_llm_spend).toFixed(2)}`} />
+                        <Metric label="Projected Month-End LLM Spend" value={`$${asNumber(cost.projected_month_end_llm_spend).toFixed(2)}`} />
+                        <Metric label="Budget Used" value={`${asNumber(cost.percent_budget_used).toFixed(2)}%`} />
+                        <Metric label="Guardrail Status" value={guardrailStyle.label} />
+                      </div>
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                      {/* Data source: LLM-only AnalyticsEvent mapped by source_event_type_raw/source_entity/metadata_json.
+                          Mapping confidence is explicit when event metadata/mode markers are present, otherwise inferred/fallback. */}
+                      <div className="mb-3 flex items-center justify-between gap-2">
+                        <p className="text-sm font-semibold">LLM Cost by Feature</p>
+                        <span className="text-xs text-slate-500">Current month + last 30d</span>
+                      </div>
+                      <p className={`mb-3 text-xs ${showFeatureAttributionNote ? "text-amber-700" : "text-slate-500"}`}>
+                        Attribution confidence (current month): {asNumber(currentMonthFeatureConfidence.explicit_percent).toFixed(1)}%
+                        explicit, {asNumber(currentMonthFeatureConfidence.inferred_or_other_percent).toFixed(1)}% inferred/other.
+                        {showFeatureAttributionNote
+                          ? " A meaningful share is heuristic or Other LLM; treat feature splits as directional."
+                          : ""}
+                      </p>
+                      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                        <div>
+                          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Current Month LLM Spend
+                          </p>
+                          <SimpleTable
+                            emptyLabel="No current-month LLM feature cost data."
+                            columns={["Feature", "Spend", "% of LLM"]}
+                            rows={cost.current_month_llm_cost_by_feature.map((row) => [
+                              row.feature,
+                              `$${asNumber(row.spend).toFixed(2)}`,
+                              `${asNumber(row.percent_of_llm).toFixed(2)}%`,
+                            ])}
+                          />
+                        </div>
+                        <div>
+                          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            Last 30 Days LLM Spend
+                          </p>
+                          <SimpleTable
+                            emptyLabel="No last-30d LLM feature cost data."
+                            columns={["Feature", "Spend", "% of LLM"]}
+                            rows={cost.last_30d_llm_cost_by_feature.map((row) => [
+                              row.feature,
+                              `$${asNumber(row.spend).toFixed(2)}`,
+                              `${asNumber(row.percent_of_llm).toFixed(2)}%`,
+                            ])}
+                          />
+                        </div>
+                      </div>
+                    </div>
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                      <Metric label="Current Month Cost (MTD)" value={`$${asNumber(cost.current_month_cost ?? cost.month_estimated_cost).toFixed(2)}`} />
-                      <Metric label="Average Daily Burn Rate" value={`$${asNumber(cost.average_daily_burn_rate).toFixed(2)} / day`} />
-                      <Metric label="Projected Month-End Cost" value={`$${asNumber(cost.projected_month_end_cost).toFixed(2)}`} />
-                      <Metric label="Last 7d Estimated Cost" value={`$${asNumber(cost.last_7d_estimated_cost).toFixed(2)}`} />
-                      <Metric label="Cost Per Chat" value={`$${asNumber(cost.cost_per_chat).toFixed(4)}`} />
-                      <Metric label="Cost Per Report" value={`$${asNumber(cost.cost_per_report).toFixed(4)}`} />
+                      <Metric label="Current Month LLM Spend (MTD)" value={`$${asNumber(cost.current_month_llm_spend).toFixed(2)}`} />
+                      <Metric label="Avg Daily LLM Burn" value={`$${asNumber(cost.average_daily_burn_rate).toFixed(2)} / day`} />
+                      <Metric label="Projected Month-End LLM Spend" value={`$${asNumber(cost.projected_month_end_llm_spend).toFixed(2)}`} />
+                      <Metric label="Last 7d LLM Spend" value={`$${asNumber(cost.last_7d_estimated_cost).toFixed(2)}`} />
+                      <Metric label="LLM Spend per Chat" value={`$${asNumber(cost.cost_per_chat).toFixed(4)}`} />
+                      <Metric label="LLM Spend per Report" value={`$${asNumber(cost.cost_per_report).toFixed(4)}`} />
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                      {/* Data source: Non-LLM event-attributed operational estimates from AnalyticsEvent.
+                          Kept separate and excluded from total-spend to avoid overlap with Cloud Billing. */}
+                      <p className="mb-2 text-sm font-semibold">Tracked Non-LLM Operational Event Spend</p>
+                      <div className="mb-3 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                        Observability-only signal. Excluded from Total Monthly Spend to prevent overlap with billed Cloud Infrastructure costs.
+                      </div>
+                      <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+                        <Metric label="Current Month Non-LLM Event Spend" value={`$${asNumber(cost.current_month_non_llm_event_spend).toFixed(2)}`} />
+                        <Metric label={`Selected Window Non-LLM Event Spend (${timeframeLabel})`} value={`$${asNumber(cost.window_non_llm_event_spend).toFixed(2)}`} />
+                      </div>
+                      <SimpleTable
+                        emptyLabel="No tracked non-LLM operational event spend."
+                        columns={["Provider", "Spend"]}
+                        rows={cost.tracked_non_llm_event_provider_breakdown_30d.map((row) => [
+                          row.provider,
+                          `$${asNumber(row.cost).toFixed(2)}`,
+                        ])}
+                      />
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                      {/* Data source: Cloud Billing export (BigQuery), independent of AnalyticsEvent costs. */}
+                      <div className="mb-3 flex items-center justify-between gap-2">
+                        <p className="text-sm font-semibold">Cloud Infrastructure</p>
+                        <span className="text-xs text-slate-500">
+                          {asString(cloudInfraCost.billing_source, "") || "billing source unavailable"}
+                        </span>
+                      </div>
+                      <div className="mb-3 text-xs text-slate-500">
+                        <p>
+                          Last updated:{" "}
+                          {cloudInfraCost.last_data_timestamp
+                            ? safeDateTime(cloudInfraCost.last_data_timestamp)
+                            : "Unavailable"}
+                        </p>
+                        <p>
+                          Billing data may lag by{" "}
+                          {cloudInfraCost.last_data_timestamp
+                            ? `${asNumber(cloudInfraCost.billing_data_lag_hours).toFixed(1)} hours`
+                            : "an unknown interval"}.
+                        </p>
+                      </div>
+                      {cloudInfraCostLoading ? (
+                        <p className="text-sm text-slate-500">Loading Cloud Infrastructure cost...</p>
+                      ) : !cloudInfraCost.is_available ? (
+                        <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                          Cloud billing data is currently unavailable.
+                          {cloudInfraCost.unavailable_reason ? ` ${cloudInfraCost.unavailable_reason}` : ""}
+                        </div>
+                      ) : (
+                        <div className="space-y-4">
+                          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                            <Metric label="Current Month Cloud Spend" value={`$${asNumber(cloudInfraCost.current_month_cloud_cost).toFixed(2)}`} />
+                            <Metric label="Projected Month-End Cloud Spend" value={`$${asNumber(cloudInfraCost.projected_month_end_cloud_cost).toFixed(2)}`} />
+                          </div>
+                          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                            <LineChartCard
+                              title="Daily Cloud Cost Trend"
+                              series={[
+                                {
+                                  name: "Cloud Cost",
+                                  color: "#0369a1",
+                                  points: cloudInfraCost.daily_cloud_cost_series.map((p) => ({
+                                    x: safeDateLabel(p.date),
+                                    y: p.cost,
+                                  })),
+                                },
+                              ]}
+                            />
+                            <div className="rounded-lg border border-slate-200 bg-white p-4">
+                              <p className="mb-2 text-sm font-semibold">Cloud Service Breakdown (MTD)</p>
+                              <SimpleTable
+                                emptyLabel="No cloud service breakdown available."
+                                columns={["Service", "Cost"]}
+                                rows={cloudInfraCost.cloud_cost_breakdown.map((row) => [
+                                  row.service,
+                                  `$${asNumber(row.cost).toFixed(2)}`,
+                                ])}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
                     </div>
                     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                       <LineChartCard
-                        title={`Cost Trend (${timeframeLabel})`}
+                        title={`LLM Spend Trend (${timeframeLabel})`}
                         series={[
                           {
-                            name: "Cost",
+                            name: "LLM Spend",
                             color: "#b45309",
                             points: cost.cost_trend_30d.map((p) => ({ x: safeDateLabel(p.day), y: p.cost })),
                           },
                         ]}
                       />
                       <LineChartCard
-                        title="Projected Month-End Cost Curve"
+                        title="Projected Month-End LLM Spend Curve"
                         series={[
                           {
-                            name: "Projected Cost",
+                            name: "Projected LLM Spend",
                             color: "#1d4ed8",
                             points: cost.projected_monthly_curve.map((p) => ({ x: String(p.day), y: p.projected_cost })),
                           },
@@ -1250,7 +1877,7 @@ export default function MissionControlPage() {
                     <div className="rounded-lg border border-slate-200 bg-white p-4">
                       <div className="mb-2 flex items-center gap-2">
                         <BarChart3 className="h-4 w-4 text-slate-500" />
-                        <p className="text-sm font-semibold">Provider Cost Breakdown ({timeframeLabel})</p>
+                        <p className="text-sm font-semibold">Provider LLM Spend Breakdown ({timeframeLabel})</p>
                       </div>
                       {cost.provider_cost_30d?.length ? (
                         <div className="space-y-2">
@@ -1267,7 +1894,7 @@ export default function MissionControlPage() {
                     </div>
                     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                       <div className="rounded-lg border border-slate-200 bg-white p-4">
-                        <p className="mb-2 text-sm font-semibold">Cost by Campaign ({timeframeLabel})</p>
+                        <p className="mb-2 text-sm font-semibold">LLM Spend by Campaign ({timeframeLabel})</p>
                         <SimpleTable
                           emptyLabel="No campaign cost data."
                           columns={["Campaign", "Cost"]}
@@ -1278,7 +1905,7 @@ export default function MissionControlPage() {
                         />
                       </div>
                       <div className="rounded-lg border border-slate-200 bg-white p-4">
-                        <p className="mb-2 text-sm font-semibold">Cost by User ({timeframeLabel})</p>
+                        <p className="mb-2 text-sm font-semibold">LLM Spend by User ({timeframeLabel})</p>
                         <SimpleTable
                           emptyLabel="No user cost data."
                           columns={["User", "Cost"]}
@@ -1289,9 +1916,24 @@ export default function MissionControlPage() {
                         />
                       </div>
                     </div>
-                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                    {/* Data source: live Qdrant collections + stored usage snapshots for trend/projection. */}
+                    <div
+                      className={`rounded-lg border bg-white p-4 ${
+                        qdrantMetrics.warning_state === "warning"
+                          ? "border-amber-300 bg-amber-50/40"
+                          : "border-slate-200"
+                      }`}
+                    >
                       <div className="mb-3 flex items-center justify-between gap-2">
                         <p className="text-sm font-semibold">Qdrant Usage</p>
+                        <span className="text-xs text-slate-500">
+                          Projection confidence:{" "}
+                          {qdrantMetrics.projection_confidence === "high"
+                            ? "High"
+                            : qdrantMetrics.projection_confidence === "low"
+                              ? "Low"
+                              : "Collecting history"}
+                        </span>
                         <button
                           type="button"
                           onClick={() => void fetchQdrantMetrics()}
@@ -1300,17 +1942,106 @@ export default function MissionControlPage() {
                           Refresh Qdrant
                         </button>
                       </div>
+                      {qdrantMetrics.warning_state === "warning" && (
+                        <div className="mb-3 rounded border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+                          Qdrant growth warning: high-confidence projected storage/cost trend is above configured thresholds.
+                        </div>
+                      )}
+                      {qdrantMetrics.projection_available && qdrantMetrics.projection_confidence === "low" && (
+                        <div className="mb-3 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                          Forecast is low-confidence ({qdrantMetrics.projection_snapshot_count} snapshots).
+                          Collecting more daily history before enabling projection-based warnings.
+                        </div>
+                      )}
+                      {!qdrantMetrics.projection_available && (
+                        <div className="mb-3 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                          Collecting history for forecasting: {qdrantMetrics.projection_snapshot_count}/
+                          {qdrantMetrics.projection_min_snapshots_required} daily snapshots.
+                        </div>
+                      )}
                       <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-3">
                         <Metric label="Total Vectors" value={qdrantMetrics.total_vectors} />
                         <Metric
                           label="Estimated Storage"
-                          value={`${qdrantMetrics.campaigns.reduce((sum, row) => sum + asNumber(row.estimated_size_mb), 0).toFixed(2)} MB`}
+                          value={`${asNumber(qdrantMetrics.total_estimated_size_mb).toFixed(2)} MB`}
                         />
                         <Metric
                           label="Estimated Monthly Cost"
                           value={`$${asNumber(qdrantMetrics.estimated_monthly_cost).toFixed(2)}`}
                         />
                       </div>
+                      <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+                        <Metric
+                          label="Current Month Qdrant Spend (estimated accrual)"
+                          value={`$${asNumber(cost.current_month_qdrant_spend).toFixed(2)}`}
+                        />
+                      </div>
+                      <div className="mb-3 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                        Qdrant current-month spend is an accrual estimate from usage/storage projection and is not invoice-backed.
+                      </div>
+                      <div className="mb-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+                        <Metric
+                          label="Projected Next-Month Storage"
+                          value={
+                            qdrantMetrics.projection_available
+                              ? `${asNumber(qdrantMetrics.projected_next_month_storage_mb).toFixed(2)} MB`
+                              : "Unavailable"
+                          }
+                        />
+                        <Metric
+                          label="Projected Next-Month Cost"
+                          value={
+                            qdrantMetrics.projection_available
+                              ? `$${asNumber(qdrantMetrics.projected_next_month_cost).toFixed(2)}`
+                              : "Unavailable"
+                          }
+                        />
+                        <Metric
+                          label="Observed Growth (window)"
+                          value={
+                            qdrantMetrics.projection_available
+                              ? `${asNumber(qdrantMetrics.growth_percent).toFixed(2)}%`
+                              : "Unavailable"
+                          }
+                        />
+                      </div>
+                      <div className="mb-3 text-xs text-slate-500">
+                        Forecast method: {qdrantMetrics.projection_method || "recent-window growth"}; window:{" "}
+                        {qdrantMetrics.projection_window_days_used > 0
+                          ? `${qdrantMetrics.projection_window_days_used} days`
+                          : "insufficient history"}
+                        .
+                      </div>
+                      {!qdrantMetrics.projection_available && qdrantMetrics.projection_unavailable_reason ? (
+                        <div className="mb-3 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                          {qdrantMetrics.projection_unavailable_reason}
+                        </div>
+                      ) : null}
+                      {qdrantMetrics.trend_series.length > 0 && (
+                        <div className="mb-3">
+                          <LineChartCard
+                            title="Qdrant Trend"
+                            series={[
+                              {
+                                name: "Storage (MB)",
+                                color: "#0f766e",
+                                points: qdrantMetrics.trend_series.map((p) => ({
+                                  x: safeDateLabel(p.date),
+                                  y: p.total_estimated_size_mb,
+                                })),
+                              },
+                              {
+                                name: "Estimated Monthly Cost ($)",
+                                color: "#1d4ed8",
+                                points: qdrantMetrics.trend_series.map((p) => ({
+                                  x: safeDateLabel(p.date),
+                                  y: p.estimated_monthly_cost,
+                                })),
+                              },
+                            ]}
+                          />
+                        </div>
+                      )}
                       {qdrantMetricsLoading ? (
                         <p className="text-sm text-slate-500">Loading Qdrant usage...</p>
                       ) : (
@@ -1318,7 +2049,7 @@ export default function MissionControlPage() {
                           emptyLabel="No campaign vector usage available."
                           columns={["Campaign", "Vectors", "Estimated Size (MB)"]}
                           rows={qdrantMetrics.campaigns.map((row) => [
-                            row.campaign_id,
+                            asString(row.campaign_name, row.campaign_id),
                             String(row.vectors),
                             asNumber(row.estimated_size_mb).toFixed(2),
                           ])}
