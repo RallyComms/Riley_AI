@@ -1370,6 +1370,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     conversations.length === 0 &&
     !activeConversationId;
   const showCollapsedRail = isGlobal && !isSidebarOpen;
+  const shouldRenderSidebar = isGlobal || isSidebarOpen;
+  const sidebarWidthClass = isGlobal
+    ? isSidebarOpen
+      ? "w-[260px]"
+      : "w-16"
+    : "w-[260px]";
   const collapsedRailConversations = useMemo(
     () => conversations.slice(0, 8),
     [conversations]
@@ -1583,17 +1589,17 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   return (
     <div
       className={cn(
-        "flex h-full overflow-hidden",
+        "riley-layout flex h-full min-w-0 overflow-hidden",
         isGlobal ? "bg-[#f8f5ef] text-[#1f2a44]" : "bg-slate-950/50 text-white backdrop-blur-sm"
       )}
     >
       {/* Left Sidebar - Chat History */}
-      {(isSidebarOpen || showCollapsedRail) && (
+      {shouldRenderSidebar && (
         <aside
           className={cn(
-            "border-r flex shrink-0 transition-all duration-200",
+            "riley-sidebar border-r flex h-full shrink-0 transition-[width] duration-200 ease-out",
             isGlobal ? "bg-[#f3eee4] border-[#e3dac8]" : "bg-zinc-900/50 border-zinc-800",
-            isSidebarOpen ? "w-[260px]" : "w-16"
+            sidebarWidthClass
           )}
         >
           {showCollapsedRail ? (
@@ -1826,7 +1832,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       )}
 
       {/* Main Area */}
-      <main className="flex-1 flex flex-col min-w-0">
+      <main className="riley-chat-area flex min-w-0 flex-1 flex-col">
         {/* Header with Mode Toggle */}
         <header
           className={cn(
@@ -2099,7 +2105,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         )}
 
         {/* Message Area */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="chat-container flex-1 overflow-y-auto">
           {showWelcome ? (
             /* Empty State */
             <div className="h-full flex flex-col items-center justify-center px-6 py-12">
@@ -2157,7 +2163,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             </div>
           ) : (
             /* Message Stream */
-            <div className={cn("mx-auto w-full px-6 py-8 space-y-6", isGlobal ? "max-w-[700px]" : "max-w-3xl")}>
+            <div className={cn("chat-content mx-auto w-full px-6 py-8 space-y-6", isGlobal ? "max-w-[700px]" : "max-w-3xl")}>
               {messages.map((message, index) => {
                 const isLastMessage = index === messages.length - 1;
                 const isLiveAnimatingAssistant = message.role === "assistant" && message.id === animatingAssistantMessageId;
@@ -2425,7 +2431,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               : "border-t border-zinc-800 bg-slate-950/50 backdrop-blur-sm"
           )}
         >
-          <div className={cn("mx-auto w-full", isGlobal ? "max-w-[700px]" : "max-w-3xl")}>
+          <div className={cn("chat-content mx-auto w-full", isGlobal ? "max-w-[700px]" : "max-w-3xl")}>
             {sendDisabledReason && !isLoading && (
               <div className={cn("mb-2 text-xs text-center", isGlobal ? "text-[#8a90a0]" : "text-zinc-500")}>
                 {sendDisabledReason}
