@@ -3,15 +3,18 @@
 import { useEffect, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
+import { cn } from "@app/lib/utils";
 
 interface TypewriterMarkdownProps {
   content: string;
   onComplete?: () => void;
+  className?: string;
 }
 
 export function TypewriterMarkdown({
   content,
   onComplete,
+  className,
 }: TypewriterMarkdownProps) {
   const [displayedContent, setDisplayedContent] = useState("");
 
@@ -59,7 +62,7 @@ export function TypewriterMarkdown({
   }, [content, onComplete]);
 
   return (
-    <div className="riley-md">
+    <div className={cn("riley-md", className)}>
       <ReactMarkdown remarkPlugins={[remarkBreaks]}>{displayedContent}</ReactMarkdown>
       {displayedContent.length < content.length && (
         <span className="inline-block w-0.5 h-4 bg-amber-400 ml-0.5 animate-pulse align-middle">

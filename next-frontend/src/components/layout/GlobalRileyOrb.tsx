@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
 import { usePathname } from "next/navigation";
-import { Bot, Minus, AlertCircle, Calendar, FileText, MessageCircle, UserPlus } from "lucide-react";
+import { Minus, AlertCircle, Calendar, FileText, MessageCircle, UserPlus } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { motion, AnimatePresence, useMotionValue } from "framer-motion";
 import { apiFetch } from "@app/lib/api";
@@ -299,7 +299,7 @@ export function GlobalRileyOrb() {
                 <div className="relative">
                   <div className="absolute inset-0 animate-pulse rounded-full bg-blue-400/20 blur-md" />
                   <div className="relative flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-600">
-                    <Bot className="h-5 w-5 text-white" />
+                    <span className="text-sm font-semibold text-white">R</span>
                   </div>
                 </div>
                 <div>
@@ -438,7 +438,7 @@ export function GlobalRileyOrb() {
             }}
           />
         )}
-        <Bot className="relative h-6 w-6 text-white" />
+        <span className="relative text-base font-semibold text-white">R</span>
         {/* Alert Badge */}
         {alertCount > 0 && (
           <span className="absolute -top-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full bg-red-500 text-xs font-bold text-white">

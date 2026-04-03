@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { Bot, Sparkles, X, AlertCircle, Calendar, FileText, ChevronUp } from "lucide-react";
+import { X, AlertCircle, Calendar, FileText, ChevronUp } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -86,7 +86,7 @@ export function RileyOrb() {
             ease: "easeInOut",
           }}
         />
-        <Bot className="relative h-6 w-6 text-white" />
+        <span className="relative text-base font-semibold text-white">R</span>
       </motion.button>
 
       {/* Popover Panel - Notification Feed */}
@@ -105,7 +105,7 @@ export function RileyOrb() {
                 <div className="relative">
                   <div className="absolute inset-0 animate-pulse rounded-full bg-blue-400/20 blur-md" />
                   <div className="relative flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-600">
-                    <Bot className="h-5 w-5 text-white" />
+                    <span className="text-sm font-semibold text-white">R</span>
                   </div>
                 </div>
                 <div>

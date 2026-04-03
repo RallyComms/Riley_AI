@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Bot, Sparkles, X, AlertCircle, Calendar, FileText, ChevronUp } from "lucide-react";
+import { X, AlertCircle, Calendar, FileText, ChevronUp } from "lucide-react";
 import { cn } from "@app/lib/utils";
 
 type Notification = {
@@ -60,29 +60,26 @@ export function RileyAssistant() {
       {isExpanded ? (
         /* Expanded View: Full Card - Floating Overlay */
         <div className="absolute top-0 right-0 z-50 w-[400px] rounded-2xl border border-zinc-800 bg-zinc-900/95 backdrop-blur-md shadow-2xl animate-[fadeIn_0.2s_ease-out,zoomIn_0.2s_ease-out]">
-          {/* Header with Bot Icon */}
+          {/* Header with Riley avatar */}
           <div className="flex items-center gap-3 border-b border-zinc-800 bg-zinc-900/50 px-5 py-4">
             <div className="relative">
               <div className="absolute inset-0 animate-pulse rounded-full bg-blue-400/20 blur-md" />
               <div className="relative flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 shadow-sm">
-                <Bot className="h-5 w-5 text-white" aria-hidden="true" />
+                <span className="text-sm font-semibold text-white">R</span>
               </div>
             </div>
             <div className="flex-1">
               <h3 className="text-sm font-semibold text-zinc-100">Riley Assistant</h3>
               <p className="text-xs text-zinc-400">Proactive Intelligence Feed</p>
             </div>
-            <div className="flex items-center gap-2">
-              <Sparkles className="h-4 w-4 text-blue-400" aria-hidden="true" />
-              <button
-                type="button"
-                onClick={() => setIsExpanded(false)}
-                className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
-                aria-label="Minimize"
-              >
-                <ChevronUp className="h-4 w-4" aria-hidden="true" />
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => setIsExpanded(false)}
+              className="rounded-lg p-1.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100 transition-colors"
+              aria-label="Minimize"
+            >
+              <ChevronUp className="h-4 w-4" aria-hidden="true" />
+            </button>
           </div>
 
           {/* Notifications Feed - Read Only */}
@@ -145,13 +142,12 @@ export function RileyAssistant() {
           <div className="relative">
             <div className="absolute inset-0 animate-pulse rounded-full bg-blue-400/20 blur-sm" />
             <div className="relative flex h-6 w-6 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-indigo-600">
-              <Bot className="h-3.5 w-3.5 text-white" aria-hidden="true" />
+                <span className="text-[10px] font-semibold text-white">R</span>
             </div>
           </div>
           <span className="text-sm font-medium text-zinc-300">
             Riley is active ({alertCount} alert{alertCount !== 1 ? "s" : ""})
           </span>
-          <Sparkles className="h-3.5 w-3.5 text-blue-400" aria-hidden="true" />
         </button>
       )}
 
@@ -164,7 +160,7 @@ export function RileyAssistant() {
           >
             <div className="flex items-center justify-between border-b border-zinc-800 bg-zinc-900/50 px-5 py-4">
               <div className="flex items-center gap-2">
-                <Bot className="h-5 w-5 text-blue-400" aria-hidden="true" />
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-blue-500 text-[11px] font-semibold text-white" aria-hidden="true">R</span>
                 <h3 className="text-sm font-semibold text-zinc-100">Riley Summary</h3>
               </div>
               <button

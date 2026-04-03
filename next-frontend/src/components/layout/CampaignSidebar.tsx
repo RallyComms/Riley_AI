@@ -14,7 +14,6 @@ import {
   Target,
   ChevronLeft,
   ChevronRight,
-  Sparkles,
   MessageCircle,
 } from "lucide-react";
 import { UserButton } from "@clerk/nextjs";
@@ -81,7 +80,11 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
     {
       name: "Riley AI",
       href: `/campaign/${campaignId}/riley`,
-      icon: <Sparkles className="h-5 w-5" />,
+      icon: (
+        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-amber-400/20 text-[11px] font-semibold text-amber-300">
+          R
+        </span>
+      ),
     },
     {
       name: "Conversations",

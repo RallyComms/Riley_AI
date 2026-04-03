@@ -3,7 +3,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { useParams } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
-import { Sparkles, X } from "lucide-react";
+import { X } from "lucide-react";
 import { RileyContextChat, getRileyTitle } from "@app/components/campaign/RileyContextChat";
 import { KanbanBoard } from "@app/components/campaign/KanbanBoard";
 import { DocumentViewer } from "@app/components/ui/DocumentViewer";
@@ -319,7 +319,7 @@ export default function MessagingPage() {
               onClick={() => setIsChatOpen(true)}
               className="flex items-center gap-2 text-amber-500 hover:bg-zinc-900 px-4 py-2 rounded-md transition-colors"
             >
-              <Sparkles className="w-4 h-4" />
+              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-amber-500/20 text-[9px] font-semibold text-amber-400">R</span>
               <span>Ask Riley</span>
             </button>
           )}
@@ -348,7 +348,7 @@ export default function MessagingPage() {
           {/* Header with CLOSE Button */}
           <div className="h-16 flex items-center justify-between px-4 border-b border-zinc-800">
             <span className="font-semibold text-amber-500 flex items-center gap-2">
-              <Sparkles className="w-4 h-4" /> {getRileyTitle("messaging")}
+              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-amber-500/20 text-[9px] font-semibold text-amber-400">R</span> {getRileyTitle("messaging")}
             </span>
             <button
               onClick={() => setIsChatOpen(false)}

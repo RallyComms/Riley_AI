@@ -1,6 +1,6 @@
 "use client";
 
-import { Plus, Globe, Sparkles } from "lucide-react";
+import { Plus, Globe } from "lucide-react";
 import Link from "next/link";
 import { cn } from "@app/lib/utils";
 
@@ -69,7 +69,9 @@ export function OpsDock({ onInitialize, onDirectory }: OpsDockProps) {
           )}
           aria-label="Talk to Global HQ"
         >
-          <Sparkles className="h-5 w-5" />
+          <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-amber-400/20 text-[11px] font-semibold text-amber-300">
+            R
+          </span>
           {/* Tooltip */}
           <div className="absolute left-full ml-3 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
             <div className="rounded-lg border border-zinc-800 bg-zinc-900/95 backdrop-blur-sm px-3 py-1.5 text-xs font-medium text-zinc-100 whitespace-nowrap shadow-lg">

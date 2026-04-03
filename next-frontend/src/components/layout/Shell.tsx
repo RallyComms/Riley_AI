@@ -3,7 +3,7 @@
 import { ReactNode, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, MessageSquare, Search, FileText, Home, Sparkles, X } from "lucide-react";
+import { LayoutDashboard, MessageSquare, Search, FileText, Home, X } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { NotificationBell } from "@app/components/ui/NotificationBell";
 import { RileyOrb } from "@app/components/ui/RileyOrb";
@@ -130,7 +130,9 @@ export function Shell({ children }: { children: ReactNode }) {
                   : "bg-slate-100 text-slate-700 hover:bg-slate-200"
               )}
             >
-              <Sparkles className="h-4 w-4" />
+              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-amber-400/20 text-[9px] font-semibold text-amber-500">
+                R
+              </span>
               Ask Riley
             </button>
             <NotificationBell />
@@ -170,7 +172,9 @@ export function Shell({ children }: { children: ReactNode }) {
               {/* Chat Header */}
               <div className="flex h-16 items-center justify-between border-b border-slate-200 bg-slate-50 px-6">
                 <div className="flex items-center gap-2">
-                  <Sparkles className="h-5 w-5 text-amber-500" />
+                  <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-amber-400/20 text-[11px] font-semibold text-amber-500">
+                    R
+                  </span>
                   <h2 className="text-lg font-semibold text-slate-900">Riley Assistant</h2>
                 </div>
                 <button
