@@ -2162,7 +2162,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             </div>
           ) : (
             /* Message Stream */
-            <div className={cn("chat-content mx-auto w-full px-6 py-8 space-y-6", isGlobal ? "max-w-[700px]" : "max-w-3xl")}>
+            <div
+              className={cn(
+                "chat-content w-full px-6 py-8 space-y-6",
+                isGlobal ? "max-w-[700px]" : "mx-auto max-w-3xl"
+              )}
+            >
               {messages.map((message, index) => {
                 const isLastMessage = index === messages.length - 1;
                 const isLiveAnimatingAssistant = message.role === "assistant" && message.id === animatingAssistantMessageId;
@@ -2430,7 +2435,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               : "border-t border-zinc-800 bg-slate-950/50 backdrop-blur-sm"
           )}
         >
-          <div className={cn("chat-content mx-auto w-full", isGlobal ? "max-w-[700px]" : "max-w-3xl")}>
+          <div
+            className={cn(
+              "chat-content w-full",
+              isGlobal ? "max-w-[700px] px-6" : "mx-auto max-w-3xl"
+            )}
+          >
             {sendDisabledReason && !isLoading && (
               <div className={cn("mb-2 text-xs text-center", isGlobal ? "text-[#8a90a0]" : "text-zinc-500")}>
                 {sendDisabledReason}
