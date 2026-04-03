@@ -1392,7 +1392,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         key={conv.id}
         className={cn(
           "w-full rounded-lg transition-colors relative group",
-          nested && "ml-4",
           isActive
             ? isGlobal
               ? "bg-[#efe7d8] border border-[#e3dac8]"
@@ -1418,7 +1417,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               setActiveConversationId(conv.id);
             }
           }}
-          className="w-full text-left p-3 cursor-pointer"
+          className={cn("w-full text-left p-3 cursor-pointer", nested && "pl-7")}
         >
           {isRowRenaming ? (
             <div className="flex items-center gap-2">
@@ -1597,7 +1596,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       {shouldRenderSidebar && (
         <aside
           className={cn(
-            "riley-sidebar border-r flex h-full shrink-0 transition-[width] duration-200 ease-out",
+            "riley-sidebar border-r flex h-full shrink-0 overflow-hidden transition-[width] duration-200 ease-out",
             isGlobal ? "bg-[#f3eee4] border-[#e3dac8]" : "bg-zinc-900/50 border-zinc-800",
             sidebarWidthClass
           )}
@@ -1708,7 +1707,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           </div>
 
           {/* Conversation List */}
-          <div className="flex-1 overflow-y-auto p-3 space-y-4">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-4">
             {isCreatingProject && (
               <div className={cn("rounded-lg border p-2", isGlobal ? "border-[#d8d0bf] bg-white" : "border-zinc-700 bg-zinc-900/60")}>
                 <input
