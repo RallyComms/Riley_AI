@@ -1596,7 +1596,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       {shouldRenderSidebar && (
         <aside
           className={cn(
-            "riley-sidebar border-r flex h-full shrink-0 overflow-hidden transition-[width] duration-200 ease-out",
+            "riley-sidebar border-r flex flex-col h-full shrink-0 overflow-hidden transition-[width] duration-200 ease-out",
             isGlobal ? "bg-[#f3eee4] border-[#e3dac8]" : "bg-zinc-900/50 border-zinc-800",
             sidebarWidthClass
           )}
@@ -1659,7 +1659,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           ) : (
           <>
           {/* Sidebar Header */}
-          <div className={cn("p-4 border-b flex items-center justify-between", isGlobal ? "border-[#e3dac8]" : "border-zinc-800")}>
+          <div className={cn("shrink-0 p-4 border-b flex items-center justify-between", isGlobal ? "border-[#e3dac8]" : "border-zinc-800")}>
             <div className="flex-1 mr-2 flex items-center gap-2">
               <div className="flex-1 grid grid-cols-2 gap-2">
                 <button
@@ -1707,7 +1707,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           </div>
 
           {/* Conversation List */}
-          <div className="flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-4">
+          <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-4">
             {isCreatingProject && (
               <div className={cn("rounded-lg border p-2", isGlobal ? "border-[#d8d0bf] bg-white" : "border-zinc-700 bg-zinc-900/60")}>
                 <input
