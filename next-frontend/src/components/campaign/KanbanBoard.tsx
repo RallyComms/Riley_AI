@@ -37,37 +37,29 @@ type ColumnType = "Draft" | "Needs Review" | "In Review" | "Completed";
 interface Column {
   id: ColumnType;
   label: string;
-  emoji: string;
-  borderColor: string;
-  bgGlow?: string;
+  accentDot: string;
 }
 
 const columns: Column[] = [
   {
     id: "Draft",
     label: "Draft",
-    emoji: "📝",
-    borderColor: "border-l-4 border-zinc-700",
+    accentDot: "bg-[#9aa3b5]",
   },
   {
     id: "Needs Review",
     label: "Needs Review",
-    emoji: "🔍",
-    borderColor: "border-l-4 border-yellow-500",
-    bgGlow: "bg-yellow-500/5",
+    accentDot: "bg-[#d4ad47]",
   },
   {
     id: "In Review",
     label: "In Review",
-    emoji: "👀",
-    borderColor: "border-l-4 border-amber-400",
-    bgGlow: "bg-amber-500/5",
+    accentDot: "bg-[#6b89b0]",
   },
   {
     id: "Completed",
     label: "Completed",
-    emoji: "✅",
-    borderColor: "border-l-4 border-emerald-500",
+    accentDot: "bg-[#5f987a]",
   },
 ];
 
@@ -128,36 +120,42 @@ function KanbanCardComponent({ card, onClick, onManageAssignees }: KanbanCardCom
       {...listeners}
       onClick={handleClick}
       className={cn(
-        "cursor-grab active:cursor-grabbing rounded-lg border border-slate-700 bg-slate-900 p-4 shadow-lg transition-all hover:shadow-xl",
-        isDragging && "scale-105 ring-2 ring-amber-400/50 shadow-2xl"
+        "cursor-grab active:cursor-grabbing rounded-xl border border-[#e5ddce] bg-white p-4 shadow-sm transition-all hover:border-[#d8cfbb] hover:shadow-md",
+        isDragging && "scale-105 ring-2 ring-[#d4ad47]/35 shadow-lg"
       )}
     >
       {/* Card Header */}
       <div className="mb-3 flex items-start gap-2">
         <FileIcon className={cn("h-4 w-4 flex-shrink-0 mt-0.5", iconColor)} aria-hidden="true" />
-        <h4 className="flex-1 text-sm font-medium text-zinc-100 break-words">{card.name}</h4>
+        <h4 className="flex-1 text-sm font-medium text-[#1f2a44] break-words leading-snug">{card.name}</h4>
       </div>
 
       {/* Team Avatars */}
       <div className="flex items-center gap-2">
-        <div className="flex -space-x-2">
-          {card.assignees.map((initials, idx) => (
-            <div
-              key={idx}
-              className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-zinc-800 bg-zinc-700 text-xs font-medium text-zinc-100"
-              title={initials}
-            >
-              {initials}
-            </div>
-          ))}
-        </div>
+        {card.assignees.length > 0 ? (
+          <div className="flex -space-x-2">
+            {card.assignees.map((initials, idx) => (
+              <div
+                key={idx}
+                className="flex h-7 w-7 items-center justify-center rounded-full border-2 border-white bg-[#ece6d9] text-xs font-medium text-[#1f2a44]"
+                title={initials}
+              >
+                {initials}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <span className="rounded-full border border-[#e5ddce] bg-[#f9f7f2] px-2 py-0.5 text-[11px] text-[#8a90a0]">
+            Unassigned
+          </span>
+        )}
         {onManageAssignees && (
           <button
             onClick={(e) => {
               e.stopPropagation();
               onManageAssignees(card);
             }}
-            className="flex h-7 w-7 items-center justify-center rounded-full border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-100 transition-colors flex-shrink-0"
+            className="flex h-7 w-7 items-center justify-center rounded-full border border-[#d8d0bf] bg-white text-[#6f788a] hover:bg-[#f1ece2] hover:text-[#1f2a44] transition-colors flex-shrink-0"
             aria-label="Manage assignees"
             title="Manage team"
           >
@@ -183,38 +181,37 @@ function ColumnComponent({ column, cards, onCardClick, onManageAssignees }: Colu
 
   const cardIds = cards.map((card) => card.id);
 
-  const hasCards = cards.length > 0;
-
   return (
     <div
       ref={setNodeRef}
-      className={cn(
-        "flex flex-col min-w-[320px] max-h-full rounded-xl border-l-4 p-4 flex-shrink-0 bg-[#0b1120] border border-slate-800 shadow-xl",
-        hasCards
-          ? "border-l-amber-400 bg-amber-400/5"
-          : "border-l-slate-800"
-      )}
+      className="flex h-full max-h-full min-w-[300px] flex-shrink-0 flex-col rounded-xl border border-[#e5ddce] bg-[#fcfbf8] p-4 shadow-sm"
     >
       {/* Column Header */}
-      <div className="mb-4 flex items-center gap-2 flex-shrink-0 bg-transparent">
-        <span className="text-lg">{column.emoji}</span>
-        <h3 className="text-sm font-semibold text-zinc-100">{column.label}</h3>
-        <span className="ml-auto rounded-full bg-zinc-800/60 px-2 py-0.5 text-xs font-medium text-zinc-400">
+      <div className="mb-4 flex items-center gap-2 flex-shrink-0">
+        <span className={cn("h-2 w-2 rounded-full", column.accentDot)} />
+        <h3 className="text-sm font-semibold text-[#1f2a44]">{column.label}</h3>
+        <span className="ml-auto rounded-full bg-[#ece6d9] px-2 py-0.5 text-xs font-medium text-[#6f788a]">
           {cards.length}
         </span>
       </div>
 
       {/* Cards */}
       <SortableContext items={cardIds} strategy={verticalListSortingStrategy}>
-        <div className="flex-1 space-y-3 overflow-y-auto overflow-x-hidden scrollbar-thin min-h-0" style={{ WebkitOverflowScrolling: "touch" }}>
-          {cards.map((card) => (
-            <KanbanCardComponent 
-              key={card.id} 
-              card={card} 
-              onClick={() => onCardClick(card)}
-              onManageAssignees={onManageAssignees}
-            />
-          ))}
+        <div className="flex-1 space-y-3 overflow-y-auto overflow-x-hidden min-h-0 pr-1" style={{ WebkitOverflowScrolling: "touch" }}>
+          {cards.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-[#e3dac8] bg-white/60 px-3 py-4 text-xs text-[#8a90a0]">
+              No items in this column.
+            </div>
+          ) : (
+            cards.map((card) => (
+              <KanbanCardComponent
+                key={card.id}
+                card={card}
+                onClick={() => onCardClick(card)}
+                onManageAssignees={onManageAssignees}
+              />
+            ))
+          )}
         </div>
       </SortableContext>
     </div>
@@ -317,27 +314,37 @@ export function KanbanBoard({ cards, onStatusChange, onCardClick, onManageAssign
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
       >
-        <div className="flex h-full overflow-x-auto overflow-y-hidden gap-6 p-6 min-w-0 scrollbar-thin" style={{ WebkitOverflowScrolling: "touch" }}>
-          {columns.map((column) => (
-            <ColumnComponent
-              key={column.id}
-              column={column}
-              cards={cardsByStatus[column.id] || []}
-              onCardClick={handleCardClick}
-              onManageAssignees={onManageAssignees}
-            />
-          ))}
+        <div className="relative h-full">
+          <div className="flex h-full min-w-0 gap-5 overflow-x-auto overflow-y-hidden pb-2 pr-2" style={{ WebkitOverflowScrolling: "touch" }}>
+            {columns.map((column) => (
+              <ColumnComponent
+                key={column.id}
+                column={column}
+                cards={cardsByStatus[column.id] || []}
+                onCardClick={handleCardClick}
+                onManageAssignees={onManageAssignees}
+              />
+            ))}
+          </div>
+
+          {cards.length === 0 ? (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-6">
+              <div className="rounded-lg border border-dashed border-[#dfd5c3] bg-[#fcfbf8]/90 px-4 py-3 text-sm text-[#8a90a0]">
+                No cards yet. Items will appear here as documents and workflows progress.
+              </div>
+            </div>
+          ) : null}
         </div>
 
         <DragOverlay>
           {activeCard ? (
-            <div className="rounded-lg border border-zinc-700/50 bg-zinc-800/80 backdrop-blur-sm p-4 shadow-2xl">
+            <div className="rounded-xl border border-[#d8cfbb] bg-white/95 backdrop-blur-sm p-4 shadow-lg">
               <div className="mb-3 flex items-start gap-2">
                 {(() => {
                   const { icon: FileIcon, color } = getFileIcon(activeCard.type);
                   return <FileIcon className={cn("h-4 w-4 flex-shrink-0 mt-0.5", color)} />;
                 })()}
-                <h4 className="flex-1 text-sm font-medium text-zinc-100">{activeCard.name}</h4>
+                <h4 className="flex-1 text-sm font-medium text-[#1f2a44]">{activeCard.name}</h4>
               </div>
             </div>
           ) : null}

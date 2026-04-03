@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
 import { X } from "lucide-react";
-import { RileyContextChat, getRileyTitle } from "@app/components/campaign/RileyContextChat";
+import { RileyContextChat } from "@app/components/campaign/RileyContextChat";
 import { KanbanBoard } from "@app/components/campaign/KanbanBoard";
 import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { AssignmentModal } from "@app/components/campaign/AssignmentModal";
@@ -87,6 +87,27 @@ export default function StrategyPage() {
   const [campaignMembers, setCampaignMembers] = useState<
     Array<{ user_id: string; display_name: string }>
   >([]);
+
+  useEffect(() => {
+    if (!isChatOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsChatOpen(false);
+      }
+    };
+    const shouldLockBody = window.innerWidth < 1024;
+    const previousOverflow = document.body.style.overflow;
+    if (shouldLockBody) {
+      document.body.style.overflow = "hidden";
+    }
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.removeEventListener("keydown", handleEscape);
+      if (shouldLockBody) {
+        document.body.style.overflow = previousOverflow;
+      }
+    };
+  }, [isChatOpen]);
 
   // Fetch files from backend and filter by Strategy tag
   useEffect(() => {
@@ -277,27 +298,34 @@ export default function StrategyPage() {
   };
 
   return (
-    <div className="flex h-full relative">
-      {/* MIDDLE: Kanban Board */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <header className="flex items-center justify-between p-6 border-b border-zinc-800">
-          <h1 className="text-2xl font-bold text-zinc-100">Strategy Workspace</h1>
-          {!isChatOpen && (
-            <button
-              onClick={() => setIsChatOpen(true)}
-              className="flex items-center gap-2 text-amber-500 hover:bg-zinc-900 px-4 py-2 rounded-md transition-colors"
-            >
-              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-amber-500/20 text-[9px] font-semibold text-amber-400">R</span>
-              <span>Ask Riley</span>
-            </button>
-          )}
+    <div className="relative flex h-full min-h-0 bg-[#f7f5ef]">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex items-end justify-between border-b border-[#e5ddce] px-6 py-5 lg:px-8">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-[#1f2a44]">Strategy</h1>
+            <p className="mt-1 text-sm text-[#6f788a]">
+              Build and refine campaign strategy across the team.
+            </p>
+          </div>
+          <button
+            onClick={() => setIsChatOpen((prev) => !prev)}
+            className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${
+              isChatOpen
+                ? "border-[#ccb67d] bg-[#f2ebd6] text-[#1f2a44]"
+                : "border-[#d8d0bf] bg-white text-[#1f2a44] hover:bg-[#f1ece2]"
+            }`}
+            aria-expanded={isChatOpen}
+            aria-controls="strategy-riley-panel"
+          >
+            <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#eadfb7] text-[11px] font-semibold text-[#6d560f]">R</span>
+            Ask Riley
+          </button>
         </header>
 
-        {/* Scrollable Board Area */}
-        <div className="flex-1 overflow-x-auto overflow-y-hidden p-6">
+        <div className="flex-1 overflow-x-auto overflow-y-hidden px-6 py-5 lg:px-8">
           {isLoading ? (
             <div className="flex items-center justify-center h-full">
-              <p className="text-zinc-500">Loading files...</p>
+              <p className="text-sm text-[#8a90a0]">Loading files...</p>
             </div>
           ) : (
             <KanbanBoard 
@@ -310,29 +338,48 @@ export default function StrategyPage() {
         </div>
       </div>
 
-      {/* RIGHT: Riley Chat */}
       {isChatOpen && (
-        <div className="w-[400px] border-l border-zinc-800 bg-zinc-900/50 backdrop-blur-sm flex flex-col h-full shrink-0">
-          <div className="h-16 flex items-center justify-between px-4 border-b border-zinc-800">
-            <span className="font-semibold text-amber-500 flex items-center gap-2">
-              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-amber-500/20 text-[9px] font-semibold text-amber-400">R</span> {getRileyTitle("strategy")}
-            </span>
-            <button
-              onClick={() => setIsChatOpen(false)}
-              className="text-zinc-500 hover:text-white p-2 transition-colors"
-            >
-              <X className="w-5 h-5" />
-            </button>
+        <>
+          <button
+            type="button"
+            className="fixed inset-0 z-30 bg-[#1f2a44]/20 backdrop-blur-[1px] lg:hidden"
+            aria-label="Close Ask Riley panel backdrop"
+            onClick={() => setIsChatOpen(false)}
+          />
+          <aside
+            id="strategy-riley-panel"
+            className="fixed inset-y-0 right-0 z-40 w-[94vw] max-w-[400px] border-l border-[#d8d0bf] bg-[#fcfbf8] shadow-xl shadow-[#1f2a44]/10 lg:static lg:z-auto lg:h-full lg:w-[360px] lg:max-w-none lg:shadow-none"
+          >
+          <div className="flex h-full flex-col">
+            <div className="flex h-16 items-center justify-between border-b border-[#e5ddce] px-4">
+              <span className="inline-flex items-center gap-2 text-sm font-semibold text-[#1f2a44]">
+                <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#eadfb7] text-[11px] font-semibold text-[#6d560f]">R</span>
+                Ask Riley
+              </span>
+              <button
+                onClick={() => setIsChatOpen(false)}
+                className="rounded-md p-1.5 text-[#6f788a] transition-colors hover:bg-[#f1ece2] hover:text-[#1f2a44]"
+                aria-label="Close Ask Riley panel"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="border-b border-[#e5ddce] bg-white/80 px-4 py-3">
+              <p className="text-sm leading-relaxed text-[#1f2a44]">
+                Welcome to Riley Strategy. I can help you analyze strategic frameworks, review supporting documents, and think through campaign direction. I&apos;m getting much stronger in Riley V2.
+              </p>
+            </div>
+            <div className="flex-1 overflow-hidden">
+              <RileyContextChat
+                mode="strategy"
+                contextKey="strategy"
+                campaignId={campaignId}
+                onViewAsset={handleViewAsset}
+              />
+            </div>
           </div>
-          <div className="flex-1 overflow-hidden">
-            <RileyContextChat 
-              mode="strategy" 
-              contextKey="strategy" 
-              campaignId={campaignId}
-              onViewAsset={handleViewAsset}
-            />
-          </div>
-        </div>
+          </aside>
+        </>
       )}
 
       {/* Document Viewer Modal */}
