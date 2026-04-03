@@ -57,34 +57,34 @@ const allTags: AssetTag[] = ["Messaging", "Research", "Strategy", "Media", "Pitc
 
 const tagColors: Record<AssetTag, { bg: string; text: string; border: string }> = {
   Messaging: {
-    bg: "bg-purple-500/10",
-    text: "text-purple-400",
-    border: "border-purple-500/20",
+    bg: "bg-purple-500/12",
+    text: "text-purple-700",
+    border: "border-purple-500/25",
   },
   Research: {
-    bg: "bg-cyan-500/10",
-    text: "text-cyan-400",
-    border: "border-cyan-500/20",
+    bg: "bg-cyan-500/12",
+    text: "text-cyan-700",
+    border: "border-cyan-500/25",
   },
   Strategy: {
-    bg: "bg-amber-500/10",
-    text: "text-amber-400",
-    border: "border-amber-500/20",
+    bg: "bg-amber-500/12",
+    text: "text-amber-700",
+    border: "border-amber-500/25",
   },
   Media: {
-    bg: "bg-pink-500/10",
-    text: "text-pink-400",
-    border: "border-pink-500/20",
+    bg: "bg-pink-500/12",
+    text: "text-pink-700",
+    border: "border-pink-500/25",
   },
   Pitch: {
-    bg: "bg-orange-500/10",
-    text: "text-orange-400",
-    border: "border-orange-500/20",
+    bg: "bg-orange-500/12",
+    text: "text-orange-700",
+    border: "border-orange-500/25",
   },
   Other: {
-    bg: "bg-slate-500/10",
-    text: "text-slate-400",
-    border: "border-slate-500/20",
+    bg: "bg-slate-500/12",
+    text: "text-slate-700",
+    border: "border-slate-500/25",
   },
 };
 
@@ -143,33 +143,33 @@ function formatFilename(name: string): string {
 function ingestionBadgeClass(status?: Asset["ingestionStatus"]): string {
   switch (status) {
     case "queued":
-      return "border-amber-500/30 bg-amber-500/10 text-amber-300";
+      return "border-amber-500/30 bg-amber-500/12 text-amber-700";
     case "processing":
-      return "border-blue-500/30 bg-blue-500/10 text-blue-300";
+      return "border-blue-500/30 bg-blue-500/12 text-blue-700";
     case "indexed":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
+      return "border-emerald-500/30 bg-emerald-500/12 text-emerald-700";
     case "failed":
     case "low_text":
-      return "border-rose-500/30 bg-rose-500/10 text-rose-300";
+      return "border-rose-500/30 bg-rose-500/12 text-rose-700";
     case "ocr_needed":
-      return "border-purple-500/30 bg-purple-500/10 text-purple-300";
+      return "border-purple-500/30 bg-purple-500/12 text-purple-700";
     case "partial":
-      return "border-orange-500/30 bg-orange-500/10 text-orange-300";
+      return "border-orange-500/30 bg-orange-500/12 text-orange-700";
     default:
-      return "border-zinc-700 bg-zinc-800/40 text-zinc-400";
+      return "border-[#d8d0bf] bg-[#f5f1e8] text-[#6f788a]";
   }
 }
 
 function multimodalBadgeClass(kind: "ocr_processed" | "vision_processed" | "partial"): string {
   switch (kind) {
     case "ocr_processed":
-      return "border-cyan-500/30 bg-cyan-500/10 text-cyan-300";
+      return "border-cyan-500/30 bg-cyan-500/12 text-cyan-700";
     case "vision_processed":
-      return "border-fuchsia-500/30 bg-fuchsia-500/10 text-fuchsia-300";
+      return "border-fuchsia-500/30 bg-fuchsia-500/12 text-fuchsia-700";
     case "partial":
-      return "border-orange-500/30 bg-orange-500/10 text-orange-300";
+      return "border-orange-500/30 bg-orange-500/12 text-orange-700";
     default:
-      return "border-zinc-700 bg-zinc-800/40 text-zinc-400";
+      return "border-[#d8d0bf] bg-[#f5f1e8] text-[#6f788a]";
   }
 }
 
@@ -221,12 +221,12 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
   };
 
   return (
-    <tr className="group border-b border-zinc-800/50 last:border-0 transition-colors hover:bg-zinc-800/50">
+    <tr className="group border-b border-[#efe8da] last:border-0 transition-colors hover:bg-[#f5f1e8]">
       {/* Icon */}
       <td className="px-6 py-4">
         <div className="flex items-center justify-center">
           {asset.status === "processing" ? (
-            <Loader2 className="h-5 w-5 animate-spin text-zinc-400" />
+            <Loader2 className="h-5 w-5 animate-spin text-[#8a90a0]" />
           ) : (
             <FileIcon className={cn("h-5 w-5", iconColor)} />
           )}
@@ -238,7 +238,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
         <button
           type="button"
           onClick={() => onClick?.(asset)}
-          className="font-medium text-zinc-100 hover:text-amber-400 transition-colors cursor-pointer text-left max-w-[300px] truncate block"
+          className="block max-w-[180px] cursor-pointer truncate text-left font-medium text-[#1f2a44] transition-colors hover:text-[#6d560f] sm:max-w-[240px] lg:max-w-[320px]"
           title={asset.name} // Show full name on hover
         >
           {formatFilename(asset.name)}
@@ -278,8 +278,8 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
                 className={cn(
                   "inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs transition-opacity hover:text-zinc-100",
                   asset.tags.length === 0
-                    ? "border border-zinc-700/50 bg-zinc-800/30 text-zinc-400 hover:border-zinc-600 hover:bg-zinc-800/50"
-                    : "text-zinc-500 opacity-0 group-hover:opacity-100"
+                    ? "border border-[#d8d0bf] bg-white text-[#6f788a] hover:border-[#cfc5b1] hover:bg-[#f1ece2]"
+                    : "text-[#8a90a0] opacity-0 group-hover:opacity-100"
                 )}
               >
                 <Plus className="h-3 w-3" />
@@ -290,7 +290,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
               <Popover.Content
                 sideOffset={5}
                 align="start"
-                className="z-50 w-48 rounded-lg border border-zinc-700 bg-zinc-900/95 backdrop-blur-md p-2 shadow-xl"
+                className="z-50 w-48 rounded-lg border border-[#d8d0bf] bg-[#fcfbf8] p-2 shadow-xl"
               >
                 <div className="space-y-1">
                   {allTags.map((tag) => {
@@ -298,7 +298,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
                     return (
                       <label
                         key={tag}
-                        className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800"
+                        className="flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm text-[#1f2a44] transition-colors hover:bg-[#f1ece2]"
                       >
                         <div className="relative flex h-4 w-4 items-center justify-center">
                           <input
@@ -316,7 +316,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
                                     getTagColor(tag).bg,
                                     "border-transparent"
                                   )
-                                : "border-zinc-600 bg-transparent"
+                                : "border-[#cfc5b1] bg-transparent"
                             )}
                           >
                             {isChecked && (
@@ -329,7 +329,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
                     );
                   })}
                 </div>
-                <Popover.Arrow className="fill-zinc-700" />
+                <Popover.Arrow className="fill-[#d8d0bf]" />
               </Popover.Content>
             </Popover.Portal>
           </Popover.Root>
@@ -338,9 +338,9 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
 
       {/* Meta */}
       <td className="px-6 py-4">
-        <div className="space-y-0.5">
-          <div className="text-sm text-zinc-500" suppressHydrationWarning>{formatDate(asset.uploadDate)}</div>
-          <div className="text-xs text-zinc-500">{asset.size} • {asset.uploader}</div>
+          <div className="space-y-0.5">
+          <div className="text-sm text-[#6f788a]" suppressHydrationWarning>{formatDate(asset.uploadDate)}</div>
+          <div className="text-xs text-[#8a90a0]">{asset.size} • {asset.uploader}</div>
           {asset.ingestionStatus && (
             <span
               className={cn(
@@ -398,10 +398,10 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
               type="button"
               onClick={() => onAIEnabledChange(asset.id, !asset.aiEnabled)}
               className={cn(
-                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:ring-offset-2 focus:ring-offset-zinc-900",
+                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:ring-offset-2 focus:ring-offset-[#fcfbf8]",
                 asset.aiEnabled
                   ? "bg-emerald-500/20 border border-emerald-500/30"
-                  : "bg-zinc-800 border border-zinc-700"
+                  : "bg-[#ece6d9] border border-[#d8d0bf]"
               )}
               aria-label={asset.aiEnabled ? "Disable AI context" : "Enable AI context"}
             >
@@ -415,7 +415,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
                 {asset.aiEnabled ? (
                   <Brain className="h-3 w-3 text-emerald-400" />
                 ) : (
-                  <Brain className="h-3 w-3 text-zinc-500" />
+                  <Brain className="h-3 w-3 text-[#8a90a0]" />
                 )}
               </div>
             </button>
@@ -425,20 +425,20 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
                 type="button"
                 disabled
                 className={cn(
-                  "relative inline-flex h-6 w-11 items-center rounded-full bg-zinc-800/30 border border-zinc-700/50 opacity-50 cursor-not-allowed"
+                  "relative inline-flex h-6 w-11 items-center rounded-full bg-[#ece6d9]/70 border border-[#d8d0bf] opacity-60 cursor-not-allowed"
                 )}
                 aria-label="Media processing disabled for speed"
               >
-                <span className="inline-block h-4 w-4 transform rounded-full bg-zinc-600 translate-x-1" />
+                <span className="inline-block h-4 w-4 transform rounded-full bg-[#b9ad95] translate-x-1" />
                 <div className="absolute inset-0 flex items-center justify-center">
-                  <Brain className="h-3 w-3 text-zinc-600" />
+                  <Brain className="h-3 w-3 text-[#8a90a0]" />
                 </div>
               </button>
               {/* Tooltip */}
               <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
-                <div className="bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-xs text-zinc-400 whitespace-nowrap shadow-xl">
+                <div className="whitespace-nowrap rounded-lg border border-[#d8d0bf] bg-[#fcfbf8] px-3 py-2 text-xs text-[#6f788a] shadow-xl">
                   Media processing disabled for speed
-                  <div className="absolute left-1/2 -translate-x-1/2 top-full w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-zinc-800" />
+                  <div className="absolute left-1/2 top-full h-0 w-0 -translate-x-1/2 border-l-4 border-r-4 border-t-4 border-transparent border-t-[#d8d0bf]" />
                 </div>
               </div>
             </div>
@@ -452,7 +452,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
           <Popover.Trigger asChild>
             <button
               type="button"
-              className="rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+              className="rounded-md p-1.5 text-[#8a90a0] transition-colors hover:bg-[#ece6d9] hover:text-[#1f2a44]"
               aria-label="More actions"
             >
               <MoreHorizontal className="h-4 w-4" />
@@ -462,7 +462,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
             <Popover.Content
               sideOffset={5}
               align="end"
-              className="z-50 min-w-[150px] rounded-lg border border-zinc-800 bg-zinc-900 p-1 shadow-xl"
+              className="z-50 min-w-[150px] rounded-lg border border-[#d8d0bf] bg-[#fcfbf8] p-1 shadow-xl"
             >
               <div className="space-y-0.5">
                 {onRename && (
@@ -471,7 +471,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
                     onClick={() => {
                       onRename(asset);
                     }}
-                    className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800"
+                    className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[#1f2a44] transition-colors hover:bg-[#f1ece2]"
                   >
                     <Pencil className="h-4 w-4" />
                     Rename
@@ -483,7 +483,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
                     onClick={() => {
                       onPromote(asset);
                     }}
-                    className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800"
+                    className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[#1f2a44] transition-colors hover:bg-[#f1ece2]"
                   >
                     <Globe className="h-4 w-4" />
                     Promote to Archive
@@ -494,7 +494,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
                   onClick={() => {
                     onDownload(asset.id);
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-zinc-100 transition-colors hover:bg-zinc-800"
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-[#1f2a44] transition-colors hover:bg-[#f1ece2]"
                 >
                   <Download className="h-4 w-4" />
                   Download
@@ -504,13 +504,13 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
                   onClick={() => {
                     onDelete(asset.id);
                   }}
-                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-red-400 transition-colors hover:bg-zinc-800"
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-sm text-red-700 transition-colors hover:bg-[#f1ece2]"
                 >
                   <Trash2 className="h-4 w-4" />
                   Delete
                 </button>
               </div>
-              <Popover.Arrow className="fill-zinc-800" />
+              <Popover.Arrow className="fill-[#d8d0bf]" />
             </Popover.Content>
           </Popover.Portal>
         </Popover.Root>

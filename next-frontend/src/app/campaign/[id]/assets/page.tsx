@@ -629,15 +629,21 @@ export default function CampaignAssetsPage() {
   };
 
   return (
-    <div className="flex h-full relative">
-      {/* Main Content */}
-      <main className="flex-1 flex flex-col overflow-hidden bg-transparent">
-        {/* Header */}
-        <header className="flex items-center justify-between p-6 border-b border-white/5 bg-slate-900/50 backdrop-blur-md">
-          <h1 className="text-2xl font-bold text-zinc-100">
-            Campaign Assets
-          </h1>
-            <div className="flex items-center gap-3">
+    <div className="relative flex h-full min-h-0 bg-[#f7f5ef]">
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-[#f7f5ef]">
+        <header className="flex flex-wrap items-end justify-between gap-4 border-b border-[#e5ddce] px-6 py-5 lg:px-8">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight text-[#1f2a44]">
+              Assets
+            </h1>
+            <p className="mt-1 text-sm text-[#6f788a]">
+              Campaign document library and Riley Memory controls.
+            </p>
+            <p className="mt-1 text-xs text-[#8a90a0]">
+              Assets is the primary home for uploaded campaign files.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
               <input
                 ref={fileInputRef}
                 type="file"
@@ -650,7 +656,7 @@ export default function CampaignAssetsPage() {
                 type="button"
                 onClick={handleUpload}
                 disabled={isUploading}
-                className="inline-flex items-center gap-2 rounded-md border border-amber-500/20 bg-amber-500/10 px-4 py-2 text-sm font-medium text-amber-400 transition-all hover:bg-amber-500/20 hover:border-amber-500/30 focus:outline-none focus:ring-2 focus:ring-amber-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-2 rounded-md border border-[#d8d0bf] bg-white px-3 py-1.5 text-sm font-medium text-[#1f2a44] transition-colors hover:bg-[#f1ece2] focus:outline-none focus:ring-2 focus:ring-[#d4ad47]/40 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {isUploading ? (
                   <>
@@ -664,46 +670,44 @@ export default function CampaignAssetsPage() {
                   </>
                 )}
               </button>
-            </div>
+          </div>
         </header>
         {uploadStatuses.length > 0 && (
-          <div className="px-6 py-2 border-b border-white/5 bg-slate-900/40">
-            <div className="text-xs text-zinc-400 mb-1">Upload Progress</div>
+          <div className="border-b border-[#e5ddce] bg-white/70 px-6 py-2 lg:px-8">
+            <div className="mb-1 text-xs font-medium text-[#6f788a]">Upload Progress</div>
             <div className="space-y-1">
               {uploadStatuses.map((item) => (
-                <div key={item.fileName} className="text-xs text-zinc-300 flex items-center justify-between">
-                  <span className="truncate max-w-[70%]">{item.fileName}</span>
-                  <span className="text-zinc-400">{item.message || item.status}</span>
+                <div key={item.fileName} className="flex items-center justify-between text-xs text-[#1f2a44]">
+                  <span className="max-w-[70%] truncate">{item.fileName}</span>
+                  <span className="text-[#8a90a0]">{item.message || item.status}</span>
                 </div>
               ))}
             </div>
           </div>
         )}
 
-        {/* Scrollable Content Area */}
-        <div className="flex-1 overflow-y-auto p-6">
-          {/* The Vault (HUD-style Table) */}
-          <div className="rounded-xl border border-slate-800 bg-slate-900/80 backdrop-blur-md overflow-hidden">
+        <div className="flex-1 overflow-y-auto px-6 py-5 lg:px-8">
+          <div className="overflow-hidden rounded-xl border border-[#e5ddce] bg-[#fcfbf8]">
             <div className="overflow-x-auto">
               <table className="w-full">
                 <thead>
-                  <tr className="border-b border-zinc-800/50">
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                  <tr className="border-b border-[#e5ddce]">
+                    <th className="px-6 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-[#8a90a0]">
                       Icon
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                    <th className="px-6 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-[#8a90a0]">
                       Name
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                    <th className="px-6 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-[#8a90a0]">
                       Spotlight Tags
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                    <th className="px-6 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-[#8a90a0]">
                       Meta
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                    <th className="px-6 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-[#8a90a0]">
                       Riley's Memory
                     </th>
-                    <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400">
+                    <th className="px-6 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-[#8a90a0]">
                       Actions
                     </th>
                   </tr>
@@ -711,14 +715,14 @@ export default function CampaignAssetsPage() {
                 <tbody>
                   {isLoading ? (
                     <tr>
-                      <td colSpan={6} className="px-6 py-12 text-center text-sm text-zinc-500">
+                      <td colSpan={6} className="px-6 py-12 text-center text-sm text-[#8a90a0]">
                         Loading files...
                       </td>
                     </tr>
                   ) : assets.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="px-6 py-12 text-center text-sm text-zinc-500">
-                        No assets uploaded yet. Click "Upload File" to get started.
+                      <td colSpan={6} className="px-6 py-12 text-center text-sm text-[#8a90a0]">
+                        No assets uploaded yet. Click "Upload Files" to get started.
                       </td>
                     </tr>
                   ) : (
@@ -795,8 +799,8 @@ export default function CampaignAssetsPage() {
           className={cn(
             "fixed right-6 top-6 z-50 rounded-md border px-4 py-3 text-sm shadow-lg backdrop-blur-md",
             toast.kind === "success"
-              ? "border-emerald-500/30 bg-emerald-500/15 text-emerald-100"
-              : "border-red-500/30 bg-red-500/15 text-red-100"
+              ? "border-emerald-500/30 bg-emerald-500/12 text-emerald-700"
+              : "border-red-500/30 bg-red-500/12 text-red-700"
           )}
         >
           {toast.message}
