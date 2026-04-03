@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import io
 import logging
 import csv
@@ -1225,7 +1226,11 @@ def _merge_chunk_text(
     return merged or base
 
 
-async def _delete_chunk_points(collection_name: str, parent_file_id: str) -> None:
+def _content_sha256_hex(file_bytes: bytes) -> str:
+    return hashlib.sha256(file_bytes).hexdigest()
+
+
+async def _delete_chunk_points(collection_name: str, parent_file_id: str) -> int:
     """Delete all chunk points for a parent file before reindexing."""
     chunk_filter = Filter(
         must=[
@@ -1259,11 +1264,13 @@ async def _delete_chunk_points(collection_name: str, parent_file_id: str) -> Non
             point for point in points
             if (point.payload or {}).get("record_type") == "chunk"
         ]
-    if points:
-        await vector_service.client.delete(
-            collection_name=collection_name,
-            points_selector=[str(point.id) for point in points],
-        )
+    if not points:
+        return 0
+    await vector_service.client.delete(
+        collection_name=collection_name,
+        points_selector=[str(point.id) for point in points],
+    )
+    return len(points)
 
 
 async def _mark_job_failed(
@@ -1407,6 +1414,7 @@ async def _run_ingestion_pipeline(
     preview_status: str,
     preview_error: Optional[str],
     initial_ai_enabled: bool,
+    source_content_sha256: str,
 ) -> None:
     """Async extraction -> quality gate -> chunk embedding pipeline."""
     settings = get_settings()
@@ -1681,7 +1689,14 @@ async def _run_ingestion_pipeline(
         quality_reason = decision_why
 
         if quality_status == "low_text":
-            await _delete_chunk_points(collection_name, point_id)
+            deleted_points = await _delete_chunk_points(collection_name, point_id)
+            if deleted_points > 0:
+                logger.info(
+                    "vectors_deleted_before_reindex file_id=%s collection=%s deleted_vectors=%s",
+                    point_id,
+                    collection_name,
+                    deleted_points,
+                )
             duration_ms = int((time.perf_counter() - started) * 1000)
             completed_at = datetime.now().isoformat()
             logger.info(
@@ -1742,6 +1757,7 @@ async def _run_ingestion_pipeline(
                     "ocr_processed": bool(ocr_enabled),
                     "vision_processed": bool(vision_enabled),
                     "visual_chunk_count": 0,
+                    "indexed_content_sha256": None,
                     "vision_enabled": vision_enabled,
                     "vision_status": vision_status if vision_enabled else "not_requested",
                     "vision_segments_annotated": vision_segments_annotated,
@@ -1800,7 +1816,14 @@ async def _run_ingestion_pipeline(
         if not macro_chunks:
             macro_chunks = [{"text": cleaned_text[:MAX_CHARS_TOTAL], "char_start": 0, "char_end": len(cleaned_text[:MAX_CHARS_TOTAL])}]
 
-        await _delete_chunk_points(collection_name, point_id)
+        deleted_points = await _delete_chunk_points(collection_name, point_id)
+        if deleted_points > 0:
+            logger.info(
+                "vectors_deleted_before_reindex file_id=%s collection=%s deleted_vectors=%s",
+                point_id,
+                collection_name,
+                deleted_points,
+            )
 
         chunk_rows: List[Dict[str, Any]] = []
         total_tokens = 0
@@ -2009,6 +2032,7 @@ async def _run_ingestion_pipeline(
                 "micro": len(micro_chunks),
                 "macro": len(macro_chunks),
             },
+            "indexed_content_sha256": source_content_sha256,
             "processing_duration_ms": duration_ms,
             "ocr_enabled": ocr_enabled,
             "ocr_status": ocr_status if ocr_enabled else ("not_requested" if file_type in IMAGE_EXTENSIONS else None),
@@ -2334,6 +2358,10 @@ async def reindex_existing_file(
     if payload.get("record_type") == "chunk":
         return None
 
+    status_now = str(payload.get("ingestion_status") or "uploaded").strip().lower()
+    if status_now in {"queued", "processing"}:
+        return None
+
     file_type = (payload.get("file_type") or payload.get("type") or "").lower()
     if file_type not in TEXT_NATIVE_EXTENSIONS and file_type not in IMAGE_EXTENSIONS:
         await vector_service.client.set_payload(
@@ -2345,6 +2373,38 @@ async def reindex_existing_file(
             points=[file_id],
         )
         return None
+
+    file_url = str(payload.get("url") or "").strip()
+    if not file_url:
+        raise HTTPException(status_code=400, detail=f"File {file_id} has no URL")
+
+    file_bytes = await StorageService.download_file(file_url)
+    source_content_sha256 = _content_sha256_hex(file_bytes)
+    existing_indexed_sha = str(payload.get("indexed_content_sha256") or "").strip()
+    existing_chunk_count = int(payload.get("chunk_count") or 0)
+
+    if (
+        status_now == "indexed"
+        and existing_chunk_count > 0
+        and existing_indexed_sha
+        and existing_indexed_sha == source_content_sha256
+    ):
+        logger.info(
+            "skipped_reindex_already_indexed file_id=%s collection=%s content_sha256=%s",
+            file_id,
+            collection_name,
+            source_content_sha256,
+        )
+        return None
+
+    if existing_indexed_sha and existing_indexed_sha != source_content_sha256:
+        logger.info(
+            "replacing_index_for_updated_document file_id=%s collection=%s old_sha=%s new_sha=%s",
+            file_id,
+            collection_name,
+            existing_indexed_sha,
+            source_content_sha256,
+        )
 
     tenant_id = payload.get("client_id") or "global"
     job_id = await enqueue_ingestion_job(
@@ -2417,6 +2477,33 @@ async def run_ingestion_job(
             return
 
         file_bytes = await StorageService.download_file(file_url)
+        source_content_sha256 = _content_sha256_hex(file_bytes)
+        existing_indexed_sha = str(payload.get("indexed_content_sha256") or "").strip()
+        existing_chunk_count = int(payload.get("chunk_count") or 0)
+        status_now = str(payload.get("ingestion_status") or "uploaded").strip().lower()
+        if (
+            status_now == "indexed"
+            and existing_chunk_count > 0
+            and existing_indexed_sha
+            and existing_indexed_sha == source_content_sha256
+        ):
+            completed_at = datetime.now().isoformat()
+            await vector_service.client.set_payload(
+                collection_name=collection_name,
+                payload={
+                    "ingestion_job_status": "indexed",
+                    "ingestion_job_completed_at": completed_at,
+                    "ingestion_job_error_message": None,
+                },
+                points=[file_id],
+            )
+            logger.info(
+                "skipped_reindex_already_indexed file_id=%s collection=%s content_sha256=%s",
+                file_id,
+                collection_name,
+                source_content_sha256,
+            )
+            return
         tenant_id = payload.get("client_id") or "global"
         is_global = bool(payload.get("is_global")) or collection_name == get_settings().QDRANT_COLLECTION_TIER_1
         tags = payload.get("tags", []) if isinstance(payload.get("tags"), list) else []
@@ -2443,6 +2530,7 @@ async def run_ingestion_job(
             preview_status=payload.get("preview_status", "not_requested"),
             preview_error=payload.get("preview_error"),
             initial_ai_enabled=bool(payload.get("ai_enabled", False)),
+            source_content_sha256=source_content_sha256,
         )
     except Exception as exc:
         logger.exception(

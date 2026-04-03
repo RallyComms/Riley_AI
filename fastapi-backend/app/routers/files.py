@@ -1566,10 +1566,7 @@ async def toggle_ai_enabled(
         # Turning Riley Memory ON is the explicit ingestion trigger.
         if request.ai_enabled:
             status_now = str(payload.get("ingestion_status") or "uploaded").strip().lower()
-            chunk_count = int(payload.get("chunk_count") or 0)
-            should_start_ingestion = status_now not in {"queued", "processing"} and (
-                chunk_count <= 0 or status_now in {"uploaded", "failed", "low_text", "ocr_needed"}
-            )
+            should_start_ingestion = status_now not in {"queued", "processing"}
             if should_start_ingestion:
                 await reindex_existing_file(file_id=file_id, collection_name=resolved_collection)
 
