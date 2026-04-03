@@ -540,11 +540,17 @@ export default function CampaignAssetsPage() {
         method: "PATCH",
         body: { ai_enabled: enabled },
       });
-      await fetchFiles();
+      const latestAssets = await fetchFiles();
+      const updatedAsset = latestAssets.find((asset) => asset.id === assetId);
+      const refreshedIngestionStatus = String(updatedAsset?.ingestionStatus || "").toLowerCase();
       showToast(
         "success",
         enabled
-          ? "Riley Memory enabled. Ingestion has started for this asset."
+          ? refreshedIngestionStatus === "indexed"
+            ? "Already indexed. Riley memory enabled."
+            : refreshedIngestionStatus === "queued" || refreshedIngestionStatus === "processing"
+              ? "Riley Memory enabled. Ingestion has started for this asset."
+              : "Riley memory enabled."
           : "Riley Memory disabled. Riley will exclude this asset going forward."
       );
     } catch (error) {

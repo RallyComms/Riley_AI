@@ -2383,6 +2383,29 @@ async def reindex_existing_file(
     existing_indexed_sha = str(payload.get("indexed_content_sha256") or "").strip()
     existing_chunk_count = int(payload.get("chunk_count") or 0)
 
+    campaign_id = str(payload.get("client_id") or "global")
+    if status_now == "indexed" and existing_chunk_count > 0 and not existing_indexed_sha:
+        await vector_service.client.set_payload(
+            collection_name=collection_name,
+            payload={"indexed_content_sha256": source_content_sha256},
+            points=[file_id],
+        )
+        logger.info(
+            "legacy_index_hash_backfilled file_id=%s campaign_id=%s collection=%s content_sha256=%s",
+            file_id,
+            campaign_id,
+            collection_name,
+            source_content_sha256,
+        )
+        logger.info(
+            "reindex_skipped_already_indexed file_id=%s campaign_id=%s collection=%s content_sha256=%s",
+            file_id,
+            campaign_id,
+            collection_name,
+            source_content_sha256,
+        )
+        return None
+
     if (
         status_now == "indexed"
         and existing_chunk_count > 0
@@ -2390,8 +2413,9 @@ async def reindex_existing_file(
         and existing_indexed_sha == source_content_sha256
     ):
         logger.info(
-            "skipped_reindex_already_indexed file_id=%s collection=%s content_sha256=%s",
+            "reindex_skipped_already_indexed file_id=%s campaign_id=%s collection=%s content_sha256=%s",
             file_id,
+            campaign_id,
             collection_name,
             source_content_sha256,
         )
@@ -2399,14 +2423,23 @@ async def reindex_existing_file(
 
     if existing_indexed_sha and existing_indexed_sha != source_content_sha256:
         logger.info(
-            "replacing_index_for_updated_document file_id=%s collection=%s old_sha=%s new_sha=%s",
+            "replacing_index_for_updated_document file_id=%s campaign_id=%s collection=%s old_sha=%s new_sha=%s",
             file_id,
+            campaign_id,
             collection_name,
             existing_indexed_sha,
             source_content_sha256,
         )
 
     tenant_id = payload.get("client_id") or "global"
+    logger.info(
+        "reindex_enqueued_hash_mismatch file_id=%s campaign_id=%s collection=%s old_sha=%s new_sha=%s",
+        file_id,
+        campaign_id,
+        collection_name,
+        existing_indexed_sha or "<missing>",
+        source_content_sha256,
+    )
     job_id = await enqueue_ingestion_job(
         collection_name=collection_name,
         file_id=str(file_id),
@@ -2481,6 +2514,34 @@ async def run_ingestion_job(
         existing_indexed_sha = str(payload.get("indexed_content_sha256") or "").strip()
         existing_chunk_count = int(payload.get("chunk_count") or 0)
         status_now = str(payload.get("ingestion_status") or "uploaded").strip().lower()
+        campaign_id = str(payload.get("client_id") or "global")
+        if status_now == "indexed" and existing_chunk_count > 0 and not existing_indexed_sha:
+            completed_at = datetime.now().isoformat()
+            await vector_service.client.set_payload(
+                collection_name=collection_name,
+                payload={
+                    "indexed_content_sha256": source_content_sha256,
+                    "ingestion_job_status": "indexed",
+                    "ingestion_job_completed_at": completed_at,
+                    "ingestion_job_error_message": None,
+                },
+                points=[file_id],
+            )
+            logger.info(
+                "legacy_index_hash_backfilled file_id=%s campaign_id=%s collection=%s content_sha256=%s",
+                file_id,
+                campaign_id,
+                collection_name,
+                source_content_sha256,
+            )
+            logger.info(
+                "reindex_skipped_already_indexed file_id=%s campaign_id=%s collection=%s content_sha256=%s",
+                file_id,
+                campaign_id,
+                collection_name,
+                source_content_sha256,
+            )
+            return
         if (
             status_now == "indexed"
             and existing_chunk_count > 0
@@ -2498,8 +2559,9 @@ async def run_ingestion_job(
                 points=[file_id],
             )
             logger.info(
-                "skipped_reindex_already_indexed file_id=%s collection=%s content_sha256=%s",
+                "reindex_skipped_already_indexed file_id=%s campaign_id=%s collection=%s content_sha256=%s",
                 file_id,
+                campaign_id,
                 collection_name,
                 source_content_sha256,
             )
