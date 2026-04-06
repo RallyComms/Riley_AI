@@ -229,6 +229,65 @@ def _is_llm_event_row(*, provider: Optional[str], model: Optional[str]) -> bool:
     )
 
 
+def _request_operation_from_event_type(event_type: Optional[str]) -> str:
+    raw = str(event_type or "").strip().lower()
+    prefix = "http_request_"
+    suffix = "_completed"
+    if not raw.startswith(prefix) or not raw.endswith(suffix):
+        return "other"
+    value = raw[len(prefix) : -len(suffix)]
+    return value or "other"
+
+
+def _window_cloud_cost_from_daily_series(*, daily_series: List[Dict[str, Any]], window_days: int) -> float:
+    if not daily_series:
+        return 0.0
+    start_day = date.today() - timedelta(days=max(1, int(window_days)) - 1)
+    total = 0.0
+    for row in daily_series:
+        day_text = str(row.get("date") or "").strip()
+        if not day_text:
+            continue
+        try:
+            if date.fromisoformat(day_text) >= start_day:
+                total += float(row.get("cost") or 0.0)
+        except Exception:
+            continue
+    return round(total, 4)
+
+
+def _build_cloud_cost_optimization_recommendations(
+    *,
+    top_operations: List[Dict[str, Any]],
+    endpoint_rows: List[Dict[str, Any]],
+) -> List[str]:
+    recommendations: List[str] = []
+    if not top_operations:
+        return recommendations
+
+    largest = top_operations[0]
+    largest_operation = str(largest.get("operation_type") or "other")
+    largest_percent = float(largest.get("percent_of_cloud_window") or 0.0)
+    if largest_operation == "polling_cycle" and largest_percent >= 15.0:
+        recommendations.append(
+            "Polling endpoints are the top Cloud Run driver; reduce poll frequency and switch high-traffic surfaces to push updates where possible."
+        )
+    if largest_operation in {"ingestion_job", "document_processing"} and largest_percent >= 15.0:
+        recommendations.append(
+            "Background processing dominates runtime; prioritize chunk batching, OCR gating, and early-exit checks to reduce worker execution time."
+        )
+    if largest_operation == "retry" and largest_percent >= 5.0:
+        recommendations.append(
+            "Retries are a material cost source; inspect failing worker paths and tighten retry policies/timeouts to prevent repeated expensive runs."
+        )
+    expensive_endpoints = [row for row in endpoint_rows if float(row.get("total_estimated_spend") or 0.0) > 0]
+    if expensive_endpoints:
+        recommendations.append(
+            "Prioritize optimization on the highest-cost endpoints first, starting with latency reduction and caching of repeated GET requests."
+        )
+    return recommendations[:3]
+
+
 def _map_llm_feature_category(
     *,
     source_event_type_raw: Optional[str],
@@ -2296,5 +2355,209 @@ async def mission_control_cloud_infrastructure_cost(
         "last_data_timestamp": usage.get("last_data_timestamp"),
         "billing_data_lag_hours": usage.get("billing_data_lag_hours"),
         "billing_source": str(usage.get("billing_source") or ""),
+    }
+
+
+@router.get("/mission-control/cloud-run-cost-attribution")
+async def mission_control_cloud_run_cost_attribution(
+    timeframe: str = Query("30d", pattern="^(24h|7d|30d)$"),
+    _: Dict = Depends(verify_mission_control_admin),
+    graph: GraphService = Depends(get_graph),
+) -> Dict[str, Any]:
+    """Attribute Cloud Run spend to concrete Riley request behaviors."""
+    window = _resolve_timeframe(timeframe)
+    window_start_iso = _window_start_iso(int(window["window_hours"]))
+    cloud_usage = await cloud_billing_service.get_cloud_infra_cost_metrics()
+    daily_series = list(cloud_usage.get("daily_cloud_cost_series") or [])
+    cloud_window_cost = _window_cloud_cost_from_daily_series(
+        daily_series=daily_series,
+        window_days=int(window["window_days"]),
+    )
+
+    request_rows = await _rows(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($window_start_iso)
+          AND e.source_entity = "HttpRequest"
+          AND e.source_event_type_raw STARTS WITH "http_request_"
+          AND e.source_event_type_raw ENDS WITH "_completed"
+        RETURN
+          e.source_event_type_raw as event_type,
+          coalesce(e.object_id, "unknown_endpoint") as endpoint,
+          coalesce(e.user_id, "") as user_id,
+          count(e) as requests,
+          coalesce(sum(toFloat(e.latency_ms)), 0.0) as duration_ms
+        ORDER BY duration_ms DESC
+        """,
+        window_start_iso=window_start_iso,
+    )
+
+    total_duration_ms = sum(float(row.get("duration_ms") or 0.0) for row in request_rows)
+    operation_rollup: Dict[str, Dict[str, float]] = {}
+    endpoint_rollup: Dict[str, Dict[str, float]] = {}
+    user_rollup: Dict[str, Dict[str, float]] = {}
+
+    for row in request_rows:
+        operation_type = _request_operation_from_event_type(row.get("event_type"))
+        endpoint = str(row.get("endpoint") or "unknown_endpoint")
+        user_id = str(row.get("user_id") or "").strip() or "system_or_unknown"
+        requests_count = int(row.get("requests") or 0)
+        duration_ms = float(row.get("duration_ms") or 0.0)
+        allocated_cost = (
+            (duration_ms / total_duration_ms) * cloud_window_cost
+            if total_duration_ms > 0 and cloud_window_cost > 0
+            else 0.0
+        )
+
+        op_row = operation_rollup.setdefault(operation_type, {"requests": 0.0, "duration_ms": 0.0, "cost": 0.0})
+        op_row["requests"] += float(requests_count)
+        op_row["duration_ms"] += duration_ms
+        op_row["cost"] += allocated_cost
+
+        endpoint_row = endpoint_rollup.setdefault(endpoint, {"requests": 0.0, "duration_ms": 0.0, "cost": 0.0})
+        endpoint_row["requests"] += float(requests_count)
+        endpoint_row["duration_ms"] += duration_ms
+        endpoint_row["cost"] += allocated_cost
+
+        user_row = user_rollup.setdefault(user_id, {"requests": 0.0, "duration_ms": 0.0, "cost": 0.0})
+        user_row["requests"] += float(requests_count)
+        user_row["duration_ms"] += duration_ms
+        user_row["cost"] += allocated_cost
+
+    operation_rows = sorted(
+        [
+            {
+                "operation_type": key,
+                "action_count": int(value["requests"]),
+                "total_estimated_spend": round(float(value["cost"]), 4),
+                "estimated_avg_spend_per_action": round(
+                    (float(value["cost"]) / float(value["requests"])) if value["requests"] > 0 else 0.0,
+                    6,
+                ),
+                "avg_latency_ms": round(
+                    (float(value["duration_ms"]) / float(value["requests"])) if value["requests"] > 0 else 0.0,
+                    2,
+                ),
+                "percent_of_cloud_window": round(
+                    ((float(value["cost"]) / cloud_window_cost) * 100.0) if cloud_window_cost > 0 else 0.0,
+                    2,
+                ),
+            }
+            for key, value in operation_rollup.items()
+        ],
+        key=lambda item: float(item.get("total_estimated_spend") or 0.0),
+        reverse=True,
+    )
+    endpoint_rows = sorted(
+        [
+            {
+                "endpoint": key,
+                "action_count": int(value["requests"]),
+                "total_estimated_spend": round(float(value["cost"]), 4),
+                "estimated_avg_spend_per_action": round(
+                    (float(value["cost"]) / float(value["requests"])) if value["requests"] > 0 else 0.0,
+                    6,
+                ),
+                "avg_latency_ms": round(
+                    (float(value["duration_ms"]) / float(value["requests"])) if value["requests"] > 0 else 0.0,
+                    2,
+                ),
+            }
+            for key, value in endpoint_rollup.items()
+        ],
+        key=lambda item: float(item.get("total_estimated_spend") or 0.0),
+        reverse=True,
+    )
+    user_rows = sorted(
+        [
+            {
+                "user_id": key,
+                "action_count": int(value["requests"]),
+                "total_estimated_spend": round(float(value["cost"]), 4),
+                "estimated_avg_spend_per_action": round(
+                    (float(value["cost"]) / float(value["requests"])) if value["requests"] > 0 else 0.0,
+                    6,
+                ),
+                "avg_latency_ms": round(
+                    (float(value["duration_ms"]) / float(value["requests"])) if value["requests"] > 0 else 0.0,
+                    2,
+                ),
+            }
+            for key, value in user_rollup.items()
+        ],
+        key=lambda item: float(item.get("total_estimated_spend") or 0.0),
+        reverse=True,
+    )
+
+    default_action_costs = {
+        "chat": 0.0,
+        "report": 0.0,
+        "ingestion_job": 0.0,
+        "document_upload": 0.0,
+        "polling_cycle": 0.0,
+    }
+    op_cost_map = {str(row.get("operation_type")): float(row.get("total_estimated_spend") or 0.0) for row in operation_rows}
+    cost_per_action_estimates = {
+        "chat": round(op_cost_map.get("chat_request", 0.0), 4),
+        "report": round(op_cost_map.get("report_generation", 0.0), 4),
+        "ingestion_job": round(op_cost_map.get("ingestion_job", 0.0), 4),
+        "document_upload": round(op_cost_map.get("document_upload", 0.0), 4),
+        "polling_cycle": round(op_cost_map.get("polling_cycle", 0.0), 4),
+    }
+    for key in default_action_costs:
+        cost_per_action_estimates.setdefault(key, default_action_costs[key])
+
+    top_cost_drivers = operation_rows[:3]
+    most_expensive_endpoints = endpoint_rows[:10]
+    ocr_summary = await _single_value(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($window_start_iso)
+          AND e.source_event_type_raw = "ocr_completed"
+        RETURN
+          count(e) as action_count,
+          coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as total_estimated_spend,
+          coalesce(avg(toFloat(e.latency_ms)), 0.0) as avg_latency_ms
+        """,
+        window_start_iso=window_start_iso,
+    )
+    ocr_action_count = int(ocr_summary.get("action_count") or 0)
+    ocr_total_spend = round(float(ocr_summary.get("total_estimated_spend") or 0.0), 4)
+    ocr_avg_spend_per_action = round(
+        (ocr_total_spend / float(ocr_action_count)) if ocr_action_count > 0 else 0.0,
+        6,
+    )
+    ocr_avg_latency_ms = round(float(ocr_summary.get("avg_latency_ms") or 0.0), 2)
+    recommendations = _build_cloud_cost_optimization_recommendations(
+        top_operations=top_cost_drivers,
+        endpoint_rows=most_expensive_endpoints,
+    )
+
+    return {
+        "timeframe": window["timeframe"],
+        "timeframe_label": window["label"],
+        "cloud_cost_is_available": bool(cloud_usage.get("is_available")),
+        "cloud_cost_unavailable_reason": str(cloud_usage.get("unavailable_reason") or ""),
+        "cloud_window_cost_usd": round(cloud_window_cost, 4),
+        "request_volume": {
+            "total_requests": int(sum(int(row.get("requests") or 0) for row in request_rows)),
+            "total_duration_ms": round(float(total_duration_ms), 2),
+            "window_start_iso": window_start_iso,
+        },
+        "cost_per_action_estimates": cost_per_action_estimates,
+        "cost_by_operation_type": operation_rows,
+        "cost_by_endpoint": endpoint_rows,
+        "cost_by_user": user_rows[:25],
+        "ocr_observability": {
+            "action_count": ocr_action_count,
+            "total_estimated_spend": ocr_total_spend,
+            "estimated_avg_spend_per_action": ocr_avg_spend_per_action,
+            "avg_latency_ms": ocr_avg_latency_ms,
+        },
+        "top_cost_drivers": top_cost_drivers,
+        "most_expensive_endpoints": most_expensive_endpoints,
+        "recommended_optimizations": recommendations,
     }
 
