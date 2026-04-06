@@ -85,25 +85,6 @@ type PersistedProject = {
   updated_at?: string | null;
 };
 
-type RileyIndexSummary = {
-  total_documents: number;
-  indexed_count: number;
-  processing_count: number;
-  failed_count: number;
-  low_text_count: number;
-  ocr_needed_count: number;
-  ocr_processed_count: number;
-  vision_processed_count: number;
-  partial_count: number;
-  counts_by_file_type: Record<string, number>;
-  recent_uploads: Array<{
-    filename: string;
-    file_type: string;
-    ingestion_status: string;
-    upload_date: string;
-  }>;
-};
-
 type PersistedReportJob = {
   report_job_id: string;
   tenant_id: string;
@@ -174,12 +155,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [selectedSourceAsset, setSelectedSourceAsset] = useState<Asset | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [openSourcesByMessageId, setOpenSourcesByMessageId] = useState<Record<string, boolean>>({});
-  const [indexSummary, setIndexSummary] = useState<RileyIndexSummary | null>(null);
-  const [reportJobs, setReportJobs] = useState<ReportJob[]>([]);
-  const [hiddenReportJobIds, setHiddenReportJobIds] = useState<Record<string, boolean>>({});
-  const [reportActionLoadingById, setReportActionLoadingById] = useState<Record<string, boolean>>({});
-  const [reportActionErrorById, setReportActionErrorById] = useState<Record<string, string>>({});
-  const [isReportsLoading, setIsReportsLoading] = useState(false);
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [isSubmittingReport, setIsSubmittingReport] = useState(false);
   const [reportType, setReportType] = useState<
@@ -189,11 +164,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [reportPrompt, setReportPrompt] = useState("");
   const [reportDeepMode, setReportDeepMode] = useState(true);
   const [animatingAssistantMessageId, setAnimatingAssistantMessageId] = useState<string | null>(null);
-  const [isCampaignStatusCollapsed, setIsCampaignStatusCollapsed] = useState(false);
   const knownReportStatusRef = useRef<
     Record<string, "queued" | "processing" | "cancelling" | "cancelled" | "complete" | "failed" | "deleted">
   >({});
-  const hiddenReportJobIdsRef = useRef<Record<string, boolean>>({});
   const instantScrollRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -206,8 +179,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     tenantId && user?.id ? `rileySelectedConversation:${tenantId}:${user.id}` : null;
   const collapsedProjectsStorageKey =
     tenantId && user?.id ? `rileyCollapsedProjects:${tenantId}:${user.id}` : null;
-  const campaignStatusCollapsedStorageKey =
-    tenantId && user?.id ? `rileyCampaignStatusCollapsed:${tenantId}:${user.id}` : null;
   const sidebarOpenStorageKey =
     tenantId && user?.id ? `rileySidebarOpen:${tenantId}:${user.id}` : null;
 
@@ -215,10 +186,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: instantScrollRef.current ? "auto" : "smooth" });
   }, [messages]);
-
-  useEffect(() => {
-    hiddenReportJobIdsRef.current = hiddenReportJobIds;
-  }, [hiddenReportJobIds]);
 
   // Load persisted conversation list for this tenant/user scope.
   useEffect(() => {
@@ -336,25 +303,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   }, [collapsedProjectsStorageKey, collapsedProjectIds]);
 
   useEffect(() => {
-    if (!campaignStatusCollapsedStorageKey) return;
-    try {
-      const raw = localStorage.getItem(campaignStatusCollapsedStorageKey);
-      if (!raw) return;
-      setIsCampaignStatusCollapsed(raw === "true");
-    } catch {
-      setIsCampaignStatusCollapsed(false);
-    }
-  }, [campaignStatusCollapsedStorageKey]);
-
-  useEffect(() => {
-    if (!campaignStatusCollapsedStorageKey) return;
-    localStorage.setItem(
-      campaignStatusCollapsedStorageKey,
-      isCampaignStatusCollapsed ? "true" : "false"
-    );
-  }, [campaignStatusCollapsedStorageKey, isCampaignStatusCollapsed]);
-
-  useEffect(() => {
     if (!sidebarOpenStorageKey) return;
     try {
       const raw = localStorage.getItem(sidebarOpenStorageKey);
@@ -378,43 +326,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       window.removeEventListener("click", handleWindowClick);
     };
   }, [openConversationMenuId]);
-
-  useEffect(() => {
-    if (!tenantId || isGlobal || !authLoaded || !userLoaded || !user) return;
-    let cancelled = false;
-    let intervalId: number | null = null;
-
-    const loadIndexSummary = async () => {
-      try {
-        const token = await getToken();
-        if (!token) return;
-        const summary = await apiFetch<RileyIndexSummary>(
-          `/api/v1/riley/index-summary?tenant_id=${encodeURIComponent(tenantId)}`,
-          {
-            token,
-            method: "GET",
-          }
-        );
-        if (!cancelled) {
-          setIndexSummary(summary);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          console.error("Failed to load Riley index summary:", error);
-        }
-      }
-    };
-
-    void loadIndexSummary();
-    intervalId = window.setInterval(() => {
-      void loadIndexSummary();
-    }, 15000);
-
-    return () => {
-      cancelled = true;
-      if (intervalId) window.clearInterval(intervalId);
-    };
-  }, [tenantId, isGlobal, authLoaded, userLoaded, user, getToken]);
 
   // Build local filename -> asset map for source opening.
   useEffect(() => {
@@ -469,7 +380,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
   const loadReportJobs = async (opts?: { silent?: boolean }) => {
     if (!tenantId || isGlobal || !authLoaded || !userLoaded || !user) return;
-    if (!opts?.silent) setIsReportsLoading(true);
     try {
       const token = await getToken();
       if (!token) return;
@@ -480,8 +390,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           method: "GET",
         }
       );
-      const mapped = (data.jobs || []).map(toReportJob);
-      const visibleMapped = mapped.filter((job) => !hiddenReportJobIdsRef.current[job.reportJobId]);
+      const visibleMapped = (data.jobs || []).map(toReportJob);
       const previousStatuses = { ...knownReportStatusRef.current };
       const nextStatuses: Record<
         string,
@@ -491,8 +400,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         nextStatuses[job.reportJobId] = job.status;
       });
       knownReportStatusRef.current = nextStatuses;
-      setReportJobs(visibleMapped);
-
       // Add concise chat notifications for relevant status transitions.
       for (const job of visibleMapped) {
         const previous = previousStatuses[job.reportJobId];
@@ -531,8 +438,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       }
     } catch (error) {
       console.error("Failed to load Riley report jobs:", error);
-    } finally {
-      if (!opts?.silent) setIsReportsLoading(false);
     }
   };
 
@@ -1249,14 +1154,13 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       });
 
       const mapped = toReportJob(created);
-      setReportJobs((prev) => [mapped, ...prev.filter((job) => job.reportJobId !== mapped.reportJobId)]);
       knownReportStatusRef.current[mapped.reportJobId] = mapped.status;
       setMessages((prev) => [
         ...prev,
         {
           id: `report-queued-${mapped.reportJobId}`,
           role: "system",
-          content: `Riley is generating report "${mapped.title}". Track progress and download it from the Reports panel.`,
+          content: `Riley is generating report "${mapped.title}". I'll post a download link here when it's ready.`,
         },
       ]);
       setIsReportModalOpen(false);
@@ -1287,59 +1191,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     }
   };
 
-  const getReportActionKind = (status: ReportJob["status"]): "cancel" | "delete" =>
-    status === "queued" || status === "processing" || status === "cancelling" ? "cancel" : "delete";
-
-  const handleReportRowAction = async (job: ReportJob) => {
-    if (!tenantId || !authLoaded || !userLoaded || !user) return;
-    const actionKind = getReportActionKind(job.status);
-    setReportActionLoadingById((prev) => ({ ...prev, [job.reportJobId]: true }));
-    setReportActionErrorById((prev) => {
-      const next = { ...prev };
-      delete next[job.reportJobId];
-      return next;
-    });
-    try {
-      const token = await getToken();
-      if (!token) throw new Error("Authentication token unavailable");
-      const encodedTenantId = encodeURIComponent(tenantId);
-      const encodedReportJobId = encodeURIComponent(job.reportJobId);
-      const path =
-        actionKind === "cancel"
-          ? `/api/v1/riley/reports/${encodedReportJobId}/cancel?tenant_id=${encodedTenantId}`
-          : `/api/v1/riley/reports/${encodedReportJobId}?tenant_id=${encodedTenantId}`;
-      await apiFetch(path, {
-        token,
-        method: actionKind === "cancel" ? "POST" : "DELETE",
-      });
-      setHiddenReportJobIds((prev) => {
-        const next = { ...prev, [job.reportJobId]: true };
-        hiddenReportJobIdsRef.current = next;
-        return next;
-      });
-      setReportJobs((prev) => prev.filter((item) => item.reportJobId !== job.reportJobId));
-      setReportActionErrorById((prev) => {
-        const next = { ...prev };
-        delete next[job.reportJobId];
-        return next;
-      });
-      delete knownReportStatusRef.current[job.reportJobId];
-    } catch (error) {
-      const defaultMessage =
-        actionKind === "cancel"
-          ? "Could not cancel this report job. Please try again."
-          : "Could not delete this report job. Please try again.";
-      const message = error instanceof Error && error.message ? error.message : defaultMessage;
-      setReportActionErrorById((prev) => ({ ...prev, [job.reportJobId]: message }));
-    } finally {
-      setReportActionLoadingById((prev) => {
-        const next = { ...prev };
-        delete next[job.reportJobId];
-        return next;
-      });
-    }
-  };
-
   const formatTime = (date: Date) => {
     const now = new Date();
     const diff = now.getTime() - date.getTime();
@@ -1349,24 +1200,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     if (days > 0) return `${days}d ago`;
     if (hours > 0) return `${hours}h ago`;
     return "Just now";
-  };
-
-  const formatReportDate = (date: Date) =>
-    date.toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
-
-  const reportStatusBadgeClass = (status: ReportJob["status"]) => {
-    if (status === "queued") return "border-amber-500/30 bg-amber-500/10 text-amber-300";
-    if (status === "cancelling") return "border-orange-500/30 bg-orange-500/10 text-orange-300";
-    if (status === "processing") return "border-blue-500/30 bg-blue-500/10 text-blue-300";
-    if (status === "cancelled") return "border-[#ddd5c5] bg-[#f7f2e8] text-[#6f788a]";
-    if (status === "deleted") return "border-[#ddd5c5] bg-[#f7f2e8] text-[#6f788a]";
-    if (status === "complete") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
-    return "border-rose-500/30 bg-rose-500/10 text-rose-300";
   };
 
   const promptStarters = [
@@ -1936,185 +1769,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
         {!isGlobal && (
           <div className="border-b border-[#e5ddce] bg-[#f6f2e8] px-6 py-2.5">
-            <div className="mb-2 text-xs text-[#6f788a]">
+            <div className="text-xs text-[#6f788a]">
               Riley is working with documents and strategy from this campaign.
             </div>
-            <button
-              type="button"
-              onClick={() => setIsCampaignStatusCollapsed((prev) => !prev)}
-              className="flex w-full items-center justify-between rounded-md px-1 py-1 text-left hover:bg-[#efe7d7]"
-              aria-label={isCampaignStatusCollapsed ? "Expand campaign status panel" : "Collapse campaign status panel"}
-            >
-              <div className="flex items-center gap-2">
-                {isCampaignStatusCollapsed ? (
-                  <ChevronRight className="h-4 w-4 text-[#7d8799]" />
-                ) : (
-                  <ChevronDown className="h-4 w-4 text-[#7d8799]" />
-                )}
-                <span className="text-sm font-medium text-[#1f2a44]">Campaign status</span>
-              </div>
-              {isCampaignStatusCollapsed && (
-                <div className="flex flex-wrap items-center justify-end gap-2 text-[11px]">
-                  <span className="rounded-md border border-[#ddd5c5] bg-[#f8f4ea] px-2 py-0.5 text-[#4d5871]">
-                    Docs {indexSummary ? `${indexSummary.indexed_count}/${indexSummary.total_documents}` : "--"}
-                  </span>
-                  <span className="rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-blue-300">
-                    Processing {indexSummary?.processing_count ?? 0}
-                  </span>
-                  <span className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-rose-300">
-                    Failed {indexSummary ? indexSummary.failed_count + indexSummary.low_text_count : 0}
-                  </span>
-                  <span className="rounded-md border border-[#d4ad47]/35 bg-[#f8f2df] px-2 py-0.5 text-[#7a5f19]">
-                    Reports {reportJobs.length}
-                  </span>
-                </div>
-              )}
-            </button>
-
-            {!isCampaignStatusCollapsed && (
-              <div className="pb-1 pt-2">
-                {indexSummary && (
-                  <div>
-                    <div className="flex flex-wrap items-center gap-3 text-xs">
-                      <span className="rounded-md border border-[#ddd5c5] bg-[#f8f4ea] px-2 py-1 text-[#4d5871]">
-                        Documents indexed: {indexSummary.indexed_count} / {indexSummary.total_documents}
-                      </span>
-                      <span className="rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-1 text-blue-300">
-                        Processing: {indexSummary.processing_count}
-                      </span>
-                      <span className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-1 text-rose-300">
-                        Failed: {indexSummary.failed_count + indexSummary.low_text_count}
-                      </span>
-                      <span className="rounded-md border border-purple-500/30 bg-purple-500/10 px-2 py-1 text-purple-300">
-                        OCR needed: {indexSummary.ocr_needed_count}
-                      </span>
-                      <span className="rounded-md border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-cyan-300">
-                        OCR processed: {indexSummary.ocr_processed_count ?? 0}
-                      </span>
-                      <span className="rounded-md border border-fuchsia-500/30 bg-fuchsia-500/10 px-2 py-1 text-fuchsia-300">
-                        Visual analyzed: {indexSummary.vision_processed_count ?? 0}
-                      </span>
-                      <span className="rounded-md border border-orange-500/30 bg-orange-500/10 px-2 py-1 text-orange-300">
-                        Partial: {indexSummary.partial_count ?? 0}
-                      </span>
-                      <a
-                        href={`/campaign/${tenantId}/assets`}
-                        className="rounded-md border border-[#d4ad47]/35 bg-[#f8f2df] px-2 py-1 text-[#7a5f19] hover:bg-[#f1e7ca]"
-                      >
-                        View documents
-                      </a>
-                    </div>
-                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-[#7d8799]">
-                      {Object.entries(indexSummary.counts_by_file_type || {})
-                        .sort((a, b) => b[1] - a[1])
-                        .slice(0, 8)
-                        .map(([fileType, count]) => (
-                          <span
-                            key={fileType}
-                            className="rounded-full border border-[#ddd5c5] bg-[#f8f4ea] px-2 py-0.5"
-                          >
-                            {fileType}: {count}
-                          </span>
-                        ))}
-                    </div>
-                    {(indexSummary.failed_count > 0 ||
-                      indexSummary.low_text_count > 0 ||
-                      indexSummary.ocr_needed_count > 0 ||
-                      (indexSummary.partial_count ?? 0) > 0) && (
-                      <div className="mt-2 text-[11px] text-amber-300">
-                        Some documents are not fully indexable yet, so Riley results may be incomplete.
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                <div className={cn("mt-3", indexSummary && "border-t border-[#e5ddce] pt-3")}>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 text-sm text-[#1f2a44]">
-                      <ClipboardList className="h-4 w-4 text-[#7a5f19]" />
-                      <span>Report Jobs</span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => void loadReportJobs()}
-                      className="rounded-md border border-[#ddd5c5] bg-[#f8f4ea] px-2 py-1 text-xs text-[#4d5871] hover:bg-[#f2ece0]"
-                    >
-                      Refresh
-                    </button>
-                  </div>
-                  <div className="mt-2 space-y-2">
-                    {isReportsLoading && reportJobs.length === 0 ? (
-                      <div className="text-xs text-[#7d8799]">Loading report jobs...</div>
-                    ) : reportJobs.length === 0 ? (
-                      <div className="text-xs text-[#7d8799]">No report jobs yet. Use Generate Report to start one.</div>
-                    ) : (
-                      reportJobs.slice(0, 6).map((job) => (
-                        <div key={job.reportJobId} className="rounded-lg border border-[#ddd5c5] bg-[#faf7ef] p-2">
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0">
-                              <div className="truncate text-sm text-[#1f2a44]">{job.title}</div>
-                              <div className="mt-1 text-[11px] text-[#7d8799]">
-                                {formatReportDate(job.createdAt)}
-                              </div>
-                            </div>
-                            <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", reportStatusBadgeClass(job.status))}>
-                              {job.status}
-                            </span>
-                          </div>
-                          {job.summaryText && (
-                            <div className="mt-1 line-clamp-2 text-xs text-[#6f788a]">{job.summaryText}</div>
-                          )}
-                          {job.status === "failed" && job.errorMessage && (
-                            <div className="mt-1 inline-flex items-center gap-1 text-xs text-rose-300">
-                              <AlertTriangle className="h-3 w-3" />
-                              <span className="line-clamp-1">{job.errorMessage}</span>
-                            </div>
-                          )}
-                          {job.status === "complete" && job.outputUrl && (
-                            <div className="mt-2">
-                              <a
-                                href={job.outputUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="inline-flex items-center gap-1.5 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-xs text-emerald-300 hover:bg-emerald-500/20"
-                              >
-                                <Download className="h-3.5 w-3.5" />
-                                <span>Open DOCX</span>
-                              </a>
-                            </div>
-                          )}
-                          <div className="mt-2 flex items-center justify-end gap-2">
-                            <button
-                              type="button"
-                              onClick={() => void handleReportRowAction(job)}
-                              disabled={Boolean(reportActionLoadingById[job.reportJobId])}
-                              className={cn(
-                                "inline-flex items-center rounded-md border px-2 py-1 text-xs transition-colors",
-                                getReportActionKind(job.status) === "cancel"
-                                  ? "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
-                                  : "border-rose-500/30 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20",
-                                reportActionLoadingById[job.reportJobId] && "cursor-not-allowed opacity-60"
-                              )}
-                            >
-                              {reportActionLoadingById[job.reportJobId]
-                                ? getReportActionKind(job.status) === "cancel"
-                                  ? "Cancelling..."
-                                  : "Deleting..."
-                                : getReportActionKind(job.status) === "cancel"
-                                  ? "Cancel"
-                                  : "Delete"}
-                            </button>
-                          </div>
-                          {reportActionErrorById[job.reportJobId] && (
-                            <div className="mt-1 text-[11px] text-rose-300">{reportActionErrorById[job.reportJobId]}</div>
-                          )}
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              </div>
-            )}
           </div>
         )}
 
@@ -2291,13 +1948,14 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         <TypewriterMarkdown
                           content={message.content}
                           className={cn(
+                            !isGlobal && "riley-md-light",
                             isGlobal &&
                               "text-[#1f2a44] [&_p]:text-[#1f2a44] [&_li]:text-[#1f2a44] [&_strong]:text-[#1f2a44] [&_em]:text-[#1f2a44] [&_h1]:text-[#1f2a44] [&_h2]:text-[#1f2a44] [&_h3]:text-[#1f2a44] [&_blockquote]:text-[#1f2a44] [&_code]:text-[#1f2a44] [&_pre]:text-[#1f2a44]"
                           )}
                         />
                       ) : message.role === "assistant" ? (
                         // Static markdown for previous assistant messages
-                        <div className={cn("riley-md", "text-[#1f2a44] [&_p]:text-[#1f2a44] [&_li]:text-[#1f2a44] [&_strong]:text-[#1f2a44] [&_em]:text-[#1f2a44] [&_h1]:text-[#1f2a44] [&_h2]:text-[#1f2a44] [&_h3]:text-[#1f2a44] [&_blockquote]:text-[#1f2a44] [&_code]:text-[#1f2a44] [&_pre]:text-[#1f2a44]")}>
+                        <div className={cn("riley-md", !isGlobal && "riley-md-light", "text-[#1f2a44] [&_p]:text-[#1f2a44] [&_li]:text-[#1f2a44] [&_strong]:text-[#1f2a44] [&_em]:text-[#1f2a44] [&_h1]:text-[#1f2a44] [&_h2]:text-[#1f2a44] [&_h3]:text-[#1f2a44] [&_blockquote]:text-[#1f2a44] [&_code]:text-[#1f2a44] [&_pre]:text-[#1f2a44]")}>
                           <ReactMarkdown remarkPlugins={[remarkBreaks]}>
                             {message.content.replace(/<br\s*\/?>/gi, '\n\n')}
                           </ReactMarkdown>

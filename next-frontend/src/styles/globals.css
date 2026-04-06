@@ -279,3 +279,31 @@ body {
   color: rgb(253, 224, 71); /* amber-300 */
   text-decoration-color: rgb(253, 224, 71);
 }
+
+/* Light-mode override for campaign Riley surfaces */
+.riley-md.riley-md-light {
+  color: #1f2a44;
+}
+
+.riley-md.riley-md-light h1,
+.riley-md.riley-md-light h2,
+.riley-md.riley-md-light h3,
+.riley-md.riley-md-light strong {
+  color: #1f2a44;
+}
+
+.riley-md.riley-md-light blockquote {
+  color: #5d687f;
+  border-left-color: rgba(212, 173, 71, 0.5);
+}
+
+.riley-md.riley-md-light code {
+  background: #f4efe3;
+  color: #1f2a44;
+}
+
+.riley-md.riley-md-light pre {
+  background-color: #f4efe3;
+  color: #1f2a44;
+  border-color: #ddd5c5;
+}

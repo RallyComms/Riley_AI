@@ -130,8 +130,10 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
       {/* Navigation */}
       <nav className="mt-3 min-h-0 flex-1 space-y-1 px-2 overflow-y-auto overflow-x-hidden">
         {navItems.map((item) => {
-          const isActive =
-            pathname === item.href || pathname.startsWith(item.href + "/");
+          const isOverviewItem = item.href === `/campaign/${campaignId}`;
+          const isActive = isOverviewItem
+            ? pathname === item.href
+            : pathname === item.href || pathname.startsWith(`${item.href}/`);
           return (
             <Link
               key={item.href}
