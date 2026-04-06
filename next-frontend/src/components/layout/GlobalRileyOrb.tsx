@@ -29,6 +29,8 @@ interface SavedPosition {
 
 const STORAGE_KEY = "riley_orb_pos";
 const DEFAULT_POSITION = { x: 0, y: 0 }; // Relative to bottom-right corner
+const FEED_LIMIT = 25;
+const FEED_POLL_INTERVAL_MS = 60000;
 
 export function GlobalRileyOrb() {
   const pathname = usePathname();
@@ -77,17 +79,20 @@ export function GlobalRileyOrb() {
   }, []);
 
   const fetchFeedRef = useRef<() => Promise<void>>();
+  const isFetchingFeedRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
     const fetchFeed = async () => {
       if (isMissionControlRoute) return;
       if (!isLoaded || !user?.id) return;
+      if (isFetchingFeedRef.current) return;
+      isFetchingFeedRef.current = true;
       try {
         const token = await getToken();
         if (!token) return;
         const data = await apiFetch<{ events: FeedEvent[] }>(
-          "/api/v1/campaigns/events/feed?limit=40",
+          `/api/v1/campaigns/events/feed?limit=${FEED_LIMIT}`,
           {
             token,
             method: "GET",
@@ -98,12 +103,14 @@ export function GlobalRileyOrb() {
         }
       } catch (err) {
         console.error("Failed to load Riley intelligence feed:", err);
+      } finally {
+        isFetchingFeedRef.current = false;
       }
     };
     fetchFeedRef.current = fetchFeed;
 
     fetchFeed();
-    const interval = setInterval(fetchFeed, 15000);
+    const interval = setInterval(fetchFeed, FEED_POLL_INTERVAL_MS);
 
     const handleVisibility = () => {
       if (document.visibilityState === "visible") {
@@ -162,6 +169,12 @@ export function GlobalRileyOrb() {
   const refreshFeed = useCallback(() => {
     fetchFeedRef.current?.();
   }, []);
+
+  useEffect(() => {
+    if (!isCollapsed) {
+      refreshFeed();
+    }
+  }, [isCollapsed, refreshFeed]);
 
   const handleDismiss = async (eventId: string) => {
     try {
