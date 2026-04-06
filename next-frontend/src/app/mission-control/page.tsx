@@ -200,6 +200,58 @@ type CloudInfrastructureCostData = {
   billing_source?: string;
 };
 
+type CloudRunBucketRow = {
+  action_count: number;
+  total_estimated_spend: number;
+  estimated_avg_spend_per_action: number;
+  avg_latency_ms: number;
+};
+
+type CloudRunOperationRow = CloudRunBucketRow & {
+  operation_type: string;
+  percent_of_cloud_window: number;
+};
+
+type CloudRunEndpointRow = CloudRunBucketRow & {
+  endpoint: string;
+};
+
+type CloudRunUserRow = CloudRunBucketRow & {
+  user_id: string;
+};
+
+type CloudRunCostAttributionData = {
+  timeframe?: MissionControlTimeframe;
+  timeframe_label?: string;
+  cloud_cost_is_available: boolean;
+  cloud_cost_unavailable_reason?: string;
+  cloud_window_cost_usd: number;
+  request_volume: {
+    total_requests: number;
+    total_duration_ms: number;
+    window_start_iso: string;
+  };
+  cost_per_action_estimates: {
+    chat: number;
+    report: number;
+    ingestion_job: number;
+    document_upload: number;
+    polling_cycle: number;
+  };
+  cost_by_operation_type: CloudRunOperationRow[];
+  cost_by_endpoint: CloudRunEndpointRow[];
+  cost_by_user: CloudRunUserRow[];
+  ocr_observability: {
+    action_count: number;
+    total_estimated_spend: number;
+    estimated_avg_spend_per_action: number;
+    avg_latency_ms: number;
+  };
+  top_cost_drivers: CloudRunOperationRow[];
+  most_expensive_endpoints: CloudRunEndpointRow[];
+  recommended_optimizations: string[];
+};
+
 type AdoptionData = {
   timeframe?: MissionControlTimeframe;
   timeframe_label?: string;
@@ -455,6 +507,36 @@ const defaultCloudInfrastructureCost: CloudInfrastructureCostData = {
   last_data_timestamp: "",
   billing_data_lag_hours: 0,
   billing_source: "",
+};
+
+const defaultCloudRunCostAttribution: CloudRunCostAttributionData = {
+  cloud_cost_is_available: false,
+  cloud_cost_unavailable_reason: "",
+  cloud_window_cost_usd: 0,
+  request_volume: {
+    total_requests: 0,
+    total_duration_ms: 0,
+    window_start_iso: "",
+  },
+  cost_per_action_estimates: {
+    chat: 0,
+    report: 0,
+    ingestion_job: 0,
+    document_upload: 0,
+    polling_cycle: 0,
+  },
+  cost_by_operation_type: [],
+  cost_by_endpoint: [],
+  cost_by_user: [],
+  ocr_observability: {
+    action_count: 0,
+    total_estimated_spend: 0,
+    estimated_avg_spend_per_action: 0,
+    avg_latency_ms: 0,
+  },
+  top_cost_drivers: [],
+  most_expensive_endpoints: [],
+  recommended_optimizations: [],
 };
 
 function asNumber(value: unknown): number {
@@ -941,6 +1023,85 @@ function normalizeCloudInfrastructureCost(raw: unknown): CloudInfrastructureCost
   };
 }
 
+function normalizeCloudRunCostAttribution(raw: unknown): CloudRunCostAttributionData {
+  const src = asRecord(raw);
+  const requestVolume = asRecord(src.request_volume);
+  const actionCosts = asRecord(src.cost_per_action_estimates);
+  const ocr = asRecord(src.ocr_observability);
+  const normalizeBucket = (row: unknown): CloudRunBucketRow => {
+    const item = asRecord(row);
+    return {
+      action_count: asNumber(item.action_count),
+      total_estimated_spend: asNumber(item.total_estimated_spend),
+      estimated_avg_spend_per_action: asNumber(item.estimated_avg_spend_per_action),
+      avg_latency_ms: asNumber(item.avg_latency_ms),
+    };
+  };
+  return {
+    timeframe: asString(src.timeframe, "30d") as MissionControlTimeframe,
+    timeframe_label: asString(src.timeframe_label, ""),
+    cloud_cost_is_available: Boolean(src.cloud_cost_is_available),
+    cloud_cost_unavailable_reason: asString(src.cloud_cost_unavailable_reason, ""),
+    cloud_window_cost_usd: asNumber(src.cloud_window_cost_usd),
+    request_volume: {
+      total_requests: asNumber(requestVolume.total_requests),
+      total_duration_ms: asNumber(requestVolume.total_duration_ms),
+      window_start_iso: asString(requestVolume.window_start_iso, ""),
+    },
+    cost_per_action_estimates: {
+      chat: asNumber(actionCosts.chat),
+      report: asNumber(actionCosts.report),
+      ingestion_job: asNumber(actionCosts.ingestion_job),
+      document_upload: asNumber(actionCosts.document_upload),
+      polling_cycle: asNumber(actionCosts.polling_cycle),
+    },
+    cost_by_operation_type: asArray(src.cost_by_operation_type).map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        operation_type: asString(item.operation_type, `operation_${idx + 1}`),
+        ...normalizeBucket(row),
+        percent_of_cloud_window: asNumber(item.percent_of_cloud_window),
+      };
+    }),
+    cost_by_endpoint: asArray(src.cost_by_endpoint).map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        endpoint: asString(item.endpoint, `endpoint_${idx + 1}`),
+        ...normalizeBucket(row),
+      };
+    }),
+    cost_by_user: asArray(src.cost_by_user).map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        user_id: asString(item.user_id, `user_${idx + 1}`),
+        ...normalizeBucket(row),
+      };
+    }),
+    ocr_observability: {
+      action_count: asNumber(ocr.action_count),
+      total_estimated_spend: asNumber(ocr.total_estimated_spend),
+      estimated_avg_spend_per_action: asNumber(ocr.estimated_avg_spend_per_action),
+      avg_latency_ms: asNumber(ocr.avg_latency_ms),
+    },
+    top_cost_drivers: asArray(src.top_cost_drivers).map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        operation_type: asString(item.operation_type, `operation_${idx + 1}`),
+        ...normalizeBucket(row),
+        percent_of_cloud_window: asNumber(item.percent_of_cloud_window),
+      };
+    }),
+    most_expensive_endpoints: asArray(src.most_expensive_endpoints).map((row, idx) => {
+      const item = asRecord(row);
+      return {
+        endpoint: asString(item.endpoint, `endpoint_${idx + 1}`),
+        ...normalizeBucket(row),
+      };
+    }),
+    recommended_optimizations: asArray(src.recommended_optimizations).map((item) => asString(item, "")).filter(Boolean),
+  };
+}
+
 function safeDateLabel(value: string): string {
   if (!value) return "";
   const d = new Date(value);
@@ -1050,6 +1211,10 @@ export default function MissionControlPage() {
   const [qdrantMetricsLoading, setQdrantMetricsLoading] = useState(false);
   const [cloudInfraCost, setCloudInfraCost] = useState<CloudInfrastructureCostData>(defaultCloudInfrastructureCost);
   const [cloudInfraCostLoading, setCloudInfraCostLoading] = useState(false);
+  const [cloudRunAttribution, setCloudRunAttribution] = useState<CloudRunCostAttributionData>(
+    defaultCloudRunCostAttribution
+  );
+  const [cloudRunAttributionLoading, setCloudRunAttributionLoading] = useState(false);
   const [resolvingFailureIds, setResolvingFailureIds] = useState<Record<string, boolean>>({});
   const cacheRef = useRef<Map<string, unknown>>(new Map());
   const abortControllersRef = useRef<Map<string, AbortController>>(new Map());
@@ -1269,11 +1434,38 @@ export default function MissionControlPage() {
     }
   }, [getToken, isLoaded]);
 
+  const fetchCloudRunCostAttribution = useCallback(async () => {
+    if (!isLoaded) return;
+    setCloudRunAttributionLoading(true);
+    try {
+      const token = await getToken();
+      if (!token) throw new Error("Authentication required.");
+      const payload = await apiFetch(
+        `/api/v1/mission-control/cloud-run-cost-attribution?timeframe=${encodeURIComponent(timeframeRef.current)}`,
+        { token, method: "GET" }
+      );
+      setCloudRunAttribution(normalizeCloudRunCostAttribution(payload));
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.status === 403) {
+        setAccessDenied(true);
+        return;
+      }
+      setCloudRunAttribution({
+        ...defaultCloudRunCostAttribution,
+        cloud_cost_is_available: false,
+        cloud_cost_unavailable_reason: err instanceof Error ? err.message : "Cloud Run attribution unavailable.",
+      });
+    } finally {
+      setCloudRunAttributionLoading(false);
+    }
+  }, [getToken, isLoaded]);
+
   useEffect(() => {
     if (!isLoaded || activeTab !== "cost") return;
     void fetchQdrantMetrics();
     void fetchCloudInfrastructureCost();
-  }, [activeTab, fetchCloudInfrastructureCost, fetchQdrantMetrics, isLoaded]);
+    void fetchCloudRunCostAttribution();
+  }, [activeTab, fetchCloudInfrastructureCost, fetchCloudRunCostAttribution, fetchQdrantMetrics, isLoaded, timeframe]);
 
   const topKpis = useMemo(() => {
     return [
@@ -1846,6 +2038,111 @@ export default function MissionControlPage() {
                                   row.service,
                                   `$${asNumber(row.cost).toFixed(2)}`,
                                 ])}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                    <div className="rounded-lg border border-slate-200 bg-white p-4">
+                      <div className="mb-3 flex items-center justify-between gap-2">
+                        <p className="text-sm font-semibold">Cloud Run Cost Attribution ({timeframeLabel})</p>
+                        <span className="text-xs text-slate-500">
+                          Runtime-weighted allocation over billed cloud window
+                        </span>
+                      </div>
+                      {cloudRunAttributionLoading ? (
+                        <p className="text-sm text-slate-500">Loading Cloud Run attribution...</p>
+                      ) : !cloudRunAttribution.cloud_cost_is_available ? (
+                        <div className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                          Cloud Run attribution is unavailable.
+                          {cloudRunAttribution.cloud_cost_unavailable_reason
+                            ? ` ${cloudRunAttribution.cloud_cost_unavailable_reason}`
+                            : ""}
+                        </div>
+                      ) : (
+                        <div className="space-y-4">
+                          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                            <Metric
+                              label="Estimated Total Spend"
+                              value={`$${asNumber(cloudRunAttribution.cloud_window_cost_usd).toFixed(2)}`}
+                            />
+                            <Metric
+                              label="Action Count"
+                              value={cloudRunAttribution.request_volume.total_requests}
+                            />
+                            <Metric
+                              label="Average Latency (ms)"
+                              value={
+                                cloudRunAttribution.request_volume.total_requests > 0
+                                  ? (
+                                      asNumber(cloudRunAttribution.request_volume.total_duration_ms) /
+                                      asNumber(cloudRunAttribution.request_volume.total_requests)
+                                    ).toFixed(2)
+                                  : "0.00"
+                              }
+                            />
+                          </div>
+                          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+                            <div>
+                              <p className="mb-2 text-sm font-semibold">By Operation Type</p>
+                              <SimpleTable
+                                emptyLabel="No Cloud Run operation attribution rows."
+                                columns={[
+                                  "Operation",
+                                  "Estimated Total Spend",
+                                  "Action Count",
+                                  "Estimated Avg Spend / Action",
+                                  "Average Latency (ms)",
+                                ]}
+                                rows={cloudRunAttribution.cost_by_operation_type.map((row) => [
+                                  row.operation_type,
+                                  `$${asNumber(row.total_estimated_spend).toFixed(4)}`,
+                                  asNumber(row.action_count),
+                                  `$${asNumber(row.estimated_avg_spend_per_action).toFixed(6)}`,
+                                  asNumber(row.avg_latency_ms).toFixed(2),
+                                ])}
+                              />
+                            </div>
+                            <div>
+                              <p className="mb-2 text-sm font-semibold">By Endpoint</p>
+                              <SimpleTable
+                                emptyLabel="No Cloud Run endpoint attribution rows."
+                                columns={[
+                                  "Endpoint",
+                                  "Estimated Total Spend",
+                                  "Action Count",
+                                  "Estimated Avg Spend / Action",
+                                  "Average Latency (ms)",
+                                ]}
+                                rows={cloudRunAttribution.cost_by_endpoint.slice(0, 10).map((row) => [
+                                  row.endpoint,
+                                  `$${asNumber(row.total_estimated_spend).toFixed(4)}`,
+                                  asNumber(row.action_count),
+                                  `$${asNumber(row.estimated_avg_spend_per_action).toFixed(6)}`,
+                                  asNumber(row.avg_latency_ms).toFixed(2),
+                                ])}
+                              />
+                            </div>
+                          </div>
+                          <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                            <p className="mb-3 text-sm font-semibold">OCR Observability</p>
+                            <div className="grid grid-cols-1 gap-3 md:grid-cols-4">
+                              <Metric
+                                label="OCR Invocation Count"
+                                value={cloudRunAttribution.ocr_observability.action_count}
+                              />
+                              <Metric
+                                label="OCR Estimated Total Spend"
+                                value={`$${asNumber(cloudRunAttribution.ocr_observability.total_estimated_spend).toFixed(4)}`}
+                              />
+                              <Metric
+                                label="OCR Estimated Avg Spend / Action"
+                                value={`$${asNumber(cloudRunAttribution.ocr_observability.estimated_avg_spend_per_action).toFixed(6)}`}
+                              />
+                              <Metric
+                                label="OCR Average Latency (ms)"
+                                value={asNumber(cloudRunAttribution.ocr_observability.avg_latency_ms).toFixed(2)}
                               />
                             </div>
                           </div>
