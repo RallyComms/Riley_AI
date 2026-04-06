@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import "@app/styles/globals.css";
 import { cn } from "@app/lib/utils";
 import { Providers } from "./providers";
-import { GlobalRileyOrb } from "@app/components/layout/GlobalRileyOrb";
 import { GridBackground } from "@app/components/layout/GridBackground";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
@@ -36,7 +35,6 @@ export default function RootLayout({
         >
           <Providers>
             {children}
-            <GlobalRileyOrb />
           </Providers>
         </ClerkProvider>
       </body>
