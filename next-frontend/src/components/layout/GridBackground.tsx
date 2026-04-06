@@ -31,11 +31,6 @@ export function GridBackground() {
   const isCampaignRoute = pathname?.startsWith("/campaign");
   const [isMounted, setIsMounted] = useState(false);
 
-  // Campaign surfaces own their own light background system.
-  if (isCampaignRoute) {
-    return null;
-  }
-
   // Prevent hydration mismatch - only render dynamic content after mount
   useEffect(() => {
     setIsMounted(true);
@@ -89,6 +84,12 @@ export function GridBackground() {
     
     return particlesArray;
   }, [isHomePage]);
+
+  // Campaign surfaces own their own light background system.
+  // Important: keep this return after hooks so hook order is stable across route changes.
+  if (isCampaignRoute) {
+    return null;
+  }
 
   // Return simple background during SSR to prevent hydration mismatch
   if (!isMounted) {
