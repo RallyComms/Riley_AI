@@ -3,12 +3,12 @@
 import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname, useParams } from "next/navigation";
+import { useUser } from "@clerk/nextjs";
 import {
   LayoutDashboard,
   MessageSquare,
   Search,
   FileText,
-  Home,
   Clapperboard,
   Inbox,
   Target,
@@ -16,8 +16,8 @@ import {
   ChevronRight,
   MessageCircle,
 } from "lucide-react";
-import { UserButton } from "@clerk/nextjs";
 import { cn } from "@app/lib/utils";
+import { useCampaignName } from "@app/lib/useCampaignName";
 
 type NavItem = {
   name: string;
@@ -34,9 +34,11 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
   const params = useParams();
   const campaignId = params.id as string;
   const pathname = usePathname();
+  const { user } = useUser();
+  const { name: campaignName } = useCampaignName(campaignId);
   const [isMounted, setIsMounted] = useState(false);
 
-  // Defer UserButton rendering until after mount to prevent hydration mismatch
+  // Defer user identity rendering until after mount for hydration safety.
   useEffect(() => {
     setIsMounted(true);
   }, []);
@@ -81,7 +83,7 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
       name: "Riley AI",
       href: `/campaign/${campaignId}/riley`,
       icon: (
-        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-amber-400/20 text-[11px] font-semibold text-amber-300">
+        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#dbe5f2] text-[11px] font-semibold text-[#1f2a44]">
           R
         </span>
       ),
@@ -96,26 +98,37 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
   return (
     <aside
       className={cn(
-        "h-screen fixed left-0 top-0 z-40 border-r border-slate-800 bg-slate-900/60 backdrop-blur-xl transition-all duration-300 flex flex-col",
+        "h-screen min-h-0 shrink-0 border-r border-[#dbe3ee] bg-[#edf2f8] text-[#1f2a44] transition-all duration-300 flex flex-col overflow-hidden",
         isCollapsed ? "w-20" : "w-64"
       )}
     >
-      {/* Logo */}
-      <div className={cn("flex h-16 items-center border-b border-white/5 px-6", isCollapsed && "justify-center")}>
+      <div className={cn("px-5 pt-5 pb-4 border-b border-[#dbe3ee]", isCollapsed && "px-3")}>
         <Link
           href="/"
           className={cn(
-            "flex items-center gap-2 text-lg font-semibold text-slate-100 transition-colors hover:text-amber-400",
-            isCollapsed && "justify-center"
+            "mb-5 inline-flex items-center gap-1.5 text-xs text-[#6b7280] hover:text-[#1f2a44] transition-colors",
+            isCollapsed && "mb-3 justify-center w-full"
           )}
         >
-          <Home className="h-5 w-5 flex-shrink-0" />
-          {!isCollapsed && <span>RILEY | PLATFORM</span>}
+          <ChevronLeft className="h-3.5 w-3.5 flex-shrink-0" />
+          {!isCollapsed && <span>All Campaigns</span>}
         </Link>
+        {!isCollapsed ? (
+          <>
+            <h2 className="line-clamp-2 break-words text-lg font-semibold tracking-tight leading-tight text-[#1f2a44]" title={campaignName || "Campaign"}>
+              {campaignName || "Campaign"}
+            </h2>
+            <p className="mt-1 text-[11px] text-[#6b7280]">Active campaign</p>
+          </>
+        ) : (
+          <div className="mx-auto h-9 w-9 rounded-full bg-[#e2e9f3] text-[#1f2a44] text-sm font-semibold flex items-center justify-center">
+            {(campaignName || "C").slice(0, 1).toUpperCase()}
+          </div>
+        )}
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 mt-6 space-y-2 px-2 overflow-y-auto">
+      <nav className="mt-3 min-h-0 flex-1 space-y-1 px-2 overflow-y-auto overflow-x-hidden">
         {navItems.map((item) => {
           const isActive =
             pathname === item.href || pathname.startsWith(item.href + "/");
@@ -124,55 +137,54 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
               key={item.href}
               href={item.href}
               className={cn(
-                "flex items-center gap-3 px-4 py-3 text-sm font-medium text-slate-400 transition-all duration-200 mx-2 rounded-lg",
+                "mx-1 flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors border-l-2",
                 isCollapsed ? "justify-center px-3" : "",
                 isActive
-                  ? "text-amber-400 bg-amber-400/10 border border-amber-400/20 shadow-[0_0_15px_rgba(251,191,36,0.1)]"
-                  : "hover:text-amber-400 hover:bg-amber-400/10 hover:shadow-[0_0_15px_rgba(251,191,36,0.1)]"
+                  ? "border-[#d4ad47] bg-[#e8edf7] text-[#1f2a44] font-medium"
+                  : "border-transparent text-[#6b7280] hover:text-[#1f2a44] hover:bg-[#e4ebf5]"
               )}
               title={isCollapsed ? item.name : undefined}
             >
               <span className="flex-shrink-0">{item.icon}</span>
-              {!isCollapsed && <span>{item.name}</span>}
+              {!isCollapsed && <span className="truncate">{item.name}</span>}
+              {!isCollapsed && isActive && (
+                <span className="ml-auto h-1.5 w-1.5 rounded-full bg-[#d4ad47]" />
+              )}
             </Link>
           );
         })}
       </nav>
 
-      {/* User Profile - Pushed to bottom */}
-      <div className={cn("mt-auto border-t border-white/5 p-4", isCollapsed && "flex justify-center")}>
-        <div className={cn("flex items-center", isCollapsed ? "justify-center" : "gap-3")}>
-          {!isMounted ? (
-            // Skeleton placeholder to prevent hydration mismatch
-            <>
-              <div className="h-8 w-8 rounded-full bg-slate-700/50 animate-pulse flex-shrink-0" />
-              {!isCollapsed && (
-                <div className="h-4 w-24 rounded bg-slate-700/50 animate-pulse" />
-              )}
-            </>
-          ) : (
-            <UserButton
-              showName={!isCollapsed}
-              appearance={{
-                elements: {
-                  avatarBox: "h-8 w-8",
-                  userButtonPopoverCard: "bg-slate-900/95 border border-white/5 backdrop-blur-xl",
-                  userButtonPopoverActions: "bg-slate-900/95",
-                  userButtonPopoverActionButton: "text-slate-100 hover:bg-amber-400/10 hover:text-amber-400",
-                  userButtonPopoverFooter: "hidden",
-                },
-              }}
-            />
-          )}
-        </div>
+      {/* User mini-profile */}
+      <div className={cn("mt-auto border-t border-[#dbe3ee] p-4", isCollapsed && "px-3")}>
+        {!isMounted ? (
+          <div className="h-8 w-full rounded bg-[#e2e9f3] animate-pulse" />
+        ) : isCollapsed ? (
+          <div className="mx-auto h-8 w-8 rounded-full bg-[#e2e9f3] text-xs font-semibold flex items-center justify-center text-[#1f2a44]">
+            {(user?.firstName?.[0] || user?.username?.[0] || user?.primaryEmailAddress?.emailAddress?.[0] || "U").toUpperCase()}
+          </div>
+        ) : (
+          <div className="flex items-center gap-2.5">
+            <div className="h-8 w-8 rounded-full bg-[#e2e9f3] text-xs font-semibold flex items-center justify-center shrink-0 text-[#1f2a44]">
+              {(user?.firstName?.[0] || user?.username?.[0] || user?.primaryEmailAddress?.emailAddress?.[0] || "U").toUpperCase()}
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-xs font-medium text-[#1f2a44]">
+                {user?.fullName || user?.username || "Campaign member"}
+              </p>
+              <p className="text-[10px] text-[#6b7280]">Campaign member</p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Toggle Button - At Bottom */}
       <button
         type="button"
         onClick={onToggle}
-        className="w-full p-4 border-t border-white/5 hover:bg-amber-400/10 hover:text-amber-400 cursor-pointer flex justify-center items-center transition-all duration-200 text-slate-400"
+        className="w-full p-3 border-t border-[#dbe3ee] hover:bg-[#e4ebf5] hover:text-[#1f2a44] cursor-pointer flex justify-center items-center transition-all duration-200 text-[#6b7280]"
         aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
       >
         {isCollapsed ? (
           <ChevronRight className="h-5 w-5" />
