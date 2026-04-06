@@ -83,7 +83,7 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
       name: "Riley AI",
       href: `/campaign/${campaignId}/riley`,
       icon: (
-        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#dbe5f2] text-[11px] font-semibold text-[#1f2a44]">
+        <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#dcebe5] text-[11px] font-semibold text-[#1f2a44]">
           R
         </span>
       ),
@@ -98,15 +98,15 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
   return (
     <aside
       className={cn(
-        "h-screen min-h-0 shrink-0 border-r border-[#dbe3ee] bg-[#edf2f8] text-[#1f2a44] transition-all duration-300 flex flex-col overflow-hidden",
+        "h-screen min-h-0 shrink-0 border-r border-[#cddfd8] bg-[#e6f2ee] text-[#1f2a44] transition-all duration-300 flex flex-col overflow-hidden",
         isCollapsed ? "w-20" : "w-64"
       )}
     >
-      <div className={cn("px-5 pt-5 pb-4 border-b border-[#dbe3ee]", isCollapsed && "px-3")}>
+      <div className={cn("px-5 pt-5 pb-4 border-b border-[#cddfd8]", isCollapsed && "px-3")}>
         <Link
           href="/"
           className={cn(
-            "mb-5 inline-flex items-center gap-1.5 text-xs text-[#6b7280] hover:text-[#1f2a44] transition-colors",
+            "mb-5 inline-flex items-center gap-1.5 text-xs text-[#64748b] hover:text-[#1f2a44] transition-colors",
             isCollapsed && "mb-3 justify-center w-full"
           )}
         >
@@ -118,10 +118,10 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
             <h2 className="line-clamp-2 break-words text-lg font-semibold tracking-tight leading-tight text-[#1f2a44]" title={campaignName || "Campaign"}>
               {campaignName || "Campaign"}
             </h2>
-            <p className="mt-1 text-[11px] text-[#6b7280]">Active campaign</p>
+            <p className="mt-1 text-[11px] text-[#64748b]">Active campaign</p>
           </>
         ) : (
-          <div className="mx-auto h-9 w-9 rounded-full bg-[#e2e9f3] text-[#1f2a44] text-sm font-semibold flex items-center justify-center">
+          <div className="mx-auto h-9 w-9 rounded-full bg-[#dcebe5] text-[#1f2a44] text-sm font-semibold flex items-center justify-center">
             {(campaignName || "C").slice(0, 1).toUpperCase()}
           </div>
         )}
@@ -140,8 +140,8 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
                 "mx-1 flex items-center gap-2.5 rounded-md px-3 py-2 text-sm transition-colors border-l-2",
                 isCollapsed ? "justify-center px-3" : "",
                 isActive
-                  ? "border-[#d4ad47] bg-[#e8edf7] text-[#1f2a44] font-medium"
-                  : "border-transparent text-[#6b7280] hover:text-[#1f2a44] hover:bg-[#e4ebf5]"
+                  ? "border-[#d4ad47] bg-[#dcebe5] text-[#1f2a44] font-medium"
+                  : "border-transparent text-[#64748b] hover:text-[#1f2a44] hover:bg-[#d7e8e0]"
               )}
               title={isCollapsed ? item.name : undefined}
             >
@@ -156,23 +156,23 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
       </nav>
 
       {/* User mini-profile */}
-      <div className={cn("mt-auto border-t border-[#dbe3ee] p-4", isCollapsed && "px-3")}>
+      <div className={cn("mt-auto border-t border-[#cddfd8] p-4", isCollapsed && "px-3")}>
         {!isMounted ? (
-          <div className="h-8 w-full rounded bg-[#e2e9f3] animate-pulse" />
+          <div className="h-8 w-full rounded bg-[#dcebe5] animate-pulse" />
         ) : isCollapsed ? (
-          <div className="mx-auto h-8 w-8 rounded-full bg-[#e2e9f3] text-xs font-semibold flex items-center justify-center text-[#1f2a44]">
+          <div className="mx-auto h-8 w-8 rounded-full bg-[#dcebe5] text-xs font-semibold flex items-center justify-center text-[#1f2a44]">
             {(user?.firstName?.[0] || user?.username?.[0] || user?.primaryEmailAddress?.emailAddress?.[0] || "U").toUpperCase()}
           </div>
         ) : (
           <div className="flex items-center gap-2.5">
-            <div className="h-8 w-8 rounded-full bg-[#e2e9f3] text-xs font-semibold flex items-center justify-center shrink-0 text-[#1f2a44]">
+            <div className="h-8 w-8 rounded-full bg-[#dcebe5] text-xs font-semibold flex items-center justify-center shrink-0 text-[#1f2a44]">
               {(user?.firstName?.[0] || user?.username?.[0] || user?.primaryEmailAddress?.emailAddress?.[0] || "U").toUpperCase()}
             </div>
             <div className="min-w-0">
               <p className="truncate text-xs font-medium text-[#1f2a44]">
                 {user?.fullName || user?.username || "Campaign member"}
               </p>
-              <p className="text-[10px] text-[#6b7280]">Campaign member</p>
+              <p className="text-[10px] text-[#64748b]">Campaign member</p>
             </div>
           </div>
         )}
@@ -182,7 +182,7 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
       <button
         type="button"
         onClick={onToggle}
-        className="w-full p-3 border-t border-[#dbe3ee] hover:bg-[#e4ebf5] hover:text-[#1f2a44] cursor-pointer flex justify-center items-center transition-all duration-200 text-[#6b7280]"
+        className="w-full p-3 border-t border-[#cddfd8] hover:bg-[#d7e8e0] hover:text-[#1f2a44] cursor-pointer flex justify-center items-center transition-all duration-200 text-[#64748b]"
         aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
         title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
       >

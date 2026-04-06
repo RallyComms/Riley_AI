@@ -28,7 +28,13 @@ interface Particle {
 export function GridBackground() {
   const pathname = usePathname();
   const isHomePage = pathname === "/";
+  const isCampaignRoute = pathname?.startsWith("/campaign");
   const [isMounted, setIsMounted] = useState(false);
+
+  // Campaign surfaces own their own light background system.
+  if (isCampaignRoute) {
+    return null;
+  }
 
   // Prevent hydration mismatch - only render dynamic content after mount
   useEffect(() => {
