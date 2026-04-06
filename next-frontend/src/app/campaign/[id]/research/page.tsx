@@ -3,72 +3,134 @@
 import { useState, useEffect } from "react";
 import { useParams } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
-import { TrendingUp, BarChart3, FileText, Lightbulb, X, Search, FileType2, Table, Presentation, Image as ImageIcon } from "lucide-react";
-import { RileyContextChat, getRileyTitle } from "@app/components/campaign/RileyContextChat";
+import {
+  TrendingUp,
+  FileText,
+  X,
+  Search,
+  FileType2,
+  Table,
+  Presentation,
+  Image as ImageIcon,
+  Radar,
+  Radio,
+  Scale,
+  Sparkles,
+  Link2,
+  ExternalLink,
+} from "lucide-react";
+import { RileyContextChat } from "@app/components/campaign/RileyContextChat";
 import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { Asset } from "@app/lib/types";
 import { cn } from "@app/lib/utils";
 import { apiFetch } from "@app/lib/api";
 import { toAsset } from "@app/lib/files";
 
-// Mock research insights
-const mockInsights = [
+const previewKpis = [
   {
-    id: "1",
-    title: "Voter Sentiment Shift",
-    description: "Support for environmental policy increased 12% in Q3 polling data.",
-    type: "trend",
+    label: "Narrative Momentum",
+    value: "+11.8%",
+    note: "Projected positive movement from monitored discourse segments.",
     icon: TrendingUp,
   },
   {
-    id: "2",
-    title: "Demographic Analysis",
-    description: "18-34 age group shows strongest engagement with messaging campaigns.",
-    type: "analysis",
-    icon: BarChart3,
+    label: "Monitored Feed Groups",
+    value: "24",
+    note: "Media, social, policy, and stakeholder watchlists in preview scope.",
+    icon: Radio,
   },
   {
-    id: "3",
-    title: "Key Messaging Themes",
-    description: "Top performing themes: 'Community First', 'Sustainable Future', 'Local Impact'.",
-    type: "insight",
-    icon: Lightbulb,
+    label: "Legislative Priority Flags",
+    value: "7",
+    note: "Hearing windows and filing events requiring rapid campaign response.",
+    icon: Scale,
   },
   {
-    id: "4",
-    title: "Competitive Landscape",
-    description: "Analysis of opponent messaging strategies and positioning gaps.",
-    type: "analysis",
-    icon: FileText,
-  },
-  {
-    id: "5",
-    title: "Media Coverage Trends",
-    description: "Positive coverage increased 23% following Q3 campaign launch.",
-    type: "trend",
-    icon: TrendingUp,
-  },
-  {
-    id: "6",
-    title: "Policy Impact Metrics",
-    description: "Survey data shows 68% support for proposed policy changes.",
-    type: "insight",
-    icon: BarChart3,
+    label: "Listening Agents",
+    value: "5",
+    note: "Campaign-specific monitor agents planned for continuous signal capture.",
+    icon: Radar,
   },
 ];
 
-function getInsightColor(type: string) {
-  switch (type) {
-    case "trend":
-      return "border-emerald-500/30 bg-emerald-500/10";
-    case "analysis":
-      return "border-blue-500/30 bg-blue-500/10";
-    case "insight":
-      return "border-amber-500/30 bg-amber-500/10";
-    default:
-      return "border-zinc-800 bg-zinc-900/50";
-  }
-}
+const mockSignals = [
+  {
+    id: "sig-1",
+    sourceType: "Media",
+    title: "Regional energy-cost framing shifts from skepticism to pragmatism",
+    insight: "Language in local press now favors affordability-and-reliability framing over policy abstractions.",
+    confidence: "high",
+    source: "Regional business press + TV recap transcripts",
+    action: "Prepare localized proof points for spokespeople before next interview cycle.",
+  },
+  {
+    id: "sig-2",
+    sourceType: "Social",
+    title: "Volunteer channels surface sustained transportation cost anxiety",
+    insight: "Community conversations repeatedly connect mobility costs to broader household pressure narratives.",
+    confidence: "medium",
+    source: "Closed volunteer community channels",
+    action: "Prioritize message variants emphasizing immediate household impact.",
+  },
+  {
+    id: "sig-3",
+    sourceType: "Legislative",
+    title: "State committee hearing moved up one week",
+    insight: "Compressed timeline reduces campaign response window for briefing prep and coalition alignment.",
+    confidence: "high",
+    source: "State committee calendar updates",
+    action: "Trigger accelerated briefing package and surrogate outreach sequence.",
+  },
+  {
+    id: "sig-4",
+    sourceType: "Polling",
+    title: "Parent audience confidence softens on reliability-focused messaging",
+    insight: "Audience response strengthens when language shifts to concrete household outcomes and near-term wins.",
+    confidence: "medium",
+    source: "Panel polling + message-fragment testing",
+    action: "Shift near-term copy testing toward concrete savings and service stability examples.",
+  },
+];
+
+const intelligenceBrief = [
+  "Narrative momentum is positive, but confidence depends on preserving practical, household-first language.",
+  "Policy calendar compression creates a near-term execution risk across briefing, media prep, and coalition sync.",
+  "Audience response is strongest when recommendations translate into immediate, concrete campaign moves.",
+];
+
+const liveSignalsPreview = [
+  {
+    id: "live-1",
+    sourceName: "State Energy Docket Watch",
+    description: "Agenda amendment added reliability testimony window for Tuesday hearing.",
+    timestamp: "11:42 AM",
+  },
+  {
+    id: "live-2",
+    sourceName: "Regional Media Pulse",
+    description: "Morning segment package reframed affordability narrative around service stability.",
+    timestamp: "10:18 AM",
+  },
+  {
+    id: "live-3",
+    sourceName: "Community Listening Agent",
+    description: "Parent-thread volume increased on commuting cost concerns in two target counties.",
+    timestamp: "9:07 AM",
+  },
+];
+
+type SourceLink = {
+  id: string;
+  title: string;
+  url: string;
+};
+
+const roadmapItems = [
+  "Automated source credibility scoring across feed clusters",
+  "Event-driven briefing generation tied to campaign priorities",
+  "Cross-campaign pattern detection and anomaly alerts",
+  "Analyst-ready daily intelligence digest with explainable signal traces",
+];
 
 function getFileIcon(type: Asset["type"]) {
   switch (type) {
@@ -96,34 +158,51 @@ export default function ResearchPage() {
   const [isLoading, setIsLoading] = useState(true);
   const [selectedFile, setSelectedFile] = useState<Asset | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [sourceLinks, setSourceLinks] = useState<SourceLink[]>([]);
+  const [isAddSourceOpen, setIsAddSourceOpen] = useState(false);
+  const [newSourceTitle, setNewSourceTitle] = useState("");
+  const [newSourceUrl, setNewSourceUrl] = useState("");
+  const [sourceError, setSourceError] = useState<string | null>(null);
 
-  // Fetch files from backend and filter by Research tag
+  useEffect(() => {
+    if (!isChatOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setIsChatOpen(false);
+      }
+    };
+    const shouldLockBody = window.innerWidth < 1024;
+    const previousOverflow = document.body.style.overflow;
+    if (shouldLockBody) {
+      document.body.style.overflow = "hidden";
+    }
+    window.addEventListener("keydown", handleEscape);
+    return () => {
+      window.removeEventListener("keydown", handleEscape);
+      if (shouldLockBody) {
+        document.body.style.overflow = previousOverflow;
+      }
+    };
+  }, [isChatOpen]);
+
   useEffect(() => {
     const fetchFiles = async () => {
       if (!campaignId) return;
-
       try {
         const token = await getToken();
         if (!token) {
           throw new Error("Authentication required");
         }
-        
         const data = await apiFetch<{ files: any[] }>(
           `/api/v1/list?tenant_id=${encodeURIComponent(campaignId)}`,
-          {
-            token,
-            method: "GET",
-          }
+          { token, method: "GET" }
         );
-
-        // Convert backend file list to Asset format and filter by Research tag
         const fetchedAssets: Asset[] = data.files
           .filter((file: any) => {
             const tags = Array.isArray(file.tags) ? file.tags : [];
             return tags.includes("Research");
           })
           .map((file: any) => toAsset(file, { status: "ready" }));
-
         setAssets(fetchedAssets);
       } catch (error) {
         console.error("Error fetching files:", error);
@@ -132,176 +211,412 @@ export default function ResearchPage() {
         setIsLoading(false);
       }
     };
+    void fetchFiles();
+  }, [campaignId, getToken]);
 
-    fetchFiles();
+  useEffect(() => {
+    if (!campaignId) return;
+    try {
+      const raw = window.localStorage.getItem(`research_source_links_${campaignId}`);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return;
+      const safeLinks = parsed
+        .map((item: any) => ({
+          id: String(item?.id || ""),
+          title: String(item?.title || "").trim(),
+          url: String(item?.url || "").trim(),
+        }))
+        .filter((item: SourceLink) => item.id && item.title && item.url);
+      setSourceLinks(safeLinks);
+    } catch {
+      setSourceLinks([]);
+    }
   }, [campaignId]);
 
-  // Handle viewing an asset from citation badge
+  useEffect(() => {
+    if (!campaignId) return;
+    try {
+      window.localStorage.setItem(
+        `research_source_links_${campaignId}`,
+        JSON.stringify(sourceLinks)
+      );
+    } catch {
+      // no-op
+    }
+  }, [campaignId, sourceLinks]);
+
   const handleViewAsset = (filename: string) => {
-    // Search for the asset in the local assets state
     const asset = assets.find((a) => a.name === filename);
-    
     if (asset) {
       setSelectedFile(asset);
     } else {
-      // Asset not found in current view (might be Global/Archived)
-      alert(`Asset "${filename}" not found in current view (might be Global/Archived).`);
+      alert(
+        `Asset "${filename}" not found in current view (might be Global/Archived).`
+      );
     }
   };
 
-  // Filter assets by search query
   const filteredAssets = assets.filter((asset) =>
     asset.name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  const confidenceClass = (confidence: string) => {
+    if (confidence === "high") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700";
+    if (confidence === "medium") return "border-amber-500/30 bg-amber-500/10 text-amber-700";
+    return "border-rose-500/30 bg-rose-500/10 text-rose-700";
+  };
+
+  const handleAddSourceLink = () => {
+    const title = newSourceTitle.trim();
+    const url = newSourceUrl.trim();
+    if (!title || !url) {
+      setSourceError("Title and URL are required.");
+      return;
+    }
+    try {
+      const parsed = new URL(url);
+      if (!["http:", "https:"].includes(parsed.protocol)) {
+        setSourceError("Please enter a valid http/https URL.");
+        return;
+      }
+      setSourceLinks((prev) => [
+        {
+          id: `${Date.now()}`,
+          title,
+          url: parsed.toString(),
+        },
+        ...prev,
+      ]);
+      setNewSourceTitle("");
+      setNewSourceUrl("");
+      setSourceError(null);
+      setIsAddSourceOpen(false);
+    } catch {
+      setSourceError("Please enter a valid URL.");
+    }
+  };
+
   return (
-    <div className="flex h-full relative">
-      {/* MIDDLE: Research Content */}
-      <div className="flex-1 flex flex-col overflow-hidden">
-        <header className="flex items-center justify-between p-6 border-b border-zinc-800">
-          <h1 className="text-2xl font-bold text-zinc-100">Research Lab</h1>
-          <div className="flex items-center gap-3">
-            {/* Search Bar */}
+    <div className="relative flex h-full min-h-0 bg-[#f7f5ef]">
+      <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <header className="flex flex-wrap items-end justify-between gap-4 border-b border-[#e5ddce] px-6 py-5 lg:px-8">
+          <div>
+            <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-[#d4ad47]/40 bg-[#f4ecd7] px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-[#6d560f]">
+              <Sparkles className="h-3.5 w-3.5" />
+              Coming Soon
+            </div>
+            <h1 className="text-2xl font-semibold tracking-tight text-[#1f2a44]">
+              Research - Riley V2 Intelligence Center
+            </h1>
+            <p className="mt-1 max-w-3xl text-sm text-[#6f788a]">
+              Strategic preview of the intelligence layer Riley V2 is bringing to campaign decision-making.
+            </p>
+            <p className="mt-1 text-xs text-[#9a8a5b]">Illustrative preview only - feeds and agent outputs shown here are not live production integrations yet.</p>
+          </div>
+          <div className="flex items-center gap-2">
             <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-zinc-500" />
+              <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-[#8a90a0]" />
               <input
                 type="text"
                 placeholder="Search research files..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-10 pr-4 py-2 bg-zinc-900/50 border border-zinc-800 rounded-lg text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50 w-64"
+                className="w-64 rounded-lg border border-[#d8d0bf] bg-white py-2 pl-10 pr-4 text-sm text-[#1f2a44] placeholder:text-[#8a90a0] focus:outline-none focus:ring-2 focus:ring-[#d4ad47]/40"
               />
             </div>
-            {/* THE "OPEN" BUTTON - Only visible if chat is closed */}
-            {!isChatOpen && (
-              <button
-                onClick={() => setIsChatOpen(true)}
-                className="flex items-center gap-2 text-amber-500 hover:bg-zinc-900 px-4 py-2 rounded-md transition-colors"
-              >
-                <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-amber-500/20 text-[9px] font-semibold text-amber-400">R</span>
-                <span>Ask Riley</span>
-              </button>
-            )}
-            {/* THE "HIDE" BUTTON - Only visible if chat is open */}
-            {isChatOpen && (
-              <button
-                onClick={() => setIsChatOpen(false)}
-                className="flex items-center gap-2 bg-amber-500/10 text-amber-500 border border-amber-500/50 hover:bg-amber-500/20 px-4 py-2 rounded-md transition-colors"
-              >
-                <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-amber-500/20 text-[9px] font-semibold text-amber-400">R</span>
-                <span>Hide Riley</span>
-              </button>
-            )}
+            <button
+              onClick={() => setIsChatOpen((prev) => !prev)}
+              className={`inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${
+                isChatOpen
+                  ? "border-[#ccb67d] bg-[#f2ebd6] text-[#1f2a44]"
+                  : "border-[#d8d0bf] bg-white text-[#1f2a44] hover:bg-[#f1ece2]"
+              }`}
+              aria-expanded={isChatOpen}
+              aria-controls="research-riley-panel"
+            >
+              <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#eadfb7] text-[11px] font-semibold text-[#6d560f]">
+                R
+              </span>
+              Ask Riley
+            </button>
           </div>
         </header>
 
-        {/* Scrollable Content Area */}
-        <div className="flex-1 overflow-y-auto p-6">
-          {/* Key Insights Section */}
-          <div className="mb-8">
-            <h2 className="text-lg font-semibold text-zinc-100 mb-4">Key Insights</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {mockInsights.map((insight) => {
-                const Icon = insight.icon;
-                return (
-                  <div
-                    key={insight.id}
-                    className={cn(
-                      "rounded-xl border backdrop-blur-md p-6 hover:border-opacity-50 transition-colors",
-                      getInsightColor(insight.type)
-                    )}
-                  >
-                    <div className="flex items-start gap-3 mb-3">
-                      <div className="flex-shrink-0 p-2 rounded-lg bg-zinc-900/50">
-                        <Icon className="h-5 w-5 text-zinc-300" />
-                      </div>
-                      <div className="flex-1">
-                        <h3 className="text-base font-semibold text-zinc-100 mb-1">
-                          {insight.title}
-                        </h3>
-                        <p className="text-sm text-zinc-400 leading-relaxed">
-                          {insight.description}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="mt-4 pt-4 border-t border-zinc-800/50">
-                      <span className="inline-flex items-center rounded-full bg-zinc-800/50 px-2.5 py-1 text-xs font-medium text-zinc-400 capitalize">
-                        {insight.type}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
+        <div className="flex-1 overflow-y-auto px-6 py-5 lg:px-8">
+          <section className="mb-5 rounded-xl border border-[#dfd6c5] bg-[#fcfbf8] p-4">
+            <div className="mb-2 flex items-center gap-2">
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-[#6f788a]">
+                Riley Intelligence Brief
+              </h2>
+              <span className="rounded-full border border-[#d4ad47]/40 bg-[#f4ecd7] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-[#6d560f]">
+                V2 Preview
+              </span>
             </div>
+            <ul className="space-y-1.5 text-sm text-[#2a3650]">
+              {intelligenceBrief.map((item) => (
+                <li key={item} className="flex items-start gap-2">
+                  <span className="mt-1.5 inline-block h-1.5 w-1.5 rounded-full bg-[#b7ad98]" />
+                  <span>{item}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+
+          <div className="mb-5 rounded-xl border border-[#dfd6c5] bg-[#f9f6ee] p-3">
+            <p className="text-xs text-[#6f788a]">
+              <span className="font-semibold text-[#1f2a44]">Riley V2 Preview:</span> This page demonstrates where research intelligence is heading - continuous monitoring, explainable signals, and briefing-ready campaign context in one place.
+            </p>
           </div>
 
-          {/* Source Material Section */}
-          <div>
-            <h2 className="text-lg font-semibold text-zinc-100 mb-4">Source Material</h2>
-            {isLoading ? (
-              <div className="flex items-center justify-center py-12">
-                <p className="text-zinc-500">Loading files...</p>
+          <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            {previewKpis.map((kpi) => (
+              <div key={kpi.label} className="rounded-xl border border-[#e5ddce] bg-[#fcfbf8] p-4">
+                <div className="mb-2 flex items-center gap-2 text-[#6f788a]">
+                  <kpi.icon className="h-4 w-4" />
+                  <span className="text-xs font-semibold uppercase tracking-wide">{kpi.label}</span>
+                </div>
+                <p className="text-xl font-semibold text-[#1f2a44]">{kpi.value}</p>
+                <p className="mt-1 text-xs text-[#8a90a0]">{kpi.note}</p>
               </div>
-            ) : filteredAssets.length === 0 ? (
-              <div className="flex items-center justify-center py-12">
-                <p className="text-zinc-500">
-                  {searchQuery ? "No files match your search." : "No files tagged with Research yet."}
+            ))}
+          </div>
+
+          <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+            <section className="xl:col-span-2">
+              <div className="mb-3 flex items-center gap-2">
+                <h2 className="text-sm font-semibold uppercase tracking-wider text-[#6f788a]">
+                  Intelligence Streams (Preview)
+                </h2>
+              </div>
+              <div className="space-y-3">
+                {mockSignals.map((signal) => (
+                  <div
+                    key={signal.id}
+                    className="rounded-xl border border-[#e5ddce] bg-[#fcfbf8] p-4"
+                  >
+                    <div className="mb-2 flex items-center justify-between gap-2">
+                      <span className="text-xs text-[#8a90a0]">
+                        {signal.sourceType}
+                      </span>
+                      <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide", confidenceClass(signal.confidence))}>
+                        {signal.confidence}
+                      </span>
+                    </div>
+                    <p className="text-sm font-semibold text-[#1f2a44]">
+                      {signal.title}
+                    </p>
+                    <p className="mt-1 text-sm text-[#6f788a]">{signal.insight}</p>
+                    <p className="mt-1 text-[11px] text-[#8a90a0]">Source: {signal.source}</p>
+                    <div className="mt-3 rounded-md border border-[#e9dfcb] bg-[#f9f6ee] px-2.5 py-2">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-[#6f788a]">
+                        Recommended campaign move
+                      </p>
+                      <p className="mt-0.5 text-xs text-[#6f788a]">{signal.action}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section>
+              <div className="mb-3 flex items-center gap-2">
+                <h2 className="text-sm font-semibold uppercase tracking-wider text-[#6f788a]">
+                  Live Signals (Preview)
+                </h2>
+              </div>
+              <div className="mb-4 rounded-xl border border-[#e5ddce] bg-[#fcfbf8] p-3">
+                <div className="space-y-2.5">
+                  {liveSignalsPreview.map((signal) => (
+                    <div key={signal.id} className="border-b border-[#ece6d9] pb-2.5 last:border-0 last:pb-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <p className="text-sm font-medium text-[#1f2a44]">{signal.sourceName}</p>
+                        <span className="text-[11px] text-[#8a90a0]">{signal.timestamp}</span>
+                      </div>
+                      <p className="mt-0.5 text-xs text-[#6f788a]">{signal.description}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mb-3 flex items-center gap-2">
+                <h2 className="text-sm font-semibold uppercase tracking-wider text-[#6f788a]">
+                  Source Material
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAddSourceOpen((prev) => !prev);
+                    setSourceError(null);
+                  }}
+                  className="ml-auto inline-flex items-center gap-1 rounded-md border border-[#d8d0bf] bg-white px-2 py-1 text-xs font-medium text-[#1f2a44] hover:bg-[#f1ece2]"
+                >
+                  <Link2 className="h-3 w-3" />
+                  Add Source Link
+                </button>
+              </div>
+              <div className="mb-3 rounded-lg border border-[#d8d0bf] bg-[#f9f6ee] px-3 py-2">
+                <p className="text-[11px] text-[#6f788a]">
+                  <span className="font-semibold text-[#1f2a44]">Preview note:</span> Source links added here are stored locally in this browser for this campaign preview only. They are not shared with teammates and are not persisted to backend systems.
                 </p>
               </div>
-            ) : (
-              <div className="space-y-2">
-                {filteredAssets.map((asset) => {
-                  const { icon: FileIcon, color: iconColor } = getFileIcon(asset.type);
-                  return (
+              {isAddSourceOpen ? (
+                <div className="mb-3 rounded-xl border border-[#e5ddce] bg-[#fcfbf8] p-3">
+                  <input
+                    type="text"
+                    value={newSourceTitle}
+                    onChange={(e) => setNewSourceTitle(e.target.value)}
+                    placeholder="Source title"
+                    className="mb-2 w-full rounded-md border border-[#d8d0bf] bg-white px-2 py-1.5 text-sm text-[#1f2a44] placeholder:text-[#8a90a0]"
+                  />
+                  <input
+                    type="url"
+                    value={newSourceUrl}
+                    onChange={(e) => setNewSourceUrl(e.target.value)}
+                    placeholder="https://..."
+                    className="w-full rounded-md border border-[#d8d0bf] bg-white px-2 py-1.5 text-sm text-[#1f2a44] placeholder:text-[#8a90a0]"
+                  />
+                  {sourceError ? <p className="mt-2 text-xs text-red-600">{sourceError}</p> : null}
+                  <div className="mt-2 flex justify-end">
                     <button
-                      key={asset.id}
-                      onClick={() => setSelectedFile(asset)}
-                      className="w-full flex items-center gap-4 p-4 rounded-lg border border-zinc-800 bg-zinc-900/30 hover:bg-zinc-900/50 hover:border-zinc-700 transition-colors text-left"
+                      type="button"
+                      onClick={handleAddSourceLink}
+                      className="rounded-md border border-[#d8d0bf] bg-white px-2.5 py-1 text-xs font-medium text-[#1f2a44] hover:bg-[#f1ece2]"
                     >
-                      <FileIcon className={cn("h-5 w-5 flex-shrink-0", iconColor)} />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-zinc-100 truncate">{asset.name}</p>
-                        <p className="text-xs text-zinc-500 mt-1">
-                          {asset.size} • {asset.uploader} • {new Date(asset.uploadDate).toLocaleDateString()}
-                        </p>
-                      </div>
+                      Save Link
                     </button>
-                  );
-                })}
+                  </div>
+                  <p className="mt-2 text-[11px] text-[#8a90a0]">Local preview-only link storage (campaign browser session).</p>
+                </div>
+              ) : null}
+              <div className="rounded-xl border border-[#e5ddce] bg-[#fcfbf8] p-3">
+                {isLoading ? (
+                  <div className="py-10 text-center text-sm text-[#8a90a0]">
+                    Loading files...
+                  </div>
+                ) : filteredAssets.length === 0 ? (
+                  <div className="py-10 text-center text-sm text-[#8a90a0]">
+                    {searchQuery
+                      ? "No files match your search."
+                      : "No files tagged with Research yet."}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {filteredAssets.map((asset) => {
+                      const { icon: FileIcon, color: iconColor } = getFileIcon(
+                        asset.type
+                      );
+                      return (
+                        <button
+                          key={asset.id}
+                          onClick={() => setSelectedFile(asset)}
+                          className="flex w-full items-center gap-3 rounded-lg border border-[#ece6d9] bg-white px-3 py-2 text-left transition-colors hover:bg-[#f5f1e8]"
+                        >
+                          <FileIcon
+                            className={cn("h-4 w-4 flex-shrink-0", iconColor)}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate text-sm font-medium text-[#1f2a44]">
+                              {asset.name}
+                            </p>
+                            <p className="mt-0.5 truncate text-[11px] text-[#8a90a0]">
+                              {asset.size} • {asset.uploader}
+                            </p>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            )}
+              {sourceLinks.length > 0 ? (
+                <div className="mt-3 rounded-xl border border-[#e5ddce] bg-[#fcfbf8] p-3">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-[#6f788a]">Added Source Links</p>
+                  <div className="space-y-2">
+                    {sourceLinks.map((link) => (
+                      <a
+                        key={link.id}
+                        href={link.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="flex items-center justify-between gap-2 rounded-md border border-[#ece6d9] bg-white px-2.5 py-2 text-left hover:bg-[#f5f1e8]"
+                      >
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium text-[#1f2a44]">{link.title}</p>
+                          <p className="truncate text-[11px] text-[#8a90a0]">{link.url}</p>
+                        </div>
+                        <ExternalLink className="h-3.5 w-3.5 shrink-0 text-[#6f788a]" />
+                      </a>
+                    ))}
+                  </div>
+                  <p className="mt-2 text-[11px] text-[#8a90a0]">
+                    Local preview list only - not shared and not backend-persistent.
+                  </p>
+                </div>
+              ) : null}
+              <div className="mt-4 rounded-xl border border-dashed border-[#d8d0bf] bg-[#f9f7f2] p-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-[#6f788a]">
+                  Next in Riley V2
+                </p>
+                <ul className="mt-2 space-y-1.5 text-xs text-[#8a90a0]">
+                  {roadmapItems.map((item) => (
+                    <li key={item}>- {item}</li>
+                  ))}
+                </ul>
+              </div>
+            </section>
           </div>
         </div>
       </div>
 
-      {/* RIGHT: Riley Chat - Conditionally Rendered */}
       {isChatOpen && (
-        <div className="w-[400px] border-l border-zinc-800 bg-zinc-900/50 backdrop-blur-sm flex flex-col h-full shrink-0">
-          {/* Header with CLOSE Button */}
-          <div className="h-16 flex items-center justify-between px-4 border-b border-zinc-800">
-            <span className="font-semibold text-amber-500 flex items-center gap-2">
-              <span className="inline-flex h-4 w-4 items-center justify-center rounded-full bg-amber-500/20 text-[9px] font-semibold text-amber-400">R</span> {getRileyTitle("research")}
-            </span>
-            <button
-              onClick={() => setIsChatOpen(false)}
-              className="text-zinc-500 hover:text-white p-2 transition-colors"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-          {/* The Chat Content */}
-          <div className="flex-1 overflow-hidden">
-            <RileyContextChat 
-              mode="research" 
-              contextKey="research" 
-              campaignId={campaignId}
-              onViewAsset={handleViewAsset}
-            />
-          </div>
-        </div>
+        <>
+          <button
+            type="button"
+            className="fixed inset-0 z-30 bg-[#1f2a44]/20 backdrop-blur-[1px] lg:hidden"
+            aria-label="Close Ask Riley panel backdrop"
+            onClick={() => setIsChatOpen(false)}
+          />
+          <aside
+            id="research-riley-panel"
+            className="fixed inset-y-0 right-0 z-40 w-[94vw] max-w-[400px] border-l border-[#d8d0bf] bg-[#fcfbf8] shadow-xl shadow-[#1f2a44]/10 lg:static lg:z-auto lg:h-full lg:w-[360px] lg:max-w-none lg:shadow-none"
+          >
+            <div className="flex h-full flex-col">
+              <div className="flex h-16 items-center justify-between border-b border-[#e5ddce] px-4">
+                <span className="inline-flex items-center gap-2 text-sm font-semibold text-[#1f2a44]">
+                  <span className="inline-flex h-5 w-5 items-center justify-center rounded-full bg-[#eadfb7] text-[11px] font-semibold text-[#6d560f]">
+                    R
+                  </span>
+                  Ask Riley
+                </span>
+                <button
+                  onClick={() => setIsChatOpen(false)}
+                  className="rounded-md p-1.5 text-[#6f788a] transition-colors hover:bg-[#f1ece2] hover:text-[#1f2a44]"
+                  aria-label="Close Ask Riley panel"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="border-b border-[#e5ddce] bg-white/80 px-4 py-3">
+                <p className="text-sm leading-relaxed text-[#1f2a44]">
+                  Welcome to Riley Research preview. I can help you evaluate these
+                  prototype intelligence streams, pressure-test assumptions, and
+                  draft strategic questions for Riley V2 rollout planning.
+                </p>
+              </div>
+              <div className="flex-1 overflow-hidden">
+                <RileyContextChat
+                  mode="research"
+                  contextKey="research"
+                  campaignId={campaignId}
+                  onViewAsset={handleViewAsset}
+                />
+              </div>
+            </div>
+          </aside>
+        </>
       )}
 
-      {/* Document Viewer Modal */}
       {selectedFile && (
         <DocumentViewer
           file={selectedFile}

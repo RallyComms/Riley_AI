@@ -1363,8 +1363,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     if (status === "queued") return "border-amber-500/30 bg-amber-500/10 text-amber-300";
     if (status === "cancelling") return "border-orange-500/30 bg-orange-500/10 text-orange-300";
     if (status === "processing") return "border-blue-500/30 bg-blue-500/10 text-blue-300";
-    if (status === "cancelled") return "border-zinc-500/30 bg-zinc-700/20 text-zinc-300";
-    if (status === "deleted") return "border-zinc-500/30 bg-zinc-700/20 text-zinc-300";
+    if (status === "cancelled") return "border-[#ddd5c5] bg-[#f7f2e8] text-[#6f788a]";
+    if (status === "deleted") return "border-[#ddd5c5] bg-[#f7f2e8] text-[#6f788a]";
     if (status === "complete") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
     return "border-rose-500/30 bg-rose-500/10 text-rose-300";
   };
@@ -1389,13 +1389,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     !isLoadingConversations &&
     conversations.length === 0 &&
     !activeConversationId;
-  const showCollapsedRail = isGlobal && !isSidebarOpen;
-  const shouldRenderSidebar = isGlobal || isSidebarOpen;
-  const sidebarWidthClass = isGlobal
-    ? isSidebarOpen
-      ? "w-[260px]"
-      : "w-16"
-    : "w-[260px]";
+  const showCollapsedRail = !isSidebarOpen;
+  const shouldRenderSidebar = true;
+  const sidebarWidthClass = isSidebarOpen ? "w-[260px]" : "w-16";
   const collapsedRailConversations = useMemo(
     () => conversations.slice(0, 8),
     [conversations]
@@ -1415,10 +1411,10 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           isActive
             ? isGlobal
               ? "bg-[#efe7d8] border border-[#e3dac8]"
-              : "bg-zinc-800/50 border border-amber-500/30"
+              : "bg-[#efe7d8] border border-[#d8cb9d]"
             : isGlobal
             ? "hover:bg-[#f2ece0] border border-transparent"
-            : "hover:bg-zinc-800/30 border border-transparent"
+            : "hover:bg-[#f2ece0] border border-transparent"
         )}
       >
         <div
@@ -1452,7 +1448,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   "flex-1 rounded px-2 py-1 text-sm focus:outline-none focus:ring-1",
                   isGlobal
                     ? "border border-[#d8d0bf] bg-white text-[#1f2a44] focus:ring-[#d4ad47]/40"
-                    : "border border-zinc-700 bg-zinc-900/50 text-zinc-100 focus:ring-amber-500/50"
+                    : "border border-[#d8d0bf] bg-white text-[#1f2a44] focus:ring-[#d4ad47]/40"
                 )}
                 disabled={isRenamingRequest}
               />
@@ -1460,7 +1456,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 type="button"
                 onClick={(e) => handleRenameSave(e, conv.id)}
                 disabled={isRenamingRequest}
-                className="p-1 rounded transition-colors text-amber-400 hover:bg-amber-500/10"
+                className="rounded p-1 text-[#7a5f19] transition-colors hover:bg-[#f2ece0]"
               >
                 <Check className="h-4 w-4" />
               </button>
@@ -1468,7 +1464,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 type="button"
                 onClick={(e) => handleRenameCancel(e)}
                 disabled={isRenamingRequest}
-                className="p-1 rounded text-zinc-500 hover:bg-zinc-800/50 transition-colors"
+                className="rounded p-1 text-[#7d8799] transition-colors hover:bg-[#f2ece0]"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -1477,9 +1473,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             <>
               <div className="flex items-start justify-between gap-2">
                 <div className="flex-1 min-w-0">
-                  <div className={cn("font-medium text-sm truncate", isGlobal ? "text-[#1f2a44]" : "text-zinc-100")}>{conv.title}</div>
-                  <div className={cn("text-xs mt-1 truncate", isGlobal ? "text-[#5d687f]" : "text-zinc-500")}>{conv.lastMessage}</div>
-                  <div className={cn("text-xs mt-1", isGlobal ? "text-[#8a90a0]" : "text-zinc-600")}>{formatTime(conv.timestamp)}</div>
+                  <div className={cn("truncate text-sm font-medium", isGlobal ? "text-[#1f2a44]" : "text-[#1f2a44]")}>{conv.title}</div>
+                  <div className={cn("mt-1 truncate text-xs", isGlobal ? "text-[#5d687f]" : "text-[#5d687f]")}>{conv.lastMessage}</div>
+                  <div className={cn("mt-1 text-xs", isGlobal ? "text-[#8a90a0]" : "text-[#8a90a0]")}>{formatTime(conv.timestamp)}</div>
                 </div>
                 <div className="relative">
                   <button
@@ -1490,14 +1486,14 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     }}
                     className={cn(
                       "p-1.5 rounded transition-all",
-                      isGlobal ? "hover:bg-[#e9e0d0]" : "hover:bg-zinc-700/70",
+                      isGlobal ? "hover:bg-[#e9e0d0]" : "hover:bg-[#e9e0d0]",
                       isMenuOpen || isActive
                         ? isGlobal
                           ? "text-[#4d5871]"
-                          : "text-zinc-300"
+                          : "text-[#4d5871]"
                         : isGlobal
                         ? "text-[#8a90a0] opacity-0 group-hover:opacity-100"
-                        : "text-zinc-500 opacity-0 group-hover:opacity-100"
+                        : "text-[#8a90a0] opacity-0 group-hover:opacity-100"
                     )}
                     title="Conversation actions"
                   >
@@ -1509,7 +1505,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         "absolute right-0 top-8 z-20 min-w-[180px] rounded-lg p-1 shadow-xl",
                         isGlobal
                           ? "border border-[#d8d0bf] bg-white/95"
-                          : "border border-zinc-700 bg-zinc-900/95"
+                          : "border border-[#d8d0bf] bg-white/95"
                       )}
                       onClick={(e) => e.stopPropagation()}
                     >
@@ -1527,15 +1523,15 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         }}
                         className={cn(
                           "w-full rounded-md px-2 py-1.5 text-left text-xs",
-                          isGlobal ? "text-[#1f2a44] hover:bg-[#f2ece0]" : "text-zinc-200 hover:bg-zinc-800"
+                          isGlobal ? "text-[#1f2a44] hover:bg-[#f2ece0]" : "text-[#1f2a44] hover:bg-[#f2ece0]"
                         )}
                       >
                         Rename
                       </button>
                       {projects.length > 0 && (
                         <>
-                          <div className={cn("my-1 border-t", isGlobal ? "border-[#e6dece]" : "border-zinc-800")} />
-                          <div className={cn("px-2 py-1 text-[10px] uppercase tracking-wide", isGlobal ? "text-[#8a90a0]" : "text-zinc-500")}>
+                          <div className={cn("my-1 border-t", isGlobal ? "border-[#e6dece]" : "border-[#e6dece]")} />
+                          <div className={cn("px-2 py-1 text-[10px] uppercase tracking-wide", isGlobal ? "text-[#8a90a0]" : "text-[#8a90a0]")}>
                             {conv.projectId ? "Move to Project" : "Add to Project"}
                           </div>
                           {projects.map((project) => (
@@ -1548,14 +1544,14 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                                 void handleAssignProject(conv.id, project.id);
                               }}
                               className={cn(
-                                "w-full rounded-md px-2 py-1.5 text-left text-xs hover:bg-zinc-800",
+                    "w-full rounded-md px-2 py-1.5 text-left text-xs hover:bg-[#f2ece0]",
                                 conv.projectId === project.id
                                   ? isGlobal
                                     ? "text-[#6d560f] bg-[#faf3df]"
                                     : "text-amber-300"
                                   : isGlobal
                                   ? "text-[#1f2a44] hover:bg-[#f2ece0]"
-                                  : "text-zinc-200"
+                                  : "text-[#1f2a44]"
                               )}
                             >
                               {project.name}
@@ -1573,13 +1569,13 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           }}
                           className={cn(
                             "mt-1 w-full rounded-md px-2 py-1.5 text-left text-xs",
-                            isGlobal ? "text-[#1f2a44] hover:bg-[#f2ece0]" : "text-zinc-200 hover:bg-zinc-800"
+                            isGlobal ? "text-[#1f2a44] hover:bg-[#f2ece0]" : "text-[#1f2a44] hover:bg-[#f2ece0]"
                           )}
                         >
                           Remove from Project{currentProject ? ` (${currentProject.name})` : ""}
                         </button>
                       )}
-                      <div className={cn("my-1 border-t", isGlobal ? "border-[#e6dece]" : "border-zinc-800")} />
+                      <div className={cn("my-1 border-t", isGlobal ? "border-[#e6dece]" : "border-[#e6dece]")} />
                       <button
                         type="button"
                         onClick={(e) => {
@@ -1589,7 +1585,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         }}
                         className={cn(
                           "w-full rounded-md px-2 py-1.5 text-left text-xs",
-                          isGlobal ? "text-rose-700 hover:bg-rose-50" : "text-rose-300 hover:bg-rose-500/10"
+                          isGlobal ? "text-rose-700 hover:bg-rose-50" : "text-rose-700 hover:bg-rose-50"
                         )}
                       >
                         Delete
@@ -1609,7 +1605,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     <div
       className={cn(
         "riley-layout flex h-full min-w-0 overflow-hidden",
-        isGlobal ? "bg-[#f8f5ef] text-[#1f2a44]" : "bg-slate-950/50 text-white backdrop-blur-sm"
+        isGlobal ? "bg-[#f8f5ef] text-[#1f2a44]" : "bg-[#f7f5ef] text-[#1f2a44]"
       )}
     >
       {/* Left Sidebar - Chat History */}
@@ -1617,7 +1613,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         <aside
           className={cn(
             "riley-sidebar border-r flex flex-col h-full shrink-0 overflow-hidden transition-[width] duration-200 ease-out",
-            isGlobal ? "bg-[#f3eee4] border-[#e3dac8]" : "bg-zinc-900/50 border-zinc-800",
+            isGlobal ? "bg-[#f3eee4] border-[#e3dac8]" : "bg-[#eef2e9] border-[#d9dfd2]",
             sidebarWidthClass
           )}
         >
@@ -1679,7 +1675,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           ) : (
           <>
           {/* Sidebar Header */}
-          <div className={cn("shrink-0 p-4 border-b flex items-center justify-between", isGlobal ? "border-[#e3dac8]" : "border-zinc-800")}>
+          <div className={cn("shrink-0 p-4 border-b flex items-center justify-between", isGlobal ? "border-[#e3dac8]" : "border-[#d9dfd2]")}>
             <div className="flex-1 mr-2 flex items-center gap-2">
               <div className="flex-1 grid grid-cols-2 gap-2">
                 <button
@@ -1689,11 +1685,11 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     "inline-flex items-center justify-center gap-1.5 h-10 rounded-lg border px-3 text-xs font-medium transition-colors",
                     isGlobal
                       ? "border-[#d8cb9d] bg-[#faf3df] text-[#6d560f] hover:bg-[#f3ebd3]"
-                      : "border-amber-500/20 bg-amber-500/10 text-amber-400 hover:bg-amber-500/20"
+                      : "border-[#d4ad47]/40 bg-[#f8f2df] text-[#7a5f19] hover:bg-[#f1e7ca]"
                   )}
                 >
                   <Sparkles className="h-3.5 w-3.5" />
-                  <span>{isGlobal ? "New Chat" : "New Conversation"}</span>
+                  <span>New Chat</span>
                 </button>
                 <button
                   type="button"
@@ -1702,7 +1698,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     "inline-flex items-center justify-center gap-1.5 h-10 rounded-lg border px-3 text-xs font-medium transition-colors",
                     isGlobal
                       ? "border-[#d8d0bf] bg-white text-[#4d5871] hover:bg-[#f7f2e8]"
-                      : "border-zinc-700 bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800/70"
+                      : "border-[#d5dccf] bg-[#f8faf6] text-[#5d687f] hover:bg-[#eef2e9]"
                   )}
                 >
                   <FolderPlus className="h-3.5 w-3.5" />
@@ -1717,7 +1713,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 "inline-flex h-10 w-10 items-center justify-center rounded-lg border transition-colors",
                 isGlobal
                   ? "border-[#d8d0bf] bg-white text-[#4d5871] hover:bg-[#f7f2e8]"
-                  : "border-zinc-700 bg-zinc-900/60 text-zinc-300 hover:bg-zinc-800/80 hover:text-zinc-100"
+                  : "border-[#d5dccf] bg-[#f8faf6] text-[#5d687f] hover:bg-[#eef2e9] hover:text-[#1f2a44]"
               )}
               aria-label="Close conversations panel"
               title="Close conversations panel"
@@ -1729,7 +1725,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           {/* Conversation List */}
           <div className="min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3 space-y-4">
             {isCreatingProject && (
-              <div className={cn("rounded-lg border p-2", isGlobal ? "border-[#d8d0bf] bg-white" : "border-zinc-700 bg-zinc-900/60")}>
+              <div className={cn("rounded-lg border p-2", isGlobal ? "border-[#d8d0bf] bg-white" : "border-[#d5dccf] bg-[#f8faf6]")}>
                 <input
                   type="text"
                   value={projectInput}
@@ -1740,7 +1736,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     "w-full rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-1",
                     isGlobal
                       ? "border border-[#d8d0bf] bg-white text-[#1f2a44] focus:ring-[#d4ad47]/40"
-                      : "border border-zinc-700 bg-zinc-900/70 text-zinc-100 focus:ring-amber-500/50"
+                      : "border border-[#d5dccf] bg-white text-[#1f2a44] focus:ring-[#d4ad47]/35"
                   )}
                 />
                 <div className="mt-2 flex items-center gap-2">
@@ -1751,7 +1747,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                       "rounded-md border px-2 py-1 text-xs transition-colors",
                       isGlobal
                         ? "bg-[#faf3df] border-[#d8cb9d] text-[#6d560f] hover:bg-[#f3ebd3]"
-                        : "bg-amber-500/20 border-amber-500/30 text-amber-300 hover:bg-amber-500/30"
+                        : "bg-[#f8f2df] border-[#d4ad47]/40 text-[#7a5f19] hover:bg-[#f1e7ca]"
                     )}
                   >
                     Create
@@ -1764,7 +1760,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     }}
                     className={cn(
                       "rounded-md border px-2 py-1 text-xs transition-colors",
-                      isGlobal ? "border-[#d8d0bf] text-[#6f788a] hover:bg-[#f2ece0]" : "border-zinc-700 text-zinc-400 hover:bg-zinc-800/70"
+                      isGlobal ? "border-[#d8d0bf] text-[#6f788a] hover:bg-[#f2ece0]" : "border-[#d5dccf] text-[#6f788a] hover:bg-[#eef2e9]"
                     )}
                   >
                     Cancel
@@ -1774,32 +1770,32 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             )}
 
             <div>
-              <div className={cn("px-2 pb-1 text-[11px] uppercase tracking-wide", isGlobal ? "text-[#8a90a0]" : "text-zinc-500")}>Projects</div>
+              <div className={cn("px-2 pb-1 text-[11px] uppercase tracking-wide", isGlobal ? "text-[#8a90a0]" : "text-[#7d8799]")}>Projects</div>
               <div className="space-y-2">
                 {projects.length === 0 ? (
-                  <div className={cn("px-2 py-1 text-xs", isGlobal ? "text-[#8a90a0]" : "text-zinc-600")}>No projects yet. Create one to group related chats.</div>
+                  <div className={cn("px-2 py-1 text-xs", isGlobal ? "text-[#8a90a0]" : "text-[#7d8799]")}>No projects yet. Create one to group related chats.</div>
                 ) : (
                   projects.map((project) => {
                     const projectConversations = conversations.filter((conv) => conv.projectId === project.id);
                     const isCollapsed = Boolean(collapsedProjectIds[project.id]);
                     return (
-                      <div key={project.id} className={cn("rounded-lg border p-2", isGlobal ? "border-[#e3dac8] bg-[#f7f2e8]" : "border-zinc-800/80 bg-zinc-900/30")}>
+                      <div key={project.id} className={cn("rounded-lg border p-2", isGlobal ? "border-[#e3dac8] bg-[#f7f2e8]" : "border-[#d9dfd2] bg-[#f2f6ee]")}>
                         <div className="flex items-center gap-1">
                           <button
                             type="button"
                             onClick={() => toggleProjectCollapsed(project.id)}
                             className={cn(
                               "flex min-w-0 flex-1 items-center gap-2 rounded-md px-1 py-1 text-left",
-                              isGlobal ? "hover:bg-[#efe7d8]" : "hover:bg-zinc-800/40"
+                              isGlobal ? "hover:bg-[#efe7d8]" : "hover:bg-[#e8efe3]"
                             )}
                           >
                             {isCollapsed ? (
-                              <ChevronRight className={cn("h-3.5 w-3.5", isGlobal ? "text-[#8a90a0]" : "text-zinc-500")} />
+                              <ChevronRight className={cn("h-3.5 w-3.5", isGlobal ? "text-[#8a90a0]" : "text-[#7d8799]")} />
                             ) : (
-                              <ChevronDown className={cn("h-3.5 w-3.5", isGlobal ? "text-[#8a90a0]" : "text-zinc-500")} />
+                              <ChevronDown className={cn("h-3.5 w-3.5", isGlobal ? "text-[#8a90a0]" : "text-[#7d8799]")} />
                             )}
-                            <Folder className={cn("h-3.5 w-3.5", isGlobal ? "text-[#6f788a]" : "text-zinc-400")} />
-                            <div className={cn("truncate text-xs font-medium", isGlobal ? "text-[#1f2a44]" : "text-zinc-300")}>{project.name}</div>
+                            <Folder className={cn("h-3.5 w-3.5", isGlobal ? "text-[#6f788a]" : "text-[#6f788a]")} />
+                            <div className={cn("truncate text-xs font-medium", isGlobal ? "text-[#1f2a44]" : "text-[#1f2a44]")}>{project.name}</div>
                           </button>
                           <button
                             type="button"
@@ -1809,7 +1805,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                             }}
                             className={cn(
                               "rounded p-1",
-                              isGlobal ? "text-[#8a90a0] hover:bg-[#efe7d8] hover:text-rose-700" : "text-zinc-500 hover:bg-zinc-800 hover:text-rose-300"
+                              isGlobal ? "text-[#8a90a0] hover:bg-[#efe7d8] hover:text-rose-700" : "text-[#7d8799] hover:bg-[#e8efe3] hover:text-rose-700"
                             )}
                             title="Delete project"
                             aria-label="Delete project"
@@ -1820,7 +1816,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         {!isCollapsed && (
                           <div className="space-y-1">
                             {projectConversations.length === 0 ? (
-                              <div className={cn("ml-4 px-2 py-1 text-xs", isGlobal ? "text-[#8a90a0]" : "text-zinc-600")}>No conversations.</div>
+                              <div className={cn("ml-4 px-2 py-1 text-xs", isGlobal ? "text-[#8a90a0]" : "text-[#7d8799]")}>No conversations.</div>
                             ) : (
                               projectConversations.map((conv) => renderConversationRow(conv, true))
                             )}
@@ -1833,12 +1829,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               </div>
             </div>
 
-            <div className={cn("mx-1 h-px", isGlobal ? "bg-[#e1d8c8]" : "bg-zinc-800")} />
+            <div className={cn("mx-1 h-px", isGlobal ? "bg-[#e1d8c8]" : "bg-[#d9dfd2]")} />
             <div>
-              <div className={cn("px-2 pb-1 text-[11px] uppercase tracking-wide", isGlobal ? "text-[#8a90a0]" : "text-zinc-500")}>Ungrouped chats</div>
+              <div className={cn("px-2 pb-1 text-[11px] uppercase tracking-wide", isGlobal ? "text-[#8a90a0]" : "text-[#7d8799]")}>Ungrouped chats</div>
               <div className="space-y-1">
                 {looseConversations.length === 0 ? (
-                  <div className={cn("px-2 py-1 text-xs", isGlobal ? "text-[#8a90a0]" : "text-zinc-600")}>No ungrouped chats yet.</div>
+                  <div className={cn("px-2 py-1 text-xs", isGlobal ? "text-[#8a90a0]" : "text-[#7d8799]")}>No ungrouped chats yet.</div>
                 ) : (
                   looseConversations.map((conv) => renderConversationRow(conv))
                 )}
@@ -1856,7 +1852,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         <header
           className={cn(
             "h-16 flex items-center justify-between px-6 shrink-0",
-            isGlobal ? "border-b border-[#e3dac8] bg-[#fbf8f2]" : "border-b border-zinc-800"
+            isGlobal ? "border-b border-[#e3dac8] bg-[#fbf8f2]" : "h-auto min-h-16 border-b border-[#e5ddce] bg-[#f7f5ef] py-3"
           )}
         >
           <div className="flex items-center gap-2">
@@ -1866,21 +1862,17 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 <p className="text-xs text-[#6f788a]">Rally Global Brain</p>
               </div>
             ) : (
-              <>
-                <div
-                  className={cn(
-                    "h-7 w-7 rounded-full flex items-center justify-center",
-                    "bg-amber-500/10 text-amber-400"
-                  )}
-                >
-                  <span className="text-xs font-semibold text-amber-300">R</span>
+              <div className="flex items-center gap-3">
+                <div className="flex h-8 w-8 items-center justify-center rounded-full border border-[#d8cb9d] bg-[#eadfb7]">
+                  <span className="text-xs font-semibold text-[#6d560f]">R</span>
                 </div>
-                <h1 className="text-lg font-bold text-white">Riley</h1>
-                <span className="text-zinc-600">|</span>
-                <span className="text-sm font-medium text-amber-500/90">{contextName}</span>
-              </>
+                <div>
+                  <h1 className="text-lg font-semibold text-[#1f2a44]">Riley</h1>
+                  <p className="text-xs text-[#6f788a]">{contextName || "Campaign Workspace"}</p>
+                </div>
+              </div>
             )}
-            {!isSidebarOpen && !isGlobal && (
+            {!isSidebarOpen && !isGlobal && !showCollapsedRail && (
               <button
                 type="button"
                 onClick={() => setIsSidebarOpen(true)}
@@ -1888,7 +1880,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   "ml-2 inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors",
                   isGlobal
                     ? "border-[#d8d0bf] bg-white text-[#4d5871] hover:bg-[#f7f2e8]"
-                    : "border-zinc-700 bg-zinc-900/50 text-zinc-300 hover:bg-zinc-800"
+                    : "border-[#d5dccf] bg-[#f8faf6] text-[#5d687f] hover:bg-[#eef2e9]"
                 )}
                 aria-label="Open sidebar"
                 title="Open sidebar"
@@ -1902,7 +1894,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               <button
                 type="button"
                 onClick={() => setIsReportModalOpen(true)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm bg-zinc-800/60 border border-zinc-700/70 text-zinc-200 hover:bg-zinc-800"
+                className="flex items-center gap-2 rounded-lg border border-[#d4ad47]/40 bg-[#f8f2df] px-3 py-1.5 text-sm text-[#7a5f19] hover:bg-[#f1e7ca]"
                 title="Generate long-form report"
               >
                 <ClipboardList className="h-4 w-4" />
@@ -1917,8 +1909,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   className={cn(
                     "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors",
                     mode === "fast"
-                      ? "bg-amber-500/10 border border-amber-500/20 text-amber-400"
-                      : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-500 hover:bg-zinc-800"
+                      ? "border border-[#d4ad47]/35 bg-white text-[#6d560f]"
+                      : "border border-[#ddd5c5] bg-[#f3f0e8] text-[#6f788a] hover:bg-[#ece6d8]"
                   )}
                 >
                   <Zap className="h-4 w-4" />
@@ -1930,8 +1922,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   className={cn(
                     "flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm transition-colors",
                     mode === "deep"
-                      ? "bg-amber-500/10 border border-amber-500/20 text-amber-400"
-                      : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-500 hover:bg-zinc-800"
+                      ? "border border-[#d4ad47]/35 bg-white text-[#6d560f]"
+                      : "border border-[#ddd5c5] bg-[#f3f0e8] text-[#6f788a] hover:bg-[#ece6d8]"
                   )}
                 >
                   <Brain className="h-4 w-4" />
@@ -1943,24 +1935,27 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         </header>
 
         {!isGlobal && (
-          <div className="border-b border-zinc-800 bg-zinc-900/35 px-6 py-2.5">
+          <div className="border-b border-[#e5ddce] bg-[#f6f2e8] px-6 py-2.5">
+            <div className="mb-2 text-xs text-[#6f788a]">
+              Riley is working with documents and strategy from this campaign.
+            </div>
             <button
               type="button"
               onClick={() => setIsCampaignStatusCollapsed((prev) => !prev)}
-              className="flex w-full items-center justify-between rounded-md px-1 py-1 text-left hover:bg-zinc-800/40"
+              className="flex w-full items-center justify-between rounded-md px-1 py-1 text-left hover:bg-[#efe7d7]"
               aria-label={isCampaignStatusCollapsed ? "Expand campaign status panel" : "Collapse campaign status panel"}
             >
               <div className="flex items-center gap-2">
                 {isCampaignStatusCollapsed ? (
-                  <ChevronRight className="h-4 w-4 text-zinc-400" />
+                  <ChevronRight className="h-4 w-4 text-[#7d8799]" />
                 ) : (
-                  <ChevronDown className="h-4 w-4 text-zinc-400" />
+                  <ChevronDown className="h-4 w-4 text-[#7d8799]" />
                 )}
-                <span className="text-sm font-medium text-zinc-200">Campaign status</span>
+                <span className="text-sm font-medium text-[#1f2a44]">Campaign status</span>
               </div>
               {isCampaignStatusCollapsed && (
                 <div className="flex flex-wrap items-center justify-end gap-2 text-[11px]">
-                  <span className="rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-0.5 text-zinc-200">
+                  <span className="rounded-md border border-[#ddd5c5] bg-[#f8f4ea] px-2 py-0.5 text-[#4d5871]">
                     Docs {indexSummary ? `${indexSummary.indexed_count}/${indexSummary.total_documents}` : "--"}
                   </span>
                   <span className="rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-0.5 text-blue-300">
@@ -1969,7 +1964,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   <span className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 text-rose-300">
                     Failed {indexSummary ? indexSummary.failed_count + indexSummary.low_text_count : 0}
                   </span>
-                  <span className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-amber-300">
+                  <span className="rounded-md border border-[#d4ad47]/35 bg-[#f8f2df] px-2 py-0.5 text-[#7a5f19]">
                     Reports {reportJobs.length}
                   </span>
                 </div>
@@ -1981,7 +1976,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 {indexSummary && (
                   <div>
                     <div className="flex flex-wrap items-center gap-3 text-xs">
-                      <span className="rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-zinc-200">
+                      <span className="rounded-md border border-[#ddd5c5] bg-[#f8f4ea] px-2 py-1 text-[#4d5871]">
                         Documents indexed: {indexSummary.indexed_count} / {indexSummary.total_documents}
                       </span>
                       <span className="rounded-md border border-blue-500/30 bg-blue-500/10 px-2 py-1 text-blue-300">
@@ -2004,19 +1999,19 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                       </span>
                       <a
                         href={`/campaign/${tenantId}/assets`}
-                        className="rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-amber-300 hover:bg-amber-500/20"
+                        className="rounded-md border border-[#d4ad47]/35 bg-[#f8f2df] px-2 py-1 text-[#7a5f19] hover:bg-[#f1e7ca]"
                       >
                         View documents
                       </a>
                     </div>
-                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-zinc-400">
+                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-[#7d8799]">
                       {Object.entries(indexSummary.counts_by_file_type || {})
                         .sort((a, b) => b[1] - a[1])
                         .slice(0, 8)
                         .map(([fileType, count]) => (
                           <span
                             key={fileType}
-                            className="rounded-full border border-zinc-700 bg-zinc-800/40 px-2 py-0.5"
+                            className="rounded-full border border-[#ddd5c5] bg-[#f8f4ea] px-2 py-0.5"
                           >
                             {fileType}: {count}
                           </span>
@@ -2033,32 +2028,32 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   </div>
                 )}
 
-                <div className={cn("mt-3", indexSummary && "border-t border-zinc-800 pt-3")}>
+                <div className={cn("mt-3", indexSummary && "border-t border-[#e5ddce] pt-3")}>
                   <div className="flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-2 text-sm text-zinc-200">
-                      <ClipboardList className="h-4 w-4 text-amber-400" />
+                    <div className="flex items-center gap-2 text-sm text-[#1f2a44]">
+                      <ClipboardList className="h-4 w-4 text-[#7a5f19]" />
                       <span>Report Jobs</span>
                     </div>
                     <button
                       type="button"
                       onClick={() => void loadReportJobs()}
-                      className="rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                      className="rounded-md border border-[#ddd5c5] bg-[#f8f4ea] px-2 py-1 text-xs text-[#4d5871] hover:bg-[#f2ece0]"
                     >
                       Refresh
                     </button>
                   </div>
                   <div className="mt-2 space-y-2">
                     {isReportsLoading && reportJobs.length === 0 ? (
-                      <div className="text-xs text-zinc-500">Loading report jobs...</div>
+                      <div className="text-xs text-[#7d8799]">Loading report jobs...</div>
                     ) : reportJobs.length === 0 ? (
-                      <div className="text-xs text-zinc-500">No report jobs yet. Use Generate Report to start one.</div>
+                      <div className="text-xs text-[#7d8799]">No report jobs yet. Use Generate Report to start one.</div>
                     ) : (
                       reportJobs.slice(0, 6).map((job) => (
-                        <div key={job.reportJobId} className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-2">
+                        <div key={job.reportJobId} className="rounded-lg border border-[#ddd5c5] bg-[#faf7ef] p-2">
                           <div className="flex items-start justify-between gap-2">
                             <div className="min-w-0">
-                              <div className="truncate text-sm text-zinc-100">{job.title}</div>
-                              <div className="mt-1 text-[11px] text-zinc-500">
+                              <div className="truncate text-sm text-[#1f2a44]">{job.title}</div>
+                              <div className="mt-1 text-[11px] text-[#7d8799]">
                                 {formatReportDate(job.createdAt)}
                               </div>
                             </div>
@@ -2067,7 +2062,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                             </span>
                           </div>
                           {job.summaryText && (
-                            <div className="mt-1 text-xs text-zinc-400 line-clamp-2">{job.summaryText}</div>
+                            <div className="mt-1 line-clamp-2 text-xs text-[#6f788a]">{job.summaryText}</div>
                           )}
                           {job.status === "failed" && job.errorMessage && (
                             <div className="mt-1 inline-flex items-center gap-1 text-xs text-rose-300">
@@ -2132,18 +2127,20 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 <div className="mb-8 flex justify-center">
                   <div className={cn(
                     "h-20 w-20 rounded-full border flex items-center justify-center",
-                    isGlobal ? "bg-[#eadfb7] border-[#d8cb9d]" : "bg-amber-500/10 border-amber-500/20"
+                    "bg-[#eadfb7] border-[#d8cb9d]"
                   )}>
-                    <span className={cn("text-3xl font-semibold", isGlobal ? "text-[#6d560f]" : "text-amber-300")}>R</span>
+                    <span className="text-3xl font-semibold text-[#6d560f]">R</span>
                   </div>
                 </div>
-                <h2 className={cn("text-3xl font-bold mb-2", isGlobal ? "text-[#1f2a44]" : "text-white")}>
+                <h2 className="mb-2 text-3xl font-bold text-[#1f2a44]">
                   Hi, I'm Riley.
                 </h2>
-                <p className={cn("mb-8", isGlobal ? "text-[#6f788a]" : "text-zinc-400")}>
-                  I have access to <strong className={cn(
-                    isGlobal ? "text-[#6d560f]" : "text-amber-400"
-                  )}>{isGlobal ? "Rally Global Brain" : contextName}</strong>. Ask me anything about strategy, messaging, or historical data.
+                <p className="mb-8 text-[#6f788a]">
+                  {isGlobal ? (
+                    <>I have access to <strong className="text-[#6d560f]">Rally Global Brain</strong>. Ask me anything about strategy, messaging, or historical data.</>
+                  ) : (
+                    <>I can help you analyze strategy, messaging, and documents in this campaign.</>
+                  )}
                 </p>
 
                 {/* Prompt Starters */}
@@ -2163,12 +2160,12 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           "p-6 md:p-8 text-left rounded-lg border transition-all duration-200 ease-out text-sm",
                           isGlobal
                             ? "bg-white border-[#e3dac8] hover:bg-[#fdfaf3] hover:border-[#d8cb9d]"
-                            : "bg-slate-900/50 border-white/5 hover:border-amber-500/30 hover:bg-amber-500/5 hover:scale-[1.02] hover:shadow-[0_0_20px_rgba(251,191,36,0.1)]"
+                            : "bg-[#f8f4ea] border-[#ddd5c5] hover:bg-[#f2ece0] hover:border-[#d8cb9d]"
                         )}
                       >
                         <div className="flex items-start gap-3">
                           <Icon className={cn("h-5 w-5 flex-shrink-0 mt-0.5", prompt.color)} />
-                          <span className={cn("font-medium", isGlobal ? "text-[#1f2a44]" : "text-zinc-300")}>{prompt.text}</span>
+                          <span className="font-medium text-[#1f2a44]">{prompt.text}</span>
                         </div>
                       </button>
                     );
@@ -2182,7 +2179,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             <div
               className={cn(
                 "chat-content w-full px-6 py-8 space-y-6",
-                isGlobal ? "max-w-[700px]" : "mx-auto max-w-3xl"
+                isGlobal ? "max-w-[700px]" : "mx-auto max-w-[700px]"
               )}
             >
               {messages.map((message, index) => {
@@ -2210,10 +2207,10 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                       <div
                         className={cn(
                           "flex-shrink-0 h-8 w-8 rounded-full border flex items-center justify-center",
-                          isGlobal ? "bg-[#eadfb7] border-[#d8cb9d]" : "bg-amber-500/10 border-amber-500/20"
+                          "bg-[#eadfb7] border-[#d8cb9d]"
                         )}
                       >
-                        <span className={cn("text-xs font-semibold", isGlobal ? "text-[#6d560f]" : "text-amber-300")}>R</span>
+                        <span className="text-xs font-semibold text-[#6d560f]">R</span>
                       </div>
                     )}
                     <div
@@ -2223,14 +2220,14 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         message.role === "user"
                           ? isGlobal
                             ? "bg-[#4f6386] text-white"
-                            : "bg-amber-500/10 border border-amber-500/20 text-amber-100"
+                            : "bg-[#4f6386] text-white"
                           : message.role === "system"
                           ? isGlobal
                             ? "bg-[#f0eadf] text-[#6f788a] italic border border-[#e3dac8]"
-                            : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-300 italic"
+                            : "bg-[#f0eadf] border border-[#e3dac8] text-[#6f788a] italic"
                           : isGlobal
                           ? "bg-[#f1eee8] border border-[#e3dac8] text-[#1f2a44]"
-                          : "bg-zinc-900/50 border border-zinc-800/50 text-zinc-100"
+                          : "bg-[#f1eee8] border border-[#e3dac8] text-[#1f2a44]"
                       )}
                     >
                       {message.role !== "system" && message.status !== "thinking" && (
@@ -2239,7 +2236,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                             "absolute right-2 top-2 flex items-center gap-1 rounded-md border p-1 opacity-0 transition-opacity group-hover/message:opacity-100",
                             isGlobal
                               ? "border-[#d8d0bf] bg-white/90"
-                              : "border-zinc-700/70 bg-zinc-900/85"
+                              : "border-[#ddd5c5] bg-white/95"
                           )}
                         >
                           <button
@@ -2249,7 +2246,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                               "rounded p-1",
                               isGlobal
                                 ? "text-[#6f788a] hover:bg-[#f2ece0] hover:text-[#1f2a44]"
-                                : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                                : "text-[#6f788a] hover:bg-[#f2ece0] hover:text-[#1f2a44]"
                             )}
                             title="Edit message"
                           >
@@ -2262,7 +2259,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                               "rounded p-1",
                               isGlobal
                                 ? "text-[#6f788a] hover:bg-[#f2ece0] hover:text-[#1f2a44]"
-                                : "text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+                                : "text-[#6f788a] hover:bg-[#f2ece0] hover:text-[#1f2a44]"
                             )}
                             title="Resend message"
                           >
@@ -2275,7 +2272,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                               "rounded p-1",
                               isGlobal
                                 ? "text-[#6f788a] hover:bg-[#f2ece0] hover:text-rose-700"
-                                : "text-zinc-400 hover:bg-zinc-800 hover:text-rose-300"
+                                : "text-[#6f788a] hover:bg-[#f2ece0] hover:text-rose-700"
                             )}
                             title="Delete message pair"
                           >
@@ -2285,7 +2282,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                       )}
                       {message.status === "thinking" ? (
                         // Thinking placeholder
-                        <div className={cn("flex items-center gap-2 text-sm", isGlobal ? "text-[#4d5871]" : "text-zinc-400")}>
+                        <div className={cn("flex items-center gap-2 text-sm", isGlobal ? "text-[#4d5871]" : "text-[#6f788a]")}>
                           <Loader2 className="h-4 w-4 animate-spin" />
                           <span>Riley is thinking...</span>
                         </div>
@@ -2300,7 +2297,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         />
                       ) : message.role === "assistant" ? (
                         // Static markdown for previous assistant messages
-                        <div className={cn("riley-md", isGlobal && "text-[#1f2a44] [&_p]:text-[#1f2a44] [&_li]:text-[#1f2a44] [&_strong]:text-[#1f2a44] [&_em]:text-[#1f2a44] [&_h1]:text-[#1f2a44] [&_h2]:text-[#1f2a44] [&_h3]:text-[#1f2a44] [&_blockquote]:text-[#1f2a44] [&_code]:text-[#1f2a44] [&_pre]:text-[#1f2a44]")}>
+                        <div className={cn("riley-md", "text-[#1f2a44] [&_p]:text-[#1f2a44] [&_li]:text-[#1f2a44] [&_strong]:text-[#1f2a44] [&_em]:text-[#1f2a44] [&_h1]:text-[#1f2a44] [&_h2]:text-[#1f2a44] [&_h3]:text-[#1f2a44] [&_blockquote]:text-[#1f2a44] [&_code]:text-[#1f2a44] [&_pre]:text-[#1f2a44]")}>
                           <ReactMarkdown remarkPlugins={[remarkBreaks]}>
                             {message.content.replace(/<br\s*\/?>/gi, '\n\n')}
                           </ReactMarkdown>
@@ -2341,7 +2338,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           <button
                             type="button"
                             onClick={() => void executeSend(message.reportSuggestionPrompt || "", { bypassReportIntent: true })}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-[#ddd5c5] bg-[#f8f4ea] px-2 py-1 text-[11px] text-[#4d5871] hover:bg-[#f2ece0]"
                           >
                             <MessageSquare className="h-3.5 w-3.5" />
                             <span>Continue in chat</span>
@@ -2353,7 +2350,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           <button
                             type="button"
                             onClick={() => handleCopyAssistantMessage(message.id, message.content)}
-                            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-800/40 px-2 py-1 text-[11px] text-zinc-300 hover:bg-zinc-800"
+                            className="inline-flex items-center gap-1.5 rounded-md border border-[#ddd5c5] bg-[#f8f4ea] px-2 py-1 text-[11px] text-[#4d5871] hover:bg-[#f2ece0]"
                             title="Copy response markdown"
                           >
                             {copiedMessageId === message.id ? (
@@ -2374,7 +2371,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         <div
                           className={cn(
                             "mt-2 flex items-center gap-1.5 border-t pt-2 text-xs",
-                            isGlobal ? "border-[#ddd5c5] text-[#5d687f]" : "border-zinc-800 text-zinc-500"
+                            isGlobal ? "border-[#ddd5c5] text-[#5d687f]" : "border-[#ddd5c5] text-[#5d687f]"
                           )}
                         >
                           <span>📚</span>
@@ -2382,7 +2379,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         </div>
                       )}
                       {message.role === "assistant" && displaySources.length > 0 && (
-                        <div className={cn("mt-2 border-t pt-2", isGlobal ? "border-[#ddd5c5]" : "border-zinc-800")}>
+                        <div className={cn("mt-2 border-t pt-2", isGlobal ? "border-[#ddd5c5]" : "border-[#ddd5c5]")}>
                           <button
                             type="button"
                             onClick={() =>
@@ -2393,7 +2390,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                             }
                             className={cn(
                               "mb-1 inline-flex items-center gap-1.5 text-xs",
-                              isGlobal ? "text-[#5d687f] hover:text-[#1f2a44]" : "text-zinc-400 hover:text-zinc-200"
+                              isGlobal ? "text-[#5d687f] hover:text-[#1f2a44]" : "text-[#5d687f] hover:text-[#1f2a44]"
                             )}
                           >
                             {isSourcesOpen ? (
@@ -2419,10 +2416,10 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                                     hasAsset
                                       ? isGlobal
                                         ? "border-[#d8cb9d] bg-[#faf3df] text-[#6d560f] hover:bg-[#f3ebd3]"
-                                        : "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                                        : "border-[#d8cb9d] bg-[#faf3df] text-[#6d560f] hover:bg-[#f3ebd3]"
                                       : isGlobal
                                       ? "border-[#ddd5c5] bg-[#f7f2e8] text-[#8a90a0] cursor-not-allowed"
-                                      : "border-zinc-700 bg-zinc-800/40 text-zinc-500 cursor-not-allowed"
+                                      : "border-[#ddd5c5] bg-[#f7f2e8] text-[#8a90a0] cursor-not-allowed"
                                   )}
                                   title={hasAsset ? `Open ${source.filename}` : "Source unavailable"}
                                 >
@@ -2430,7 +2427,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                                     <FileText className="h-3 w-3" />
                                     <span className="max-w-[220px] truncate">{source.filename}</span>
                                   </span>
-                                  <span className={cn("text-[10px]", isGlobal ? "text-[#6f788a]" : "text-zinc-400")}>
+                                  <span className={cn("text-[10px]", isGlobal ? "text-[#6f788a]" : "text-[#6f788a]")}>
                                     {source.location || "unknown"}
                                   </span>
                                 </button>
@@ -2445,7 +2442,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                       <div
                         className={cn(
                           "flex-shrink-0 h-8 w-8 rounded-full flex items-center justify-center text-xs font-medium",
-                          isGlobal ? "bg-[#dfe6f2] text-[#4f6386]" : "bg-zinc-800 text-zinc-300"
+                          "bg-[#dfe6f2] text-[#4f6386]"
                         )}
                       >
                         A
@@ -2461,20 +2458,20 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   <div
                     className={cn(
                       "flex-shrink-0 h-8 w-8 rounded-full border flex items-center justify-center",
-                      isGlobal ? "bg-[#eadfb7] border-[#d8cb9d]" : "bg-amber-500/10 border-amber-500/20"
+                      "bg-[#eadfb7] border-[#d8cb9d]"
                     )}
                   >
-                    <span className={cn("text-xs font-semibold", isGlobal ? "text-[#6d560f]" : "text-amber-300")}>R</span>
+                    <span className="text-xs font-semibold text-[#6d560f]">R</span>
                   </div>
                   <div
                     className={cn(
                       "rounded-2xl px-4 py-3",
-                      isGlobal ? "bg-[#f1eee8] border border-[#e3dac8]" : "bg-zinc-900/50 border border-zinc-800/50"
+                      "bg-[#f1eee8] border border-[#e3dac8]"
                     )}
                   >
                     <div className="flex items-center gap-2">
-                      <Loader2 className={cn("h-4 w-4 animate-spin", isGlobal ? "text-[#7b8395]" : "text-zinc-400")} />
-                      <span className={cn("text-sm", isGlobal ? "text-[#6f788a]" : "text-zinc-400")}>Riley is thinking...</span>
+                      <Loader2 className="h-4 w-4 animate-spin text-[#7b8395]" />
+                      <span className="text-sm text-[#6f788a]">Riley is thinking...</span>
                     </div>
                   </div>
                 </div>
@@ -2491,13 +2488,13 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
             "flex-shrink-0 p-4",
             isGlobal
               ? "border-t border-[#e3dac8] bg-[#fbf8f2]"
-              : "border-t border-zinc-800 bg-slate-950/50 backdrop-blur-sm"
+              : "border-t border-[#e5ddce] bg-[#f7f5ef]"
           )}
         >
           <div
             className={cn(
               "chat-content w-full",
-              isGlobal ? "max-w-[700px] px-6" : "mx-auto max-w-3xl"
+              isGlobal ? "max-w-[700px] px-6" : "mx-auto max-w-[700px]"
             )}
           >
             {editingMessageId && (
@@ -2506,7 +2503,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   "mb-2 flex items-center justify-between rounded-md border px-3 py-2 text-xs",
                   isGlobal
                     ? "border-[#d8d0bf] bg-[#f7f2e8] text-[#4d5871]"
-                    : "border-zinc-700 bg-zinc-900/40 text-zinc-300"
+                    : "border-[#ddd5c5] bg-[#f8f4ea] text-[#4d5871]"
                 )}
               >
                 <span>Editing message. Send to replace and regenerate response.</span>
@@ -2516,14 +2513,14 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     setEditingMessageId(null);
                     setInput("");
                   }}
-                  className={cn("rounded px-2 py-1", isGlobal ? "hover:bg-[#efe7d8]" : "hover:bg-zinc-800")}
+                  className={cn("rounded px-2 py-1", isGlobal ? "hover:bg-[#efe7d8]" : "hover:bg-[#f2ece0]")}
                 >
                   Cancel
                 </button>
               </div>
             )}
             {sendDisabledReason && !isLoading && (
-              <div className={cn("mb-2 text-xs text-center", isGlobal ? "text-[#8a90a0]" : "text-zinc-500")}>
+              <div className={cn("mb-2 text-xs text-center", isGlobal ? "text-[#8a90a0]" : "text-[#7d8799]")}>
                 {sendDisabledReason}
               </div>
             )}
@@ -2540,7 +2537,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   "scrollbar-hide flex-1 resize-none overflow-y-auto px-4 py-3 text-sm max-h-[200px] disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none",
                   isGlobal
                     ? "rounded-3xl border border-[#ddd5c5] bg-white text-[#1f2a44] placeholder:text-[#98a1b1] focus:ring-2 focus:ring-[#d4ad47]/40"
-                    : "rounded-lg border border-zinc-800 bg-zinc-900/50 text-zinc-100 placeholder:text-zinc-600 focus:ring-2 focus:ring-amber-500/50"
+                    : "rounded-3xl border border-[#ddd5c5] bg-white text-[#1f2a44] placeholder:text-[#98a1b1] focus:ring-2 focus:ring-[#d4ad47]/35"
                 )}
               />
               <button
@@ -2552,10 +2549,10 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   canSend
                     ? isGlobal
                       ? "rounded-full bg-[#e8e2d2] border border-[#d6ccb8] text-[#4f6386] hover:bg-[#ded6c3]"
-                      : "rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20"
+                      : "rounded-full bg-[#e8e2d2] border border-[#d6ccb8] text-[#4f6386] hover:bg-[#ded6c3]"
                     : isGlobal
                     ? "rounded-full bg-[#f2eee5] border border-[#e3dac8] text-[#a3a9b7] cursor-not-allowed"
-                    : "rounded-lg bg-zinc-800/50 border border-zinc-700/50 text-zinc-600 cursor-not-allowed"
+                    : "rounded-full bg-[#f2eee5] border border-[#e3dac8] text-[#a3a9b7] cursor-not-allowed"
                 )}
                 aria-label="Send message"
                 title={sendDisabledReason || "Send message"}
@@ -2568,29 +2565,29 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               </button>
             </div>
             {!isGlobal && (
-              <p className="text-xs text-zinc-600 mt-2 text-center">
-                {mode === "fast" ? "⚡ Fast mode: Quick responses" : "🧠 Deep mode: Comprehensive analysis"}
+              <p className="mt-2 text-center text-xs text-[#7d8799]">
+                {mode === "fast" ? "Fast mode: Quick responses" : "Deep mode: Comprehensive analysis"}
               </p>
             )}
           </div>
         </div>
       </main>
       {isReportModalOpen && !isGlobal && (
-        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
-          <div className="w-full max-w-2xl rounded-xl border border-zinc-700 bg-zinc-900 shadow-2xl">
-            <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
-              <h3 className="text-sm font-semibold text-zinc-100">Generate Riley Report</h3>
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-[#1f2a44]/20 p-4 backdrop-blur-[1px]">
+          <div className="w-full max-w-2xl rounded-xl border border-[#ddd5c5] bg-[#fbf8f2] shadow-xl">
+            <div className="flex items-center justify-between border-b border-[#e5ddce] px-4 py-3">
+              <h3 className="text-sm font-semibold text-[#1f2a44]">Generate Riley Report</h3>
               <button
                 type="button"
                 onClick={() => setIsReportModalOpen(false)}
-                className="rounded-md border border-zinc-700 bg-zinc-800/50 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800"
+                className="rounded-md border border-[#ddd5c5] bg-white px-2 py-1 text-xs text-[#4d5871] hover:bg-[#f2ece0]"
               >
                 Close
               </button>
             </div>
             <div className="space-y-4 px-4 py-4">
               <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                <label className="flex flex-col gap-1 text-xs text-[#6f788a]">
                   <span>Report Type</span>
                   <select
                     value={reportType}
@@ -2604,7 +2601,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                           | "opposition_framing_brief"
                       )
                     }
-                    className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                    className="rounded-md border border-[#ddd5c5] bg-white px-3 py-2 text-sm text-[#1f2a44] focus:outline-none focus:ring-1 focus:ring-[#d4ad47]/35"
                   >
                     <option value="summary">Summary</option>
                     <option value="strategy_memo">Strategy memo</option>
@@ -2613,42 +2610,42 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     <option value="opposition_framing_brief">Opposition framing brief</option>
                   </select>
                 </label>
-                <label className="flex flex-col gap-1 text-xs text-zinc-400">
+                <label className="flex flex-col gap-1 text-xs text-[#6f788a]">
                   <span>Optional Title</span>
                   <input
                     type="text"
                     value={reportTitle}
                     onChange={(e) => setReportTitle(e.target.value)}
                     placeholder="Q3 persuasion strategy memo"
-                    className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                    className="rounded-md border border-[#ddd5c5] bg-white px-3 py-2 text-sm text-[#1f2a44] placeholder:text-[#98a1b1] focus:outline-none focus:ring-1 focus:ring-[#d4ad47]/35"
                   />
                 </label>
               </div>
-              <label className="flex flex-col gap-1 text-xs text-zinc-400">
+              <label className="flex flex-col gap-1 text-xs text-[#6f788a]">
                 <span>Instructions / Prompt</span>
                 <textarea
                   value={reportPrompt}
                   onChange={(e) => setReportPrompt(e.target.value)}
                   rows={7}
                   placeholder="Analyze these campaign documents and write a strategy memo focused on message discipline, persuasion risks, and opportunities by audience."
-                  className="resize-y rounded-md border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-amber-500/50"
+                  className="resize-y rounded-md border border-[#ddd5c5] bg-white px-3 py-2 text-sm text-[#1f2a44] placeholder:text-[#98a1b1] focus:outline-none focus:ring-1 focus:ring-[#d4ad47]/35"
                 />
               </label>
-              <label className="inline-flex items-center gap-2 text-sm text-zinc-300">
+              <label className="inline-flex items-center gap-2 text-sm text-[#4d5871]">
                 <input
                   type="checkbox"
                   checked={reportDeepMode}
                   onChange={(e) => setReportDeepMode(e.target.checked)}
-                  className="h-4 w-4 rounded border-zinc-600 bg-zinc-900 text-amber-500 focus:ring-amber-500/50"
+                  className="h-4 w-4 rounded border-[#cfc7b8] bg-white text-[#d4ad47] focus:ring-[#d4ad47]/40"
                 />
                 <span>Deep mode (recommended)</span>
               </label>
             </div>
-            <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-4 py-3">
+            <div className="flex items-center justify-end gap-2 border-t border-[#e5ddce] px-4 py-3">
               <button
                 type="button"
                 onClick={() => setIsReportModalOpen(false)}
-                className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-300 hover:bg-zinc-800"
+                className="rounded-md border border-[#ddd5c5] bg-white px-3 py-1.5 text-xs text-[#4d5871] hover:bg-[#f2ece0]"
               >
                 Cancel
               </button>
@@ -2659,8 +2656,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 className={cn(
                   "inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-xs transition-colors",
                   isSubmittingReport || reportPrompt.trim().length === 0
-                    ? "cursor-not-allowed border-zinc-700 bg-zinc-800 text-zinc-500"
-                    : "border-amber-500/30 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+                    ? "cursor-not-allowed border-[#ddd5c5] bg-[#f2eee5] text-[#a3a9b7]"
+                    : "border-[#d4ad47]/35 bg-[#f8f2df] text-[#7a5f19] hover:bg-[#f1e7ca]"
                 )}
               >
                 {isSubmittingReport ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ClipboardList className="h-3.5 w-3.5" />}

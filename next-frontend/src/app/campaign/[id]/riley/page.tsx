@@ -11,8 +11,8 @@ export default function CampaignRileyPage() {
   const contextName = name || "Campaign";
 
   return (
-    <div className="flex h-full relative">
-      <div className="flex-1 flex flex-col overflow-hidden bg-transparent">
+    <div className="relative flex h-full min-h-0 bg-[#f7f5ef]">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[#f7f5ef]">
         <RileyStudio contextName={contextName} tenantId={campaignId} />
       </div>
     </div>
