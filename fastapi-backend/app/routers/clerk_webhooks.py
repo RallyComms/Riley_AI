@@ -47,7 +47,7 @@ def _resolve_display_name(*, first_name: Optional[str], last_name: Optional[str]
         email_prefix = normalized_email.split("@")[0].strip()
         if email_prefix:
             return email_prefix
-    return clerk_id
+    return "Unknown user"
 
 
 def _parse_svix_signatures(signature_header: str) -> List[str]:

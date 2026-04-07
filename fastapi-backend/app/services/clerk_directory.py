@@ -121,7 +121,7 @@ def find_user_by_email(email: str) -> Optional[Dict[str, str]]:
                         full_name
                         or username
                         or primary_email
-                        or user_id
+                        or "Unknown user"
                     ),
                 }
         
@@ -248,7 +248,7 @@ def find_user_by_id(user_id: str) -> Optional[Dict[str, str]]:
             or username
             or f"{first_name} {last_name}".strip()
             or primary_email
-            or normalized_user_id
+            or "Unknown user"
         )
         image_url = str(getattr(user, "image_url", "") or "")
         return {

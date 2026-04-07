@@ -578,53 +578,18 @@ async def list_campaign_events(
         "notification_delivered surface=campaign_events campaign_id=%s user_id=%s count=%d",
         tenant_id, viewer_user_id, len(events),
     )
-    try:
-        delivered_ids = [e.get("id") for e in events if e.get("id")]
-        missed = await graph.mark_events_seen_and_detect_missed(
-            user_id=viewer_user_id,
-            delivered_event_ids=delivered_ids,
-        )
-        for m in missed:
-            logger.warning(
-                "notification_missed event_id=%s user_id=%s event_type=%s campaign_id=%s created_at=%s",
-                m.get("event_id"), viewer_user_id, m.get("event_type"),
-                m.get("campaign_id"), m.get("created_at"),
-            )
-    except Exception:
-        logger.debug("mark_events_seen failed for user_id=%s", viewer_user_id, exc_info=True)
     return CampaignEventsResponse(events=[CampaignEventItem(**item) for item in events])
 
 
 @router.get("/campaigns/events/feed", response_model=UserCampaignFeedResponse)
 async def list_user_campaign_feed(
-    limit: int = Query(50, ge=1, le=200),
+    limit: int = Query(30, ge=1, le=100),
     current_user: Dict = Depends(verify_clerk_token),
-    graph: GraphService = Depends(get_graph),
 ) -> UserCampaignFeedResponse:
-    """List cross-campaign Riley Bot feed events relevant to current user."""
+    """Deprecated endpoint retained for backward compatibility."""
     user_id = current_user.get("id", "unknown")
-    events = await graph.list_user_campaign_feed_events(user_id=user_id, limit=limit)
-    logger.info(
-        "notification_delivered surface=intelligence_feed user_id=%s count=%d",
-        user_id, len(events),
-    )
-    try:
-        delivered_ids = [e.get("id") for e in events if e.get("id")]
-        missed = await graph.mark_events_seen_and_detect_missed(
-            user_id=user_id,
-            delivered_event_ids=delivered_ids,
-        )
-        for m in missed:
-            logger.warning(
-                "notification_missed event_id=%s user_id=%s event_type=%s campaign_id=%s created_at=%s",
-                m.get("event_id"), user_id, m.get("event_type"),
-                m.get("campaign_id"), m.get("created_at"),
-            )
-    except Exception:
-        logger.debug("mark_events_seen failed for user_id=%s", user_id, exc_info=True)
-    return UserCampaignFeedResponse(
-        events=[UserCampaignFeedEventItem(**item) for item in events]
-    )
+    logger.info("events_feed_deprecated user_id=%s limit=%s", user_id, limit)
+    return UserCampaignFeedResponse(events=[])
 
 
 @router.post("/campaigns/{tenant_id}/events/{event_id}/dismiss", response_model=DismissFeedEventResponse)
@@ -632,48 +597,31 @@ async def dismiss_campaign_event_for_user(
     tenant_id: str,
     event_id: str,
     current_user: Dict = Depends(verify_tenant_access),
-    graph: GraphService = Depends(get_graph),
 ) -> DismissFeedEventResponse:
-    """Dismiss a campaign activity event for current user only."""
+    """Deprecated endpoint retained for backward compatibility."""
     user_id = current_user.get("id", "unknown")
-    try:
-        result = await graph.dismiss_user_feed_event(
-            user_id=user_id,
-            event_id=event_id,
-            campaign_id=tenant_id,
-        )
-        return DismissFeedEventResponse(
-            ok=True,
-            event_id=result.get("event_id") or event_id,
-            dismissed_at=result.get("dismissed_at"),
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        ) from exc
+    logger.info(
+        "events_feed_deprecated action=dismiss_campaign_event user_id=%s tenant_id=%s event_id=%s",
+        user_id,
+        tenant_id,
+        event_id,
+    )
+    return DismissFeedEventResponse(ok=True, event_id=event_id, dismissed_at=None)
 
 
 @router.post("/campaigns/events/feed/{event_id}/dismiss", response_model=DismissFeedEventResponse)
 async def dismiss_user_campaign_feed_event(
     event_id: str,
     current_user: Dict = Depends(verify_clerk_token),
-    graph: GraphService = Depends(get_graph),
 ) -> DismissFeedEventResponse:
-    """Dismiss a feed event for current user only."""
+    """Deprecated endpoint retained for backward compatibility."""
     user_id = current_user.get("id", "unknown")
-    try:
-        result = await graph.dismiss_user_feed_event(user_id=user_id, event_id=event_id)
-        return DismissFeedEventResponse(
-            ok=True,
-            event_id=result.get("event_id") or event_id,
-            dismissed_at=result.get("dismissed_at"),
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        ) from exc
+    logger.info(
+        "events_feed_deprecated action=dismiss_user_feed_event user_id=%s event_id=%s",
+        user_id,
+        event_id,
+    )
+    return DismissFeedEventResponse(ok=True, event_id=event_id, dismissed_at=None)
 
 
 @router.post("/campaigns/{tenant_id}/deadlines", response_model=CampaignDeadlineItem)
@@ -717,9 +665,11 @@ async def create_campaign_deadline(
         await graph.create_campaign_event(
             campaign_id=tenant_id,
             event_type="deadline_created",
-            message=f"Deadline created: {created.get('title')} ({campaign_name})",
+            message=f"Deadline created: {created.get('title')} due {created.get('due_at')} ({campaign_name})",
             user_id=created.get("assigned_user_id") if created.get("visibility") == "personal" else None,
             actor_user_id=user_id,
+            object_id=created.get("id"),
+            metadata={"deadline_due_at": created.get("due_at")},
         )
         return CampaignDeadlineItem(**created)
     except ValueError as exc:
@@ -1305,6 +1255,7 @@ async def add_campaign_member(
                 message=f"You were added to Campaign {campaign_name}",
                 user_id=clerk_user["id"],
                 actor_user_id=user_id,
+                object_id=f"{id}:campaign_member_added:{clerk_user['id']}",
             )
     except ValueError as exc:
         raise HTTPException(

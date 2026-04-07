@@ -1,6 +1,9 @@
 import os
+import time
+import uuid
 from asyncio import create_task
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 
 from anyio import CapacityLimiter, to_thread
@@ -21,14 +24,22 @@ from app.routers import (
     campaign_intelligence,
     campaign_intel_worker,
     comparisons,
+    notifications,
     mission_control,
     clerk_webhooks,
 )
-from app.dependencies.auth import verify_clerk_token
+from app.dependencies.auth import verify_clerk_token, extract_tenant_id
 from app.services.graph import GraphService
+from app.services.pricing_registry import estimate_worker_runtime_cost
 from app.services.qdrant import vector_service
+from app.services.request_observability import (
+    classify_operation_type,
+    cloud_task_retry_count,
+    request_event_type_raw,
+)
 from app.core.config import get_settings
 
+logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -81,6 +92,110 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    try:
+        return int(str(value))
+    except Exception:
+        return default
+
+
+@app.middleware("http")
+async def request_cost_observability_middleware(request: Request, call_next):
+    """Capture Cloud Run request behavior for operation-level cost attribution."""
+    path = str(request.url.path or "")
+    if (
+        request.method == "OPTIONS"
+        or (not path.startswith("/api/v1/") and not path.startswith("/internal/"))
+    ):
+        return await call_next(request)
+
+    started = time.perf_counter()
+    response = None
+    error_type = ""
+    try:
+        response = await call_next(request)
+        return response
+    except Exception as exc:
+        error_type = type(exc).__name__
+        raise
+    finally:
+        graph = getattr(request.app.state, "graph", None)
+        if graph is not None:
+            duration_ms = max(0, int((time.perf_counter() - started) * 1000))
+            retry_count = cloud_task_retry_count(dict(request.headers))
+            is_retry = retry_count > 0
+            base_operation_type = classify_operation_type(method=request.method, path=path)
+            operation_type = "retry" if is_retry else base_operation_type
+            status_code = response.status_code if response is not None else 500
+            request_bytes = _safe_int(request.headers.get("content-length"), default=0)
+            response_bytes = _safe_int(
+                response.headers.get("content-length") if response is not None else 0,
+                default=0,
+            )
+            runtime_cost = estimate_worker_runtime_cost(duration_ms=duration_ms)
+            user_id = str(getattr(request.state, "auth_user_id", "") or "").strip() or None
+            campaign_id = extract_tenant_id(request)
+            event_id = f"http_request:{path}:{request.method}:{uuid.uuid4()}"
+            try:
+                await graph.append_analytics_event(
+                    event_id=event_id,
+                    source_event_type_raw=request_event_type_raw(
+                        operation_type=base_operation_type,
+                        is_retry=is_retry,
+                    ),
+                    source_entity="HttpRequest",
+                    campaign_id=campaign_id,
+                    user_id=user_id,
+                    actor_user_id=user_id,
+                    object_id=path,
+                    status=str(status_code),
+                    provider="cloud_run",
+                    model="default_worker_profile",
+                    latency_ms=duration_ms,
+                    cost_estimate_usd=(
+                        float(runtime_cost["cost_estimate_usd"])
+                        if runtime_cost.get("cost_estimate_usd") is not None
+                        else None
+                    ),
+                    pricing_version=str(runtime_cost.get("pricing_version") or "cost-accounting-v1"),
+                    cost_confidence=str(runtime_cost.get("cost_confidence") or "proxy_only"),
+                    metadata={
+                        "service": "http_request",
+                        "method": request.method,
+                        "endpoint": path,
+                        "operation_type": operation_type,
+                        "base_operation_type": base_operation_type,
+                        "is_retry": is_retry,
+                        "retry_count": retry_count,
+                        "duration_ms": duration_ms,
+                        "request_bytes": request_bytes,
+                        "response_bytes": response_bytes,
+                        "resource_usage_proxy": {
+                            "cpu_ms_estimate": duration_ms,
+                            "memory_mb_estimate": 512,
+                        },
+                        "error_type": error_type,
+                        "requests_count": 1,
+                    },
+                )
+                logger.info(
+                    "request_cost_observed operation_type=%s endpoint=%s method=%s status=%s duration_ms=%s retry_count=%s",
+                    operation_type,
+                    path,
+                    request.method,
+                    status_code,
+                    duration_ms,
+                    retry_count,
+                )
+            except Exception as analytics_exc:
+                logger.warning(
+                    "request_cost_observability_failed endpoint=%s method=%s error=%s",
+                    path,
+                    request.method,
+                    analytics_exc,
+                )
 
 # CORS: Read allowed origins from environment variable
 def get_allowed_origins() -> list[str]:
@@ -153,6 +268,8 @@ app.include_router(reports.router, prefix="/api/v1", dependencies=[Depends(verif
 app.include_router(campaign_intelligence.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # Riley comparison tables route (authenticated)
 app.include_router(comparisons.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
+# Notifications route (authenticated)
+app.include_router(notifications.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # Mission Control admin analytics route (authenticated + admin-guarded at endpoint level)
 app.include_router(mission_control.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # Internal worker route for Cloud Tasks ingestion callbacks (token-protected, not Clerk-protected)

@@ -807,6 +807,8 @@ async def create_file_comment(
                 message=f"{actor_display} mentioned {mentioned_display} in {filename}",
                 user_id=mentioned_user_id,
                 actor_user_id=author_user_id,
+                object_id=f"{file_id}:{new_comment.get('id')}",
+                metadata={"file_id": file_id, "comment_id": new_comment.get("id")},
             )
 
         items: List[FileCommentItem] = []
@@ -1381,6 +1383,8 @@ async def assign_file_endpoint(
                     message=targeted_message,
                     user_id=assignee_value,
                     actor_user_id=actor_user_id,
+                    object_id=f"{file_id}:{targeted_event_type}:{assignee_value}",
+                    metadata={"file_id": file_id, "status": status_value},
                 )
             elif not assignee_value and status_value != previous_status:
                 event_type = "document_assigned"

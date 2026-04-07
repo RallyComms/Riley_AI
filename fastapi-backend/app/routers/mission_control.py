@@ -127,12 +127,16 @@ def _safe_user_label(
         uid_prefix = uid.split("@")[0].strip()
         if uid_prefix:
             return uid_prefix
-    return uid or "unknown_user"
+    return "Unknown user"
 
 
 def _safe_user_secondary(user_id: Optional[str], primary_label: str) -> str:
     uid = str(user_id or "").strip()
-    if not uid or uid == primary_label:
+    if (
+        not uid
+        or uid == primary_label
+        or primary_label.lower() == "unknown user"
+    ):
         return ""
     return uid
 
@@ -254,6 +258,54 @@ def _window_cloud_cost_from_daily_series(*, daily_series: List[Dict[str, Any]], 
         except Exception:
             continue
     return round(total, 4)
+
+
+def _sum_daily_cost_for_range(*, daily_series: List[Dict[str, Any]], days: int) -> float:
+    if not daily_series:
+        return 0.0
+    normalized_days = max(1, int(days))
+    start_day = date.today() - timedelta(days=normalized_days - 1)
+    total = 0.0
+    for row in daily_series:
+        day_text = str(row.get("day") or row.get("date") or "").strip()
+        if not day_text:
+            continue
+        try:
+            if date.fromisoformat(day_text) >= start_day:
+                total += float(row.get("cost") or 0.0)
+        except Exception:
+            continue
+    return float(total)
+
+
+def _weighted_projection_model(
+    *,
+    daily_series: List[Dict[str, Any]],
+    mtd_total: float,
+    month_elapsed_days: int,
+    days_in_month: int,
+) -> Dict[str, float | str]:
+    recent_24h_avg = _sum_daily_cost_for_range(daily_series=daily_series, days=1)
+    recent_7d_avg = _sum_daily_cost_for_range(daily_series=daily_series, days=7) / 7.0
+    mtd_avg = (float(mtd_total or 0.0) / float(max(1, int(month_elapsed_days))))
+
+    weighted_daily = (recent_24h_avg * 0.6) + (recent_7d_avg * 0.3) + (mtd_avg * 0.1)
+    projection_mode = "weighted"
+    projected_daily = weighted_daily
+    if recent_24h_avg < (recent_7d_avg * 0.5):
+        projected_daily = recent_24h_avg
+        projection_mode = "recent_override"
+
+    projected_month = projected_daily * float(max(1, int(days_in_month)))
+    return {
+        "recent_24h_avg": round(recent_24h_avg, 6),
+        "recent_7d_avg": round(recent_7d_avg, 6),
+        "mtd_avg": round(mtd_avg, 6),
+        "weighted_daily": round(weighted_daily, 6),
+        "projected_daily": round(projected_daily, 6),
+        "projected_month": round(projected_month, 2),
+        "projection_mode": projection_mode,
+    }
 
 
 def _build_cloud_cost_optimization_recommendations(
@@ -1304,6 +1356,23 @@ async def mission_control_cost_summary(
         """,
         window_start_iso=window_start_iso,
     )
+    llm_month_daily_rows = await _rows(
+        graph,
+        """
+        MATCH (e:AnalyticsEvent)
+        WHERE datetime(e.occurred_at) >= datetime($month_start_iso)
+          AND e.cost_estimate_usd IS NOT NULL
+          AND (
+            toLower(coalesce(e.provider, "")) IN ["google_gemini", "gemini", "openai"]
+            OR toLower(coalesce(e.model, "")) CONTAINS "gemini"
+            OR toLower(coalesce(e.model, "")) CONTAINS "gpt"
+          )
+        WITH date(datetime(e.occurred_at)) as event_day, coalesce(sum(toFloat(e.cost_estimate_usd)), 0.0) as cost
+        RETURN toString(event_day) as day, round(cost, 6) as cost
+        ORDER BY day ASC
+        """,
+        month_start_iso=month_start_iso,
+    )
     window_cost = round(float(llm_window_summary.get("llm_window_cost") or 0.0), 2)
     current_month_cost = round(float(llm_month_summary.get("llm_month_cost") or 0.0), 2)
     current_month_non_llm_event_spend = round(float(llm_month_summary.get("non_llm_month_cost") or 0.0), 2)
@@ -1315,37 +1384,67 @@ async def mission_control_cost_summary(
     now = datetime.now(timezone.utc)
     days_in_month = monthrange(now.year, now.month)[1]
     month_elapsed_days = max(1, now.day)
-    daily_burn_rate = round(current_month_cost / float(month_elapsed_days), 4)
-    projected_month_end_cost = round(daily_burn_rate * float(days_in_month), 2)
+    llm_projection = _weighted_projection_model(
+        daily_series=llm_month_daily_rows,
+        mtd_total=current_month_cost,
+        month_elapsed_days=month_elapsed_days,
+        days_in_month=days_in_month,
+    )
+    daily_burn_rate = float(llm_projection.get("projected_daily") or 0.0)
+    projected_month_end_cost = float(llm_projection.get("projected_month") or 0.0)
     monthly_llm_budget_limit = round(float(settings.MAX_MONTHLY_COST or 2000.0), 2)
     current_month_llm_spend = round(float(await get_current_month_llm_cost_usd()), 2)
-    projected_month_end_llm_spend = round(
-        (current_month_llm_spend / float(month_elapsed_days)) * float(days_in_month),
-        2,
-    )
+    projected_month_end_llm_spend = round(float(projected_month_end_cost), 2)
     percent_budget_used = round(
         (current_month_llm_spend / monthly_llm_budget_limit) * 100.0,
         2,
     ) if monthly_llm_budget_limit > 0 else 0.0
     guardrail_status = _guardrail_status_from_percent(percent_budget_used)
     cloud_usage = await cloud_billing_service.get_cloud_infra_cost_metrics()
-    current_month_cloud_spend = round(float(cloud_usage.get("current_month_cloud_cost") or 0.0), 2)
-    projected_month_end_cloud_spend = round(float(cloud_usage.get("projected_month_end_cloud_cost") or 0.0), 2)
+    cloud_month_total = float(cloud_usage.get("current_month_cloud_cost") or 0.0)
+    cloud_daily_series = [
+        {"day": str(row.get("date") or ""), "cost": float(row.get("cost") or 0.0)}
+        for row in (cloud_usage.get("daily_cloud_cost_series") or [])
+        if str(row.get("date") or "").strip()
+    ]
+    cloud_window_spend = round(
+        _window_cloud_cost_from_daily_series(
+            daily_series=list(cloud_usage.get("daily_cloud_cost_series") or []),
+            window_days=int(window["window_days"]),
+        ),
+        2,
+    )
+    cloud_projection = _weighted_projection_model(
+        daily_series=cloud_daily_series,
+        mtd_total=cloud_month_total,
+        month_elapsed_days=month_elapsed_days,
+        days_in_month=days_in_month,
+    )
+    projected_month_end_cloud_spend = round(float(cloud_projection.get("projected_month") or 0.0), 2)
     qdrant_variable_projected_month_end_spend = 0.0
     try:
         qdrant_usage = await vector_service.get_qdrant_usage_metrics()
         qdrant_variable_projected_month_end_spend = round(float(qdrant_usage.get("estimated_monthly_cost") or 0.0), 2)
     except Exception as exc:
         logger.warning("mission_control_qdrant_total_spend_unavailable error=%s", exc)
+    window_days = max(1, int(window["window_days"]))
+    qdrant_variable_daily_rate = (
+        (qdrant_variable_projected_month_end_spend / float(days_in_month))
+        if days_in_month > 0 else 0.0
+    )
     qdrant_variable_current_month_spend = round(
-        (qdrant_variable_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        qdrant_variable_daily_rate * float(window_days),
         2,
-    ) if days_in_month > 0 else 0.0
+    )
     qdrant_fixed_projected_month_end_spend = round(float(settings.QDRANT_BASE_MONTHLY_COST_USD or 0.0), 2)
+    qdrant_fixed_daily_rate = (
+        (qdrant_fixed_projected_month_end_spend / float(days_in_month))
+        if days_in_month > 0 else 0.0
+    )
     qdrant_fixed_current_month_spend = round(
-        (qdrant_fixed_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        qdrant_fixed_daily_rate * float(window_days),
         2,
-    ) if days_in_month > 0 else 0.0
+    )
     fixed_saas_clerk_projected_month_end_spend = round(float(settings.CLERK_MONTHLY_COST_USD or 0.0), 2)
     fixed_saas_vercel_projected_month_end_spend = round(float(settings.VERCEL_MONTHLY_COST_USD or 0.0), 2)
     fixed_saas_other_projected_month_end_spend = round(float(settings.OTHER_FIXED_MONTHLY_COST_USD or 0.0), 2)
@@ -1355,24 +1454,70 @@ async def mission_control_cost_summary(
         + fixed_saas_other_projected_month_end_spend,
         2,
     )
+    fixed_saas_clerk_daily_rate = (
+        (fixed_saas_clerk_projected_month_end_spend / float(days_in_month))
+        if days_in_month > 0 else 0.0
+    )
+    fixed_saas_vercel_daily_rate = (
+        (fixed_saas_vercel_projected_month_end_spend / float(days_in_month))
+        if days_in_month > 0 else 0.0
+    )
+    fixed_saas_other_daily_rate = (
+        (fixed_saas_other_projected_month_end_spend / float(days_in_month))
+        if days_in_month > 0 else 0.0
+    )
     fixed_saas_clerk_current_month_spend = round(
-        (fixed_saas_clerk_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        fixed_saas_clerk_daily_rate * float(window_days),
         2,
-    ) if days_in_month > 0 else 0.0
+    )
     fixed_saas_vercel_current_month_spend = round(
-        (fixed_saas_vercel_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        fixed_saas_vercel_daily_rate * float(window_days),
         2,
-    ) if days_in_month > 0 else 0.0
+    )
     fixed_saas_other_current_month_spend = round(
-        (fixed_saas_other_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        fixed_saas_other_daily_rate * float(window_days),
         2,
-    ) if days_in_month > 0 else 0.0
+    )
     other_fixed_saas_current_month_spend = round(
-        (other_fixed_saas_projected_month_end_spend / float(days_in_month)) * float(month_elapsed_days),
+        fixed_saas_clerk_current_month_spend
+        + fixed_saas_vercel_current_month_spend
+        + fixed_saas_other_current_month_spend,
         2,
-    ) if days_in_month > 0 else 0.0
+    )
+    estimated_accrual_daily_rate = (
+        qdrant_variable_daily_rate
+        + qdrant_fixed_daily_rate
+        + fixed_saas_clerk_daily_rate
+        + fixed_saas_vercel_daily_rate
+        + fixed_saas_other_daily_rate
+    )
+
+    llm_day_cost_by_date = {
+        str(row.get("day") or "").strip(): float(row.get("cost") or 0.0)
+        for row in llm_month_daily_rows
+        if str(row.get("day") or "").strip()
+    }
+    cloud_day_cost_by_date = {
+        str(row.get("day") or "").strip(): float(row.get("cost") or 0.0)
+        for row in cloud_daily_series
+        if str(row.get("day") or "").strip()
+    }
+    total_projection_daily_series: List[Dict[str, Any]] = []
+    month_start_date = date.today().replace(day=1)
+    for day_index in range(month_elapsed_days):
+        day_value = (month_start_date + timedelta(days=day_index)).isoformat()
+        total_projection_daily_series.append(
+            {
+                "day": day_value,
+                "cost": (
+                    llm_day_cost_by_date.get(day_value, 0.0)
+                    + cloud_day_cost_by_date.get(day_value, 0.0)
+                    + estimated_accrual_daily_rate
+                ),
+            }
+        )
     current_month_actual_or_metered_spend = round(
-        current_month_llm_spend + current_month_cloud_spend,
+        window_cost + cloud_window_spend,
         2,
     )
     current_month_estimated_accrual_spend = round(
@@ -1385,18 +1530,26 @@ async def mission_control_cost_summary(
         current_month_actual_or_metered_spend + current_month_estimated_accrual_spend,
         2,
     )
+    total_projection = _weighted_projection_model(
+        daily_series=total_projection_daily_series,
+        mtd_total=(
+            float(current_month_cost)
+            + float(cloud_month_total)
+            + (estimated_accrual_daily_rate * float(month_elapsed_days))
+        ),
+        month_elapsed_days=month_elapsed_days,
+        days_in_month=days_in_month,
+    )
     projected_month_end_total_spend = round(
-        projected_month_end_llm_spend
-        + projected_month_end_cloud_spend
-        + qdrant_variable_projected_month_end_spend
-        + qdrant_fixed_projected_month_end_spend
-        + other_fixed_saas_projected_month_end_spend,
+        float(total_projection.get("projected_month") or 0.0),
         2,
     )
+    projection_mode = str(total_projection.get("projection_mode") or "weighted")
+    current_month_cloud_spend = cloud_window_spend
     total_spend_breakdown = [
         {
             "category": "LLM",
-            "current": current_month_llm_spend,
+            "current": window_cost,
             "current_semantics": "actual_or_metered_mtd",
             "projected": projected_month_end_llm_spend,
         },
@@ -1471,19 +1624,20 @@ async def mission_control_cost_summary(
     last_30d_llm_cost_by_feature = list(last_30d_feature_rollup.get("rows") or [])
     projected_curve = []
     for day in range(1, days_in_month + 1):
-        projected_value = daily_burn_rate * float(day)
+        projected_value = float(llm_projection.get("projected_daily") or 0.0) * float(day)
         projected_curve.append({"day": day, "projected_cost": round(projected_value, 2)})
     return {
         "timeframe": window["timeframe"],
         "timeframe_label": window["label"],
-        "month_estimated_cost": current_month_cost,
+        "month_estimated_cost": window_cost,
         "selected_window_cost": window_cost,
-        "current_month_cost": current_month_cost,
-        "average_daily_burn_rate": daily_burn_rate,
+        "current_month_cost": window_cost,
+        "average_daily_burn_rate": round(float(llm_projection.get("projected_daily") or 0.0), 4),
         "projected_month_end_cost": projected_month_end_cost,
         "current_month_days_elapsed": month_elapsed_days,
         "current_month_total_days": days_in_month,
-        "last_7d_estimated_cost": round(float(totals.get("last_7d_cost") or 0.0), 2),
+        "last_7d_estimated_cost": round(float(llm_last_7d_summary.get("llm_last_7d_cost") or 0.0), 2),
+        "projection_mode": projection_mode,
         "cost_confidence_breakdown_30d": {
             "exact_usage": round(float(confidence_totals.get("exact_usage_cost_30d") or 0.0), 4),
             "estimated_units": round(float(confidence_totals.get("estimated_units_cost_30d") or 0.0), 4),

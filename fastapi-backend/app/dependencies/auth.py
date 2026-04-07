@@ -18,6 +18,8 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.core.config import get_settings
+from app.dependencies.graph_dep import get_graph_optional
+from app.services.graph import GraphService
 
 # JWKS cache with 10-minute TTL
 _jwks_cache: TTLCache = TTLCache(maxsize=10, ttl=600)  # 10 minutes = 600 seconds
@@ -117,7 +119,8 @@ def _get_signing_key(jwks: Dict, kid: str) -> Optional[Dict]:
 
 async def verify_clerk_token(
     request: Request,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False))
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
+    graph: Optional[GraphService] = Depends(get_graph_optional),
 ) -> Dict:
     """Verify Clerk JWT token and return user information.
     
@@ -253,9 +256,47 @@ async def verify_clerk_token(
             )
         
         # Step 6: Return user information
+        # Surface authenticated identity to request middleware for observability tagging.
+        user_id = str(decoded.get("sub", "") or "").strip()
+        user_email = str(decoded.get("email", "") or "").strip()
+        request.state.auth_user_id = user_id
+        request.state.auth_user_email = user_email
+
+        # Best-effort identity source-of-truth sync for all authenticated traffic.
+        # This keeps User nodes hydrated and avoids UI fallback to raw IDs.
+        if graph is not None and user_id:
+            raw_username = str(decoded.get("username", "") or "").strip() or None
+            given_name = str(decoded.get("given_name", "") or "").strip() or None
+            family_name = str(decoded.get("family_name", "") or "").strip() or None
+            fallback_display_name = (
+                str(decoded.get("name", "") or "").strip()
+                or raw_username
+                or (user_email.split("@")[0].strip() if user_email else "")
+                or "Unknown user"
+            )
+            try:
+                await graph.ensure_user_identity(
+                    user_id=user_id,
+                    email=user_email or None,
+                    username=raw_username,
+                    first_name=given_name,
+                    last_name=family_name,
+                    display_name=fallback_display_name,
+                    fetch_from_clerk_if_missing=True,
+                )
+            except Exception:
+                # Never block auth on identity sync failures.
+                pass
+        resolved_display_name = (
+            str(decoded.get("name", "") or "").strip()
+            or str(decoded.get("username", "") or "").strip()
+            or (user_email.split("@")[0].strip() if user_email else "")
+            or "Unknown user"
+        )
         return {
-            "id": decoded.get("sub", ""),
-            "email": decoded.get("email", ""),
+            "id": user_id,
+            "email": user_email,
+            "display_name": resolved_display_name,
             "raw": decoded
         }
         

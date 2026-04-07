@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from neo4j import AsyncGraphDatabase
 
 from app.core.config import get_settings
+from app.services.clerk_directory import find_user_by_id
 from app.services.analytics_contract import (
     canonical_campaign_id,
     classify_chat_type,
@@ -69,7 +70,7 @@ class GraphService:
             raise ValueError("Team chat message missing author_id at read time")
 
         fallback_level_value = int(author_fallback_level or 4)
-        normalized_display = str(author_display_name or "").strip() or normalized_author_id
+        normalized_display = str(author_display_name or "").strip() or "Unknown user"
         if fallback_level_value > 1:
             logger.warning(
                 "team_chat_identity_degraded user_id=%s fallback_level=%s message_id=%s",
@@ -125,6 +126,23 @@ class GraphService:
             """
             CREATE INDEX analytics_event_source_event_type_raw_idx IF NOT EXISTS
             FOR (e:AnalyticsEvent) ON (e.source_event_type_raw)
+            """,
+            # Notification write/read keys
+            """
+            CREATE CONSTRAINT notification_id_unique IF NOT EXISTS
+            FOR (n:Notification) REQUIRE n.id IS UNIQUE
+            """,
+            """
+            CREATE INDEX notification_user_id_idx IF NOT EXISTS
+            FOR (n:Notification) ON (n.user_id)
+            """,
+            """
+            CREATE INDEX notification_created_at_idx IF NOT EXISTS
+            FOR (n:Notification) ON (n.created_at)
+            """,
+            """
+            CREATE CONSTRAINT notification_dedupe_key_unique IF NOT EXISTS
+            FOR (n:Notification) REQUIRE n.dedupe_key IS UNIQUE
             """,
             # Rollup keys used by Mission Control queries
             """
@@ -2183,7 +2201,11 @@ class GraphService:
             )
             OPTIONAL MATCH (owner:User)-[owner_rel:MEMBER_OF]->(c)
             WHERE owner_rel.role = "Lead"
-            WITH c, owner
+            WITH c, owner,
+                 CASE
+                    WHEN owner.email IS NULL OR trim(owner.email) = "" THEN NULL
+                    ELSE split(owner.email, "@")[0]
+                 END as owner_email_prefix
             OPTIONAL MATCH (me:User {id: $user_id})-[r:MEMBER_OF]->(c)
             RETURN
                 c.id as id,
@@ -2193,7 +2215,13 @@ class GraphService:
                 coalesce(c.status, "active") as status,
                 toString(c.archived_at) as archived_at,
                 owner.id as owner_id,
-                coalesce(owner.email, owner.id) as owner_name,
+                CASE
+                    WHEN owner.display_name IS NOT NULL AND trim(owner.display_name) <> "" THEN owner.display_name
+                    WHEN owner.username IS NOT NULL AND trim(owner.username) <> "" THEN owner.username
+                    WHEN owner_email_prefix IS NOT NULL AND trim(owner_email_prefix) <> "" THEN owner_email_prefix
+                    WHEN owner.email IS NOT NULL AND trim(owner.email) <> "" THEN owner.email
+                    ELSE "Unknown owner"
+                END as owner_name,
                 CASE WHEN r IS NULL THEN "requestable" ELSE "member" END as access,
                 r.role as role
             ORDER BY c.created_at DESC
@@ -2362,6 +2390,27 @@ class GraphService:
                 status=created.get("status"),
                 metadata={"message_present": bool(normalized_message)},
             )
+            lead_result = await session.run(
+                """
+                MATCH (:Campaign {id: $campaign_id})<-[m:MEMBER_OF]-(u:User)
+                WHERE m.role = "Lead"
+                RETURN collect(u.id) as lead_user_ids
+                """,
+                campaign_id=tenant_id,
+            )
+            lead_record = await lead_result.single()
+            lead_user_ids = [str(uid).strip() for uid in (lead_record.get("lead_user_ids") or []) if str(uid).strip()]
+            for lead_user_id in lead_user_ids:
+                if lead_user_id == requester_user_id:
+                    continue
+                await self.create_notification(
+                    user_id=lead_user_id,
+                    notification_type="access_request_created",
+                    entity_id=created.get("id"),
+                    campaign_id=tenant_id,
+                    message="Access request submitted",
+                    status="unread",
+                )
             return created
 
     async def list_campaign_access_requests(
@@ -2390,8 +2439,7 @@ class GraphService:
                     WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                     WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                    WHEN ar.user_id IS NOT NULL AND trim(ar.user_id) <> "" THEN ar.user_id
-                    ELSE ar.user_id
+                    ELSE "Unknown user"
                 END as user_name,
                 ar.message as message,
                 ar.status as status,
@@ -2547,6 +2595,30 @@ class GraphService:
                 status=decided_payload.get("status"),
                 metadata={"decision_actor_user_id": actor_user_id},
             )
+            target_user_id = str(decided_payload.get("user_id") or "").strip()
+            if target_user_id:
+                decision_message = (
+                    "Access request approved"
+                    if decided_type == "access_request_approved"
+                    else "Access request denied"
+                )
+                await self.create_notification(
+                    user_id=target_user_id,
+                    notification_type=decided_type,
+                    entity_id=decided_payload.get("id"),
+                    campaign_id=campaign_id,
+                    message=decision_message,
+                    status="unread",
+                )
+                if decided_type == "access_request_approved":
+                    await self.create_notification(
+                        user_id=target_user_id,
+                        notification_type="campaign_member_added_notification",
+                        entity_id=decided_payload.get("id"),
+                        campaign_id=campaign_id,
+                        message=f"You were added to Campaign {campaign_id}",
+                        status="unread",
+                    )
             return decided_payload
 
     async def list_campaign_events(
@@ -2653,234 +2725,181 @@ class GraphService:
                 )
             return items
 
-    async def list_user_campaign_feed_events(
+    async def create_notification(
+        self,
+        *,
+        user_id: str,
+        notification_type: str,
+        entity_id: Optional[str],
+        campaign_id: Optional[str],
+        message: str,
+        status: str = "unread",
+    ) -> Dict[str, Any]:
+        notification_id = str(uuid.uuid4())
+        normalized_entity_id = str(entity_id or "").strip() or None
+        normalized_campaign_id = str(campaign_id or "").strip() or None
+        dedupe_key = (
+            f"{user_id}|{notification_type}|{normalized_campaign_id or ''}|{normalized_entity_id or ''}"
+            if normalized_entity_id
+            else None
+        )
+        async with self._driver.session() as session:
+            if dedupe_key:
+                result = await session.run(
+                    """
+                    MERGE (u:User {id: $user_id})
+                    MERGE (n:Notification {dedupe_key: $dedupe_key})
+                    ON CREATE SET
+                        n.id = $notification_id,
+                        n.user_id = $user_id,
+                        n.type = $notification_type,
+                        n.entity_id = $entity_id,
+                        n.campaign_id = $campaign_id,
+                        n.message = $message,
+                        n.status = $status,
+                        n.created_at = datetime(),
+                        n.acted_at = null
+                    ON MATCH SET
+                        n.message = coalesce($message, n.message)
+                    MERGE (u)-[:HAS_NOTIFICATION]->(n)
+                    RETURN
+                        n.id as id,
+                        n.user_id as user_id,
+                        n.type as type,
+                        n.entity_id as entity_id,
+                        n.campaign_id as campaign_id,
+                        n.message as message,
+                        n.status as status,
+                        toString(n.created_at) as created_at,
+                        toString(n.acted_at) as acted_at
+                    """,
+                    dedupe_key=dedupe_key,
+                    notification_id=notification_id,
+                    user_id=user_id,
+                    notification_type=notification_type,
+                    entity_id=normalized_entity_id,
+                    campaign_id=normalized_campaign_id,
+                    message=message,
+                    status=status,
+                )
+            else:
+                result = await session.run(
+                    """
+                    MERGE (u:User {id: $user_id})
+                    CREATE (n:Notification {
+                        id: $notification_id,
+                        user_id: $user_id,
+                        type: $notification_type,
+                        entity_id: $entity_id,
+                        campaign_id: $campaign_id,
+                        message: $message,
+                        status: $status,
+                        created_at: datetime(),
+                        acted_at: null
+                    })
+                    MERGE (u)-[:HAS_NOTIFICATION]->(n)
+                    RETURN
+                        n.id as id,
+                        n.user_id as user_id,
+                        n.type as type,
+                        n.entity_id as entity_id,
+                        n.campaign_id as campaign_id,
+                        n.message as message,
+                        n.status as status,
+                        toString(n.created_at) as created_at,
+                        toString(n.acted_at) as acted_at
+                    """,
+                    notification_id=notification_id,
+                    user_id=user_id,
+                    notification_type=notification_type,
+                    entity_id=normalized_entity_id,
+                    campaign_id=normalized_campaign_id,
+                    message=message,
+                    status=status,
+                )
+            record = await result.single()
+            if not record:
+                raise RuntimeError("Failed to create notification")
+            return dict(record)
+
+    async def list_notifications(
         self,
         *,
         user_id: str,
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
-        """List cross-campaign feed events relevant to a user."""
         async with self._driver.session() as session:
-            query = """
-            MATCH (c:Campaign)
-            WHERE EXISTS {
-                MATCH (:User {id: $user_id})-[:MEMBER_OF]->(c)
-            }
-            MATCH (e:CampaignEvent {campaign_id: c.id})
-            OPTIONAL MATCH (requester:User {id: e.user_id})
-            WITH
-                c,
-                e,
-                requester,
-                CASE
-                    WHEN requester.email IS NULL OR trim(requester.email) = "" THEN NULL
-                    ELSE split(requester.email, "@")[0]
-                END as requester_email_prefix
-            WHERE
-                (
-                    NOT (e.type IN [
-                        "document_assigned_to_user",
-                        "document_tagged_for_review",
-                        "document_mentioned_user",
-                        "campaign_message_mentioned_user"
-                    ])
-                    OR (
-                        e.type IN ["document_mentioned_user", "campaign_message_mentioned_user"]
-                        AND e.user_id = $user_id
-                    )
-                )
-                AND
-                NOT EXISTS {
-                    MATCH (:User {id: $user_id})-[:DISMISSED_FEED_EVENT]->(e)
-                }
-                AND
-                (
-                    e.type <> "access_request_created"
-                    OR (
-                        EXISTS {
-                            MATCH (ar:CampaignAccessRequest {
-                                id: e.request_id,
-                                campaign_id: c.id
-                            })
-                            WHERE ar.status = "pending"
-                        }
-                        OR (
-                            e.request_id IS NULL
-                            AND EXISTS {
-                                MATCH (ar:CampaignAccessRequest {
-                                    campaign_id: c.id,
-                                    user_id: e.user_id,
-                                    status: "pending"
-                                })
-                            }
-                        )
-                    )
-                )
-                AND
-                (
-                e.user_id = $user_id
-                OR e.actor_user_id = $user_id
-                OR e.type IN [
-                    "document_assigned",
-                    "document_moved_needs_review",
-                    "document_moved_in_review",
-                    "deadline_created",
-                    "deadline_upcoming"
-                ]
-                OR (
-                    EXISTS {
-                        MATCH (:User {id: $user_id})-[m:MEMBER_OF]->(c)
-                        WHERE m.role = "Lead"
-                    }
-                    AND e.type IN [
-                        "access_request_created",
-                        "access_request_approved",
-                        "access_request_denied"
-                    ]
-                )
-                )
-            RETURN
-                e.id as id,
-                e.type as type,
-                e.message as message,
-                e.user_id as user_id,
-                e.actor_user_id as actor_user_id,
-                e.request_id as request_id,
-                e.campaign_id as campaign_id,
-                c.name as campaign_name,
-                CASE
-                    WHEN requester.display_name IS NOT NULL AND trim(requester.display_name) <> "" THEN requester.display_name
-                    WHEN requester.username IS NOT NULL AND trim(requester.username) <> "" THEN requester.username
-                    WHEN requester_email_prefix IS NOT NULL AND trim(requester_email_prefix) <> "" THEN requester_email_prefix
-                    WHEN requester.email IS NOT NULL AND trim(requester.email) <> "" THEN requester.email
-                    WHEN e.user_id IS NOT NULL AND trim(e.user_id) <> "" THEN e.user_id
-                    ELSE e.user_id
-                END as requester_display_name,
-                CASE
-                    WHEN EXISTS {
-                        MATCH (:User {id: $user_id})-[m:MEMBER_OF]->(c)
-                        WHERE m.role = "Lead"
-                    } THEN "Lead"
-                    ELSE "Member"
-                END as member_role,
-                toString(e.created_at) as created_at
-            ORDER BY e.created_at DESC
-            LIMIT $limit
-            """
-            result = await session.run(query, user_id=user_id, limit=limit)
-            items: List[Dict[str, Any]] = []
-            async for record in result:
-                items.append(
-                    {
-                        "id": record.get("id"),
-                        "type": record.get("type") or "",
-                        "message": record.get("message") or "",
-                        "user_id": record.get("user_id"),
-                        "actor_user_id": record.get("actor_user_id"),
-                        "request_id": record.get("request_id"),
-                        "campaign_id": record.get("campaign_id"),
-                        "campaign_name": record.get("campaign_name"),
-                        "requester_display_name": record.get("requester_display_name"),
-                        "member_role": record.get("member_role"),
-                        "created_at": record.get("created_at"),
-                    }
-                )
-            return items
-
-    async def mark_events_seen_and_detect_missed(
-        self,
-        *,
-        user_id: str,
-        delivered_event_ids: List[str],
-        missed_threshold_seconds: int = 60,
-    ) -> List[Dict[str, Any]]:
-        """Mark delivered events as seen and return targeted events that were never delivered.
-
-        Returns a list of missed-notification dicts (event_id, event_type, created_at)
-        for events where user_id matches the viewer but the event was never included
-        in a feed response within the threshold window.
-        """
-        async with self._driver.session() as session:
-            if delivered_event_ids:
-                await session.run(
-                    """
-                    UNWIND $event_ids AS eid
-                    MATCH (u:User {id: $user_id})
-                    MATCH (e:CampaignEvent {id: eid})
-                    MERGE (u)-[r:SEEN_FEED_EVENT]->(e)
-                    ON CREATE SET r.seen_at = datetime()
-                    """,
-                    user_id=user_id,
-                    event_ids=delivered_event_ids,
-                )
-
             result = await session.run(
                 """
-                MATCH (e:CampaignEvent)
-                WHERE e.user_id = $user_id
-                  AND e.created_at IS NOT NULL
-                  AND e.created_at < datetime() - duration({seconds: $threshold})
-                  AND e.created_at > datetime() - duration({hours: 24})
-                  AND NOT EXISTS {
-                      MATCH (:User {id: $user_id})-[:SEEN_FEED_EVENT]->(e)
-                  }
-                  AND NOT EXISTS {
-                      MATCH (:User {id: $user_id})-[:DISMISSED_FEED_EVENT]->(e)
-                  }
+                MATCH (n:Notification {user_id: $user_id})
                 RETURN
-                  e.id as event_id,
-                  e.type as event_type,
-                  e.campaign_id as campaign_id,
-                  toString(e.created_at) as created_at
-                ORDER BY e.created_at DESC
-                LIMIT 20
+                    n.id as id,
+                    n.user_id as user_id,
+                    n.type as type,
+                    n.entity_id as entity_id,
+                    n.campaign_id as campaign_id,
+                    n.message as message,
+                    n.status as status,
+                    toString(n.created_at) as created_at,
+                    toString(n.acted_at) as acted_at
+                ORDER BY n.created_at DESC
+                LIMIT $limit
                 """,
                 user_id=user_id,
-                threshold=missed_threshold_seconds,
+                limit=max(1, min(int(limit), 200)),
             )
-            missed: List[Dict[str, Any]] = []
-            async for record in result:
-                missed.append(
-                    {
-                        "event_id": record.get("event_id"),
-                        "event_type": record.get("event_type"),
-                        "campaign_id": record.get("campaign_id"),
-                        "created_at": record.get("created_at"),
-                    }
-                )
-            return missed
+            items: List[Dict[str, Any]] = []
+            async for row in result:
+                items.append(dict(row))
+            return items
 
-    async def dismiss_user_feed_event(
+    async def update_notification_status(
         self,
         *,
         user_id: str,
-        event_id: str,
-        campaign_id: Optional[str] = None,
+        notification_id: str,
+        status: str,
     ) -> Dict[str, Any]:
-        """Mark a campaign event dismissed for a specific user feed."""
         async with self._driver.session() as session:
-            query = """
-            MATCH (me:User {id: $user_id})-[:MEMBER_OF]->(c:Campaign)
-            MATCH (e:CampaignEvent {id: $event_id, campaign_id: c.id})
-            WHERE ($campaign_id IS NULL OR e.campaign_id = $campaign_id)
-            MERGE (me)-[d:DISMISSED_FEED_EVENT]->(e)
-            ON CREATE SET d.dismissed_at = datetime()
-            ON MATCH SET d.dismissed_at = datetime()
-            RETURN e.id as event_id, toString(d.dismissed_at) as dismissed_at
-            """
             result = await session.run(
-                query,
+                """
+                MATCH (n:Notification {id: $notification_id, user_id: $user_id})
+                SET
+                    n.status = $status,
+                    n.acted_at = datetime()
+                RETURN
+                    n.id as id,
+                    n.user_id as user_id,
+                    n.type as type,
+                    n.entity_id as entity_id,
+                    n.campaign_id as campaign_id,
+                    n.message as message,
+                    n.status as status,
+                    toString(n.created_at) as created_at,
+                    toString(n.acted_at) as acted_at
+                """,
+                notification_id=notification_id,
                 user_id=user_id,
-                event_id=event_id,
-                campaign_id=campaign_id,
+                status=status,
             )
             record = await result.single()
             if not record:
-                raise ValueError("Feed event not found or not visible to current user")
-            return {
-                "event_id": record.get("event_id"),
-                "dismissed_at": record.get("dismissed_at"),
-            }
+                raise ValueError("Notification not found")
+            return dict(record)
+
+    async def count_unread_notifications(self, *, user_id: str) -> int:
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (n:Notification {user_id: $user_id, status: "unread"})
+                RETURN count(n) as unread_count
+                """,
+                user_id=user_id,
+            )
+            record = await result.single()
+            if not record:
+                return 0
+            return int(record.get("unread_count") or 0)
 
     async def create_campaign_event(
         self,
@@ -2933,6 +2952,33 @@ class GraphService:
             object_id=object_id or request_id,
             metadata={"request_id": request_id, **(metadata or {})},
         )
+        if user_id:
+            stable_entity_id = object_id or request_id
+            if not stable_entity_id:
+                logger.warning(
+                    "notification_skipped_missing_entity_id event_type=%s campaign_id=%s user_id=%s event_id=%s",
+                    event_type,
+                    campaign_id,
+                    user_id,
+                    event_id,
+                )
+                return
+            try:
+                await self.create_notification(
+                    user_id=user_id,
+                    notification_type=event_type,
+                    entity_id=stable_entity_id,
+                    campaign_id=campaign_id,
+                    message=message,
+                    status="unread",
+                )
+            except Exception:
+                logger.exception(
+                    "notification_write_failed event_type=%s campaign_id=%s user_id=%s",
+                    event_type,
+                    campaign_id,
+                    user_id,
+                )
 
     async def create_campaign_deadline(
         self,
@@ -3037,6 +3083,106 @@ class GraphService:
                 },
             )
             return created
+
+    async def emit_due_deadline_reminders(self, campaign_id: str) -> None:
+        """Emit personal deadline reminder notifications once per reminder window."""
+        async with self._driver.session() as session:
+            ten_minute_due = await session.run(
+                """
+                MATCH (d:CampaignDeadline {campaign_id: $campaign_id})
+                WHERE
+                    d.completed_at IS NULL
+                    AND d.visibility = "personal"
+                    AND d.assigned_user_id IS NOT NULL
+                    AND trim(d.assigned_user_id) <> ""
+                    AND d.reminder_10m_sent_at IS NULL
+                    AND datetime() >= d.due_at - duration({minutes: 10})
+                    AND datetime() < d.due_at
+                SET
+                    d.reminder_10m_sent_at = datetime(),
+                    d.reminder_10m_event_id = coalesce(d.reminder_10m_event_id, d.id + ":reminder_10m")
+                RETURN
+                    d.id as deadline_id,
+                    d.title as title,
+                    toString(d.due_at) as due_at,
+                    d.assigned_user_id as assigned_user_id,
+                    d.reminder_10m_event_id as reminder_event_id
+                """,
+                campaign_id=campaign_id,
+            )
+            ten_minute_rows = [dict(row) async for row in ten_minute_due]
+
+            due_now = await session.run(
+                """
+                MATCH (d:CampaignDeadline {campaign_id: $campaign_id})
+                WHERE
+                    d.completed_at IS NULL
+                    AND d.visibility = "personal"
+                    AND d.assigned_user_id IS NOT NULL
+                    AND trim(d.assigned_user_id) <> ""
+                    AND d.reminder_now_sent_at IS NULL
+                    AND datetime() >= d.due_at
+                SET
+                    d.reminder_now_sent_at = datetime(),
+                    d.reminder_now_event_id = coalesce(d.reminder_now_event_id, d.id + ":reminder_due_now")
+                RETURN
+                    d.id as deadline_id,
+                    d.title as title,
+                    toString(d.due_at) as due_at,
+                    d.assigned_user_id as assigned_user_id,
+                    d.reminder_now_event_id as reminder_event_id
+                """,
+                campaign_id=campaign_id,
+            )
+            due_now_rows = [dict(row) async for row in due_now]
+
+        for row in ten_minute_rows:
+            assigned_user_id = str(row.get("assigned_user_id") or "").strip()
+            if not assigned_user_id:
+                continue
+            await self.create_campaign_event(
+                campaign_id=campaign_id,
+                event_type="deadline_reminder_10m",
+                message=f"Deadline due in 10 minutes: {row.get('title')} (due {row.get('due_at')})",
+                user_id=assigned_user_id,
+                actor_user_id="system:deadline-reminder",
+                object_id=row.get("reminder_event_id") or f"{row.get('deadline_id')}:reminder_10m",
+                metadata={
+                    "deadline_id": row.get("deadline_id"),
+                    "deadline_due_at": row.get("due_at"),
+                    "reminder_window": "10m",
+                },
+            )
+            logger.info(
+                "deadline_reminder_created event_type=deadline_reminder_10m campaign_id=%s user_id=%s deadline_id=%s",
+                campaign_id,
+                assigned_user_id,
+                row.get("deadline_id"),
+            )
+
+        for row in due_now_rows:
+            assigned_user_id = str(row.get("assigned_user_id") or "").strip()
+            if not assigned_user_id:
+                continue
+            await self.create_campaign_event(
+                campaign_id=campaign_id,
+                event_type="deadline_due_now",
+                message=f"Deadline is due now: {row.get('title')} (due {row.get('due_at')})",
+                user_id=assigned_user_id,
+                actor_user_id="system:deadline-reminder",
+                object_id=row.get("reminder_event_id") or f"{row.get('deadline_id')}:reminder_due_now",
+                metadata={
+                    "deadline_id": row.get("deadline_id"),
+                    "deadline_due_at": row.get("due_at"),
+                    "reminder_window": "due_now",
+                },
+            )
+            logger.info(
+                "deadline_reminder_created event_type=deadline_due_now campaign_id=%s user_id=%s deadline_id=%s",
+                campaign_id,
+                assigned_user_id,
+                row.get("deadline_id"),
+            )
 
     async def list_campaign_deadlines(
         self,
@@ -3274,7 +3420,7 @@ class GraphService:
                                 WHEN participant.username IS NOT NULL AND trim(participant.username) <> "" THEN participant.username
                                 WHEN participant_email_prefix IS NOT NULL AND trim(participant_email_prefix) <> "" THEN participant_email_prefix
                                 WHEN participant.email IS NOT NULL AND trim(participant.email) <> "" THEN participant.email
-                                ELSE participant.id
+                                ELSE "Unknown user"
                             END
                         }
                     END) as participants
@@ -3291,10 +3437,19 @@ class GraphService:
                 participants: List[Dict[str, str]] = []
                 for participant in participants_raw:
                     if isinstance(participant, dict) and participant.get("user_id"):
+                        participant_user_id = str(participant.get("user_id"))
+                        participant_label = str(participant.get("display_name") or "").strip()
+                        if not participant_label or participant_label.lower() == "unknown user":
+                            identity = await self.ensure_user_identity(
+                                user_id=participant_user_id,
+                                display_name=participant_label,
+                                fetch_from_clerk_if_missing=True,
+                            )
+                            participant_label = str(identity.get("display_name") or "").strip()
                         participants.append(
                             {
-                                "user_id": str(participant.get("user_id")),
-                                "display_name": str(participant.get("display_name") or participant.get("user_id")),
+                                "user_id": participant_user_id,
+                                "display_name": participant_label or "Unknown user",
                             }
                         )
                 conversations.append(
@@ -3375,7 +3530,7 @@ class GraphService:
                             WHEN member.username IS NOT NULL AND trim(member.username) <> "" THEN member.username
                             WHEN member_email_prefix IS NOT NULL AND trim(member_email_prefix) <> "" THEN member_email_prefix
                             WHEN member.email IS NOT NULL AND trim(member.email) <> "" THEN member.email
-                            ELSE member.id
+                            ELSE "Unknown user"
                         END
                     }) as participants
                 """,
@@ -3395,7 +3550,7 @@ class GraphService:
                     participants.append(
                         {
                             "user_id": str(participant.get("user_id")),
-                            "display_name": str(participant.get("display_name") or participant.get("user_id")),
+                            "display_name": str(participant.get("display_name") or "Unknown user"),
                         }
                     )
             return {
@@ -3523,7 +3678,7 @@ class GraphService:
                         WHEN author.username IS NOT NULL AND trim(author.username) <> "" THEN author.username
                         WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                         WHEN author.email IS NOT NULL AND trim(author.email) <> "" THEN author.email
-                        ELSE author.id
+                        ELSE "Unknown user"
                     END as author_display_name,
                     author.avatar_url as author_avatar_url
                 ORDER BY message.created_at DESC
@@ -3641,7 +3796,7 @@ class GraphService:
                         WHEN viewer.username IS NOT NULL AND trim(viewer.username) <> "" THEN viewer.username
                         WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                         WHEN viewer.email IS NOT NULL AND trim(viewer.email) <> "" THEN viewer.email
-                        ELSE viewer.id
+                        ELSE "Unknown user"
                     END as author_display_name,
                     viewer.avatar_url as author_avatar_url
                 """,
@@ -3686,26 +3841,18 @@ class GraphService:
                     user_id=author_id,
                     email_fallback=user.get("email"),
                 )
+                campaign_member_ids = set(await self.get_campaign_member_ids(campaign_id))
                 for mentioned_user_id in normalized_mentions:
-                    await session.run(
-                        """
-                        MATCH (campaign:Campaign {id: $campaign_id})
-                        MATCH (target:User {id: $mentioned_user_id})-[:MEMBER_OF]->(campaign)
-                        CREATE (:CampaignEvent {
-                            id: $event_id,
-                            campaign_id: $campaign_id,
-                            type: "campaign_message_mentioned_user",
-                            message: $message,
-                            user_id: $mentioned_user_id,
-                            actor_user_id: $actor_user_id,
-                            created_at: datetime()
-                        })
-                        """,
+                    if mentioned_user_id not in campaign_member_ids:
+                        continue
+                    await self.create_campaign_event(
                         campaign_id=campaign_id,
-                        mentioned_user_id=mentioned_user_id,
-                        event_id=str(uuid.uuid4()),
+                        event_type="campaign_message_mentioned_user",
                         message=f"{actor_display_name} mentioned you in campaign chat",
+                        user_id=mentioned_user_id,
                         actor_user_id=author_id,
+                        object_id=message_id,
+                        metadata={"conversation_id": conversation_id, "delivery_scope": "public_conversation"},
                     )
 
             await self.append_analytics_event(
@@ -3869,7 +4016,7 @@ class GraphService:
                     WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                     WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                    ELSE u.id
+                    ELSE "Unknown user"
                 END as author_display_name,
                 CASE
                     WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
@@ -3916,31 +4063,22 @@ class GraphService:
                     user_id=user_id,
                     email_fallback=user.get("email"),
                 )
+                campaign_member_ids = set(await self.get_campaign_member_ids(campaign_id))
                 for mentioned_user_id in normalized_mentions:
-                    mention_event_id = str(uuid.uuid4())
-                    await session.run(
-                        """
-                        MATCH (c:Campaign {id: $campaign_id})
-                        MATCH (target:User {id: $mentioned_user_id})-[:MEMBER_OF]->(c)
-                        CREATE (:CampaignEvent {
-                            id: $event_id,
-                            campaign_id: $campaign_id,
-                            type: "campaign_message_mentioned_user",
-                            message: $message,
-                            user_id: $mentioned_user_id,
-                            actor_user_id: $actor_user_id,
-                            created_at: datetime()
-                        })
-                        """,
+                    if mentioned_user_id not in campaign_member_ids:
+                        continue
+                    await self.create_campaign_event(
                         campaign_id=campaign_id,
-                        mentioned_user_id=mentioned_user_id,
-                        event_id=mention_event_id,
+                        event_type="campaign_message_mentioned_user",
                         message=f"{actor_display_name} mentioned you in campaign chat",
+                        user_id=mentioned_user_id,
                         actor_user_id=user_id,
+                        object_id=created_message.get("id"),
+                        metadata={"delivery_scope": "team_chat"},
                     )
                     logger.info(
-                        "notification_created event_id=%s type=campaign_message_mentioned_user campaign_id=%s target_user_id=%s actor_user_id=%s",
-                        mention_event_id, campaign_id, mentioned_user_id, user_id,
+                        "notification_created type=campaign_message_mentioned_user campaign_id=%s target_user_id=%s actor_user_id=%s source_message_id=%s",
+                        campaign_id, mentioned_user_id, user_id, created_message.get("id"),
                     )
             await self.append_analytics_event(
                 event_id=f"team_message:{created_message.get('id')}",
@@ -4140,7 +4278,7 @@ class GraphService:
                         WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                         WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                         WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                        ELSE u.id
+                        ELSE "Unknown user"
                     END as author_display_name,
                     CASE
                         WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
@@ -4180,7 +4318,7 @@ class GraphService:
                         WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                         WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                         WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                        ELSE u.id
+                        ELSE "Unknown user"
                     END as author_display_name,
                     CASE
                         WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
@@ -4295,7 +4433,7 @@ class GraphService:
                     WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                     WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                    ELSE u.id
+                    ELSE "Unknown user"
                 END as author_display_name,
                 CASE
                     WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
@@ -4338,32 +4476,31 @@ class GraphService:
             }
             if normalized_mentions:
                 actor_display_name = await self.resolve_user_display_name(user_id=user_id)
+                thread_members_result = await session.run(
+                    """
+                    MATCH (t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})<-[:THREAD_MEMBER]-(member:User)
+                    RETURN collect(member.id) as member_ids
+                    """,
+                    thread_id=thread_id,
+                    campaign_id=campaign_id,
+                )
+                thread_members_record = await thread_members_result.single()
+                thread_member_ids = set(thread_members_record.get("member_ids") or [])
                 for mentioned_user_id in normalized_mentions:
-                    mention_event_id = str(uuid.uuid4())
-                    await session.run(
-                        """
-                        MATCH (t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})
-                        MATCH (target:User {id: $mentioned_user_id})-[:THREAD_MEMBER]->(t)
-                        CREATE (:CampaignEvent {
-                            id: $event_id,
-                            campaign_id: $campaign_id,
-                            type: "campaign_message_mentioned_user",
-                            message: $message,
-                            user_id: $mentioned_user_id,
-                            actor_user_id: $actor_user_id,
-                            created_at: datetime()
-                        })
-                        """,
-                        thread_id=thread_id,
+                    if mentioned_user_id not in thread_member_ids:
+                        continue
+                    await self.create_campaign_event(
                         campaign_id=campaign_id,
-                        mentioned_user_id=mentioned_user_id,
-                        event_id=mention_event_id,
+                        event_type="campaign_message_mentioned_user",
                         message=f"{actor_display_name} mentioned you in campaign chat",
+                        user_id=mentioned_user_id,
                         actor_user_id=user_id,
+                        object_id=created_message.get("id"),
+                        metadata={"thread_id": thread_id, "delivery_scope": "private_thread"},
                     )
                     logger.info(
-                        "notification_created event_id=%s type=campaign_message_mentioned_user campaign_id=%s target_user_id=%s actor_user_id=%s",
-                        mention_event_id, campaign_id, mentioned_user_id, user_id,
+                        "notification_created type=campaign_message_mentioned_user campaign_id=%s target_user_id=%s actor_user_id=%s source_message_id=%s",
+                        campaign_id, mentioned_user_id, user_id, created_message.get("id"),
                     )
             await self.append_analytics_event(
                 event_id=f"thread_message:{created_message.get('id')}",
@@ -4439,7 +4576,7 @@ class GraphService:
                     WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                     WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                    ELSE u.id
+                    ELSE "Unknown user"
                 END as author_display_name,
                 CASE
                     WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
@@ -4528,7 +4665,7 @@ class GraphService:
                     WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                     WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                    ELSE u.id
+                    ELSE "Unknown user"
                 END as author_display_name,
                 CASE
                     WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
@@ -4612,7 +4749,7 @@ class GraphService:
                         WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                         WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                         WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                        ELSE u.id
+                        ELSE "Unknown user"
                     END as author_display_name,
                     CASE
                         WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
@@ -4653,7 +4790,7 @@ class GraphService:
                         WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                         WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                         WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                        ELSE u.id
+                        ELSE "Unknown user"
                     END as author_display_name,
                     CASE
                         WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
@@ -4793,8 +4930,7 @@ class GraphService:
                     WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                     WHEN email_value <> "" THEN email_value
-                    WHEN u.id IS NOT NULL AND trim(u.id) <> "" THEN u.id
-                    ELSE u.id
+                    ELSE "Unknown user"
                 END as display_name,
                 u.avatar_url as avatar_url,
                 r.role as role,
@@ -4806,8 +4942,7 @@ class GraphService:
                     WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
                     WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                     WHEN email_value <> "" THEN email_value
-                    WHEN u.id IS NOT NULL AND trim(u.id) <> "" THEN u.id
-                    ELSE u.id
+                    ELSE "Unknown user"
                 END
             ) ASC
             """
@@ -4858,6 +4993,24 @@ class GraphService:
                     by_user_id[user_id] = member
 
             deduped = list(by_user_id.values())
+            for item in deduped:
+                current_label = str(item.get("display_name") or "").strip().lower()
+                if current_label and current_label != "unknown user":
+                    continue
+                user_id = str(item.get("user_id") or "").strip()
+                if not user_id:
+                    continue
+                identity = await self.ensure_user_identity(
+                    user_id=user_id,
+                    email=item.get("email"),
+                    username=item.get("username"),
+                    display_name=item.get("display_name"),
+                    avatar_url=item.get("avatar_url"),
+                    fetch_from_clerk_if_missing=True,
+                )
+                item["display_name"] = identity.get("display_name") or "Unknown user"
+                item["email"] = identity.get("email") or item.get("email")
+                item["avatar_url"] = identity.get("avatar_url") or item.get("avatar_url")
             deduped.sort(
                 key=lambda item: str(
                     item.get("display_name") or item.get("user_id") or ""
@@ -4934,6 +5087,7 @@ class GraphService:
                 coalesce(u.email, $email_fallback) as email,
                 u.username as username,
                 u.display_name as display_name,
+                u.avatar_url as avatar_url,
                 toString(u.updated_at) as updated_at
             """
             result = await session.run(
@@ -4947,12 +5101,14 @@ class GraphService:
                     "email": email_fallback or "",
                     "username": None,
                     "display_name": None,
+                    "avatar_url": None,
                     "updated_at": None,
                 }
             return {
                 "email": record.get("email") or (email_fallback or ""),
                 "username": record.get("username"),
                 "display_name": record.get("display_name"),
+                "avatar_url": record.get("avatar_url"),
                 "updated_at": record.get("updated_at"),
             }
 
@@ -4962,7 +5118,12 @@ class GraphService:
         user_id: str,
         email_fallback: Optional[str] = None,
     ) -> str:
-        """Resolve display_name -> username -> email_prefix -> email -> user_id chain."""
+        """Resolve display_name -> username -> email_prefix -> email -> Unknown user chain."""
+        await self.ensure_user_identity(
+            user_id=user_id,
+            email=email_fallback,
+            fetch_from_clerk_if_missing=True,
+        )
         profile = await self.get_user_profile(user_id=user_id, email_fallback=email_fallback)
         display_name = str(profile.get("display_name") or "").strip()
         if display_name:
@@ -4976,8 +5137,94 @@ class GraphService:
             if email_prefix:
                 return email_prefix
             return email
-        normalized_user_id = (user_id or "").strip()
-        return normalized_user_id or "Unknown User"
+        return "Unknown user"
+
+    async def ensure_user_identity(
+        self,
+        *,
+        user_id: str,
+        email: Optional[str] = None,
+        username: Optional[str] = None,
+        first_name: Optional[str] = None,
+        last_name: Optional[str] = None,
+        display_name: Optional[str] = None,
+        avatar_url: Optional[str] = None,
+        fetch_from_clerk_if_missing: bool = False,
+    ) -> Dict[str, Optional[str]]:
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return {"user_id": None, "display_name": None, "email": None, "avatar_url": None}
+
+        full_name = f"{str(first_name or '').strip()} {str(last_name or '').strip()}".strip()
+        normalized_email = str(email or "").strip() or None
+        normalized_username = str(username or "").strip() or None
+        normalized_avatar = str(avatar_url or "").strip() or None
+        normalized_display_name = str(display_name or "").strip() or None
+        if not normalized_display_name:
+            normalized_display_name = full_name or normalized_username
+        if not normalized_display_name and normalized_email:
+            normalized_display_name = normalized_email.split("@")[0].strip() or None
+
+        await self.upsert_user_identity(
+            user_id=normalized_user_id,
+            email=normalized_email,
+            username=normalized_username,
+            first_name=first_name,
+            last_name=last_name,
+            display_name=normalized_display_name,
+            avatar_url=normalized_avatar,
+        )
+
+        profile = await self.get_user_profile(
+            user_id=normalized_user_id,
+            email_fallback=normalized_email,
+        )
+        has_resolved_identity = bool(
+            str(profile.get("display_name") or "").strip()
+            or str(profile.get("username") or "").strip()
+            or str(profile.get("email") or "").strip()
+        )
+
+        if (not has_resolved_identity) and fetch_from_clerk_if_missing:
+            clerk_user: Optional[Dict[str, str]] = None
+            try:
+                clerk_user = find_user_by_id(normalized_user_id)
+            except Exception:
+                logger.warning(
+                    "identity_clerk_lookup_failed user_id=%s",
+                    normalized_user_id,
+                )
+            if clerk_user:
+                await self.upsert_user_identity(
+                    user_id=normalized_user_id,
+                    email=clerk_user.get("email"),
+                    username=clerk_user.get("username"),
+                    first_name=clerk_user.get("first_name"),
+                    last_name=clerk_user.get("last_name"),
+                    display_name=clerk_user.get("display_name"),
+                    avatar_url=clerk_user.get("avatar_url"),
+                )
+                profile = await self.get_user_profile(
+                    user_id=normalized_user_id,
+                    email_fallback=clerk_user.get("email"),
+                )
+
+        resolved_display_name = str(profile.get("display_name") or "").strip()
+        if not resolved_display_name:
+            resolved_display_name = str(profile.get("username") or "").strip()
+        if not resolved_display_name:
+            resolved_email = str(profile.get("email") or "").strip()
+            if resolved_email:
+                resolved_display_name = resolved_email.split("@")[0].strip() or resolved_email
+        if not resolved_display_name:
+            resolved_display_name = "Unknown user"
+
+        return {
+            "user_id": normalized_user_id,
+            "display_name": resolved_display_name,
+            "email": str(profile.get("email") or "").strip() or None,
+            "avatar_url": str(profile.get("avatar_url") or "").strip() or None,
+        }
 
     async def update_user_profile(
         self,
@@ -5033,13 +5280,18 @@ class GraphService:
         async with self._driver.session() as session:
             query = """
             MERGE (u:User {id: $user_id})
+            ON CREATE SET
+                u.created_at = datetime(),
+                u.user_id = $user_id
             SET
+                u.user_id = $user_id,
                 u.email = coalesce($email, u.email),
                 u.username = coalesce($username, u.username),
                 u.first_name = coalesce($first_name, u.first_name),
                 u.last_name = coalesce($last_name, u.last_name),
                 u.display_name = coalesce($display_name, u.display_name),
-                u.avatar_url = coalesce($avatar_url, u.avatar_url)
+                u.avatar_url = coalesce($avatar_url, u.avatar_url),
+                u.updated_at = datetime()
             """
             await session.run(
                 query,
@@ -5069,8 +5321,11 @@ class GraphService:
         async with self._driver.session() as session:
             query = """
             MERGE (u:User {id: $user_id})
-            ON CREATE SET u.created_at = datetime()
+            ON CREATE SET
+                u.created_at = datetime(),
+                u.user_id = $user_id
             SET
+                u.user_id = $user_id,
                 u.email = $email,
                 u.username = $username,
                 u.display_name = $display_name,
@@ -5084,7 +5339,7 @@ class GraphService:
                 user_id=normalized_user_id,
                 email=(str(email or "").strip() or None),
                 username=(str(username or "").strip() or None),
-                display_name=str(display_name or "").strip() or normalized_user_id,
+                display_name=str(display_name or "").strip() or "Unknown user",
                 avatar_url=(str(avatar_url or "").strip() or None),
             )
 
@@ -5142,7 +5397,7 @@ class GraphService:
                         WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
                         WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
                         WHEN u.id IS NOT NULL AND trim(u.id) <> "" THEN u.id
-                        ELSE u.id
+                        ELSE "Unknown user"
                     END as display_name
                 ORDER BY coalesce(u.updated_at, u.status_updated_at, datetime({epochMillis: 0})) DESC
                 LIMIT $limit

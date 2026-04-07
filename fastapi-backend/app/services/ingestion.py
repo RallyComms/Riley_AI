@@ -2669,6 +2669,238 @@ async def backfill_reindex_supported_files(
     return totals
 
 
+async def backfill_indexed_content_hashes(
+    *,
+    tenant_id: Optional[str] = None,
+    include_global: bool = True,
+    batch_size: int = 100,
+    max_points_per_collection: Optional[int] = None,
+) -> Dict[str, int]:
+    """
+    One-time metadata backfill for indexed files missing indexed_content_sha256.
+
+    Safety guarantees:
+    - metadata-only payload update on parent file points
+    - no ingestion enqueue
+    - no embedding generation
+    - no chunk point mutation
+    """
+    settings = get_settings()
+    effective_batch_size = max(50, min(100, int(batch_size or 100)))
+    totals = {
+        "scanned": 0,
+        "processed": 0,
+        "skipped": 0,
+        "errors": 0,
+    }
+
+    targets: List[Tuple[str, Optional[Filter]]] = []
+    tenant_filter = None
+    if tenant_id and tenant_id != "global":
+        tenant_filter = Filter(
+            must=[FieldCondition(key="client_id", match=MatchValue(value=tenant_id))],
+            must_not=[FieldCondition(key="record_type", match=MatchValue(value="chunk"))],
+        )
+    else:
+        tenant_filter = Filter(
+            must_not=[FieldCondition(key="record_type", match=MatchValue(value="chunk"))],
+        )
+    targets.append((settings.QDRANT_COLLECTION_TIER_2, tenant_filter))
+    if include_global:
+        global_filter = Filter(
+            must=[FieldCondition(key="is_global", match=MatchValue(value=True))],
+            must_not=[FieldCondition(key="record_type", match=MatchValue(value="chunk"))],
+        )
+        targets.append((settings.QDRANT_COLLECTION_TIER_1, global_filter))
+
+    logger.info(
+        "backfill_started tenant_id=%s include_global=%s batch_size=%s max_points_per_collection=%s",
+        tenant_id,
+        include_global,
+        effective_batch_size,
+        max_points_per_collection,
+    )
+    max_file_size_bytes = int(settings.MAX_UPLOAD_MB) * 1024 * 1024
+
+    def _resolve_file_size_bytes_from_gcs(file_url: str) -> int:
+        client = StorageService._get_client()
+        bucket_name, _, decoded_blob_name = StorageService._parse_gcs_location(file_url)
+        bucket = client.bucket(bucket_name)
+        blob = bucket.blob(decoded_blob_name)
+        blob.reload()
+        return int(blob.size or 0)
+
+    for collection_name, base_filter in targets:
+        offset: Any = None
+        scanned_for_collection = 0
+        batch_num = 0
+        while True:
+            if max_points_per_collection and scanned_for_collection >= max_points_per_collection:
+                break
+
+            try:
+                points, next_offset = await vector_service.client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=base_filter,
+                    limit=effective_batch_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+            except Exception as exc:
+                message = str(exc).lower()
+                if "index required but not found" not in message:
+                    raise
+                # Legacy fallback when record_type payload index is missing.
+                legacy_filter = Filter(
+                    must=(base_filter.must or []) if base_filter else [],
+                    should=(base_filter.should or []) if base_filter else [],
+                )
+                points, next_offset = await vector_service.client.scroll(
+                    collection_name=collection_name,
+                    scroll_filter=legacy_filter,
+                    limit=effective_batch_size,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                points = [point for point in points if (point.payload or {}).get("record_type") != "chunk"]
+
+            if not points:
+                break
+
+            batch_num += 1
+            batch_processed = 0
+            batch_skipped = 0
+            batch_errors = 0
+            scanned_for_collection += len(points)
+            totals["scanned"] += len(points)
+
+            for point in points:
+                payload = point.payload or {}
+                if payload.get("record_type") == "chunk":
+                    totals["skipped"] += 1
+                    batch_skipped += 1
+                    continue
+
+                status_now = str(payload.get("ingestion_status") or "").strip().lower()
+                chunk_count = int(payload.get("chunk_count") or 0)
+                existing_hash = str(payload.get("indexed_content_sha256") or "").strip()
+                if status_now != "indexed" or chunk_count <= 0 or existing_hash:
+                    totals["skipped"] += 1
+                    batch_skipped += 1
+                    continue
+
+                file_id = str(point.id)
+                file_url = str(payload.get("url") or "").strip()
+                campaign_id = str(payload.get("client_id") or ("global" if bool(payload.get("is_global")) else "unknown"))
+                if not file_url:
+                    totals["errors"] += 1
+                    batch_errors += 1
+                    logger.warning(
+                        "backfill_errors file_id=%s campaign_id=%s collection=%s reason=missing_file_url",
+                        file_id,
+                        campaign_id,
+                        collection_name,
+                    )
+                    continue
+
+                raw_size = payload.get("size_bytes")
+                file_size_bytes = 0
+                if isinstance(raw_size, (int, float)):
+                    file_size_bytes = int(raw_size)
+                elif isinstance(raw_size, str):
+                    try:
+                        file_size_bytes = int(float(raw_size.strip()))
+                    except Exception:
+                        file_size_bytes = 0
+
+                if file_size_bytes <= 0:
+                    try:
+                        file_size_bytes = await run_in_threadpool(_resolve_file_size_bytes_from_gcs, file_url)
+                    except Exception as exc:
+                        totals["errors"] += 1
+                        batch_errors += 1
+                        logger.warning(
+                            "backfill_errors file_id=%s campaign_id=%s collection=%s error=%s",
+                            file_id,
+                            campaign_id,
+                            collection_name,
+                            type(exc).__name__,
+                        )
+                        continue
+
+                if file_size_bytes > max_file_size_bytes:
+                    totals["skipped"] += 1
+                    batch_skipped += 1
+                    logger.info(
+                        "backfill_skipped_large_file file_id=%s campaign_id=%s collection=%s size=%s threshold=%s",
+                        file_id,
+                        campaign_id,
+                        collection_name,
+                        file_size_bytes,
+                        max_file_size_bytes,
+                    )
+                    continue
+
+                try:
+                    file_bytes = await StorageService.download_file(file_url)
+                    source_content_sha256 = _content_sha256_hex(file_bytes)
+                    await vector_service.client.set_payload(
+                        collection_name=collection_name,
+                        payload={"indexed_content_sha256": source_content_sha256},
+                        points=[file_id],
+                    )
+                    totals["processed"] += 1
+                    batch_processed += 1
+                except Exception as exc:
+                    totals["errors"] += 1
+                    batch_errors += 1
+                    logger.warning(
+                        "backfill_errors file_id=%s campaign_id=%s collection=%s error=%s",
+                        file_id,
+                        campaign_id,
+                        collection_name,
+                        type(exc).__name__,
+                    )
+
+            logger.info(
+                "backfill_processed_count collection=%s batch=%s batch_processed=%s total_processed=%s",
+                collection_name,
+                batch_num,
+                batch_processed,
+                totals["processed"],
+            )
+            logger.info(
+                "backfill_skipped_count collection=%s batch=%s batch_skipped=%s total_skipped=%s",
+                collection_name,
+                batch_num,
+                batch_skipped,
+                totals["skipped"],
+            )
+            if batch_errors:
+                logger.info(
+                    "backfill_errors collection=%s batch=%s batch_errors=%s total_errors=%s",
+                    collection_name,
+                    batch_num,
+                    batch_errors,
+                    totals["errors"],
+                )
+
+            offset = next_offset
+            if offset is None:
+                break
+
+    logger.info(
+        "backfill_completed scanned=%s processed=%s skipped=%s errors=%s",
+        totals["scanned"],
+        totals["processed"],
+        totals["skipped"],
+        totals["errors"],
+    )
+    return totals
+
+
 async def delete_file(file_id: str, collection_name: str) -> None:
     """
     Permanently delete a file from GCS and Qdrant.

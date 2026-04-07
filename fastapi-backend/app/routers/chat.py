@@ -1539,6 +1539,10 @@ Context Data:
                 cost_confidence=str(cost_meta.get("cost_confidence") or "proxy_only"),
                 metadata={
                     "service": "chat_generation",
+                    # Explicit mode markers improve cost-attribution confidence in Mission Control.
+                    "mode": "deep" if is_deep_request else "fast",
+                    "request_mode": request.mode if isinstance(request.mode, str) else "",
+                    "endpoint": "/chat/generate",
                     "input_tokens": int(generation_usage.get("input_tokens") or 0),
                     "output_tokens": int(generation_usage.get("output_tokens") or 0),
                     "total_tokens": int(generation_usage.get("total_tokens") or 0),
