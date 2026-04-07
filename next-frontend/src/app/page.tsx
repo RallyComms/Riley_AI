@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useAuth, useUser, UserButton } from "@clerk/nextjs";
+import { useAuth, useUser } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import { Archive, BookOpen, ChevronDown, Globe, Plus } from "lucide-react";
 import { CreateCampaignModal } from "@app/components/dashboard/CreateCampaignModal";
@@ -170,34 +170,6 @@ export default function HomePage() {
   const [isArchiving, setIsArchiving] = useState(false);
   const [campaignsVersion, setCampaignsVersion] = useState(0);
 
-  const [canAccessMissionControl, setCanAccessMissionControl] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function checkMissionControlAccess() {
-      if (!isLoaded || !user?.id) return;
-      try {
-        const token = await getToken();
-        if (!token) return;
-        const result = await apiFetch<{ allowed?: boolean }>("/api/v1/mission-control/access", {
-          token,
-          method: "GET",
-        });
-        if (!cancelled) {
-          setCanAccessMissionControl(Boolean(result?.allowed));
-        }
-      } catch {
-        if (!cancelled) {
-          setCanAccessMissionControl(false);
-        }
-      }
-    }
-    void checkMissionControlAccess();
-    return () => {
-      cancelled = true;
-    };
-  }, [getToken, isLoaded, user?.id]);
-
   const refreshCampaigns = async () => {
     if (!isLoaded) return;
     if (!user?.id) {
@@ -345,7 +317,7 @@ export default function HomePage() {
   return (
     <div className="min-h-screen bg-[#f8f5ef] text-[#1f2a44]">
       <header className="border-b border-[#e6dece] bg-[#fbf8f2]">
-        <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-8 py-4">
+        <div className="mx-auto flex w-full max-w-6xl items-center justify-start px-8 py-4">
           <div className="flex items-center gap-8">
             <h1 className="text-xl font-semibold tracking-tight text-[#d4ad47]">Riley</h1>
             <nav className="flex items-center gap-1 text-sm">
@@ -375,20 +347,6 @@ export default function HomePage() {
                 Riley Global
               </button>
             </nav>
-          </div>
-          <div className="flex items-center gap-4">
-            {canAccessMissionControl ? (
-              <button
-                type="button"
-                onClick={() => router.push("/mission-control")}
-                className="rounded-md border border-[#1f2a44] px-3 py-1.5 text-sm font-medium text-[#1f2a44] hover:bg-[#f4efe5]"
-              >
-                Mission Control
-              </button>
-            ) : null}
-            <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full border border-[#d7cfbf] bg-white">
-              <UserButton appearance={{ elements: { userButtonAvatarBox: "h-8 w-8" } }} />
-            </div>
           </div>
         </div>
       </header>

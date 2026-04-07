@@ -235,8 +235,8 @@ export function GlobalNotificationBell() {
     return null;
   }
 
-  return (
-    <div className="fixed right-6 top-4 z-[80]" ref={containerRef}>
+  const bellUi = (
+    <div className="relative" ref={containerRef}>
       <button
         type="button"
         onClick={toggleOpen}
@@ -352,5 +352,7 @@ export function GlobalNotificationBell() {
       ) : null}
     </div>
   );
+
+  return bellUi;
 }
 
