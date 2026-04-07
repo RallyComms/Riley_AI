@@ -90,11 +90,11 @@ export default function ConversationsPage() {
       const others = participants.filter((p) => p.user_id !== currentUserId);
 
       if (others.length === 1) {
-        return others[0].display_name || others[0].user_id;
+        return others[0].display_name || "Unknown user";
       }
       if (others.length > 1) {
-        const first = others[0].display_name || others[0].user_id;
-        const second = others[1].display_name || others[1].user_id;
+        const first = others[0].display_name || "Unknown user";
+        const second = others[1].display_name || "Unknown user";
         const remaining = others.length - 2;
         return remaining > 0 ? `${first}, ${second} +${remaining}` : `${first}, ${second}`;
       }
@@ -325,7 +325,7 @@ export default function ConversationsPage() {
               onChange={() => onToggle(m.user_id)}
               className="accent-[#1f2a44]"
             />
-            <span className="text-sm">{m.display_name || m.user_id}</span>
+            <span className="text-sm">{m.display_name || "Unknown user"}</span>
           </label>
         ))
       )}
@@ -387,7 +387,7 @@ export default function ConversationsPage() {
     (conversation: Conversation): string => {
       const participants = (conversation.participants || [])
         .filter((p) => p.user_id && p.user_id !== currentUserId)
-        .map((p) => p.display_name || p.user_id);
+        .map((p) => p.display_name || "Unknown user");
       if (participants.length === 0) return "Private thread";
       if (participants.length === 1) return `With ${participants[0]}`;
       return `${participants.length} participants`;
@@ -530,7 +530,7 @@ export default function ConversationsPage() {
                     {selectedConversation?.type === "public"
                       ? "Visible to everyone in this campaign."
                       : (selectedConversation?.participants || [])
-                          .map((p) => p.display_name || p.user_id)
+                          .map((p) => p.display_name || "Unknown user")
                           .join(", ")}
                   </p>
                 </div>
@@ -566,12 +566,12 @@ export default function ConversationsPage() {
                   messages.map((message) => (
                     <article key={message.id} className="flex items-start gap-3">
                       <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-[#ece5d7] text-xs font-semibold text-[#34445f]">
-                        {getInitials(message.author_display_name || message.author_id)}
+                        {getInitials(message.author_display_name || "Unknown user")}
                       </div>
                       <div className="min-w-0 max-w-3xl">
                         <div className="flex flex-wrap items-baseline gap-2">
                           <p className="text-sm font-medium text-[#1f2a44]">
-                            {message.author_display_name || message.author_id}
+                            {message.author_display_name || "Unknown user"}
                           </p>
                           <p className="text-[11px] text-[#7f8798]">{formatMessageTimestamp(message.created_at)}</p>
                         </div>

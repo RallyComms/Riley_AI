@@ -25,6 +25,15 @@ interface NotificationsUnreadCountResponse {
   unread_count: number;
 }
 
+interface BackendCampaign {
+  id: string;
+  name: string;
+}
+
+interface CampaignsResponse {
+  campaigns: BackendCampaign[];
+}
+
 function notificationTimeLabel(iso?: string | null): string {
   if (!iso) return "Just now";
   const date = new Date(iso);
@@ -63,6 +72,31 @@ export function GlobalNotificationBell() {
   const [error, setError] = useState<string | null>(null);
   const [dismissLoadingId, setDismissLoadingId] = useState<string | null>(null);
   const [decisionLoadingId, setDecisionLoadingId] = useState<string | null>(null);
+  const [campaignNameById, setCampaignNameById] = useState<Record<string, string>>({});
+
+  const resolveCampaignName = (campaignId?: string | null): string | null => {
+    const id = String(campaignId || "").trim();
+    if (!id) return null;
+    const name = campaignNameById[id];
+    return name && name.trim() ? name : null;
+  };
+
+  const notificationMessage = (notification: NotificationItem): string => {
+    const campaignId = String(notification.campaign_id || "").trim();
+    const campaignName = resolveCampaignName(campaignId);
+    const rawMessage = String(notification.message || "").trim();
+
+    if (notification.type === "campaign_member_added_notification") {
+      if (campaignName) return `You were added to Campaign ${campaignName}`;
+      return "You were added to a campaign";
+    }
+
+    if (campaignId && campaignName && rawMessage.includes(campaignId)) {
+      return rawMessage.replaceAll(campaignId, campaignName);
+    }
+
+    return rawMessage || "Campaign update";
+  };
 
   const refreshNotifications = async () => {
     if (!isLoaded || !user?.id) {
@@ -109,8 +143,36 @@ export function GlobalNotificationBell() {
     }
   };
 
+  const refreshCampaignNameMap = async () => {
+    if (!isLoaded || !user?.id) {
+      setCampaignNameById({});
+      return;
+    }
+    try {
+      const token = await getToken();
+      if (!token) throw new Error("No authentication token available");
+      const data = await apiFetch<CampaignsResponse>("/api/v1/campaigns", {
+        token,
+        method: "GET",
+      });
+      const nextMap: Record<string, string> = {};
+      for (const campaign of data.campaigns || []) {
+        const id = String(campaign.id || "").trim();
+        const name = String(campaign.name || "").trim();
+        if (id && name) nextMap[id] = name;
+      }
+      setCampaignNameById(nextMap);
+    } catch {
+      // Keep previous name map on transient failures.
+    }
+  };
+
   useEffect(() => {
     void refreshUnreadCount();
+  }, [isLoaded, user?.id, getToken, pathname]);
+
+  useEffect(() => {
+    void refreshCampaignNameMap();
   }, [isLoaded, user?.id, getToken, pathname]);
 
   useEffect(() => {
@@ -292,7 +354,7 @@ export function GlobalNotificationBell() {
                       </span>
                     </div>
                     <p className="text-sm font-medium text-[#1f2a44]">
-                      {notification.message || "Campaign update"}
+                      {notificationMessage(notification)}
                     </p>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       {canResolveAccess ? (

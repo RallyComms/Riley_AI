@@ -89,6 +89,7 @@ type CostData = {
   current_month_cost?: number;
   average_daily_burn_rate?: number;
   projected_month_end_cost?: number;
+  projection_mode?: "weighted" | "recent_override" | string;
   current_month_days_elapsed?: number;
   current_month_total_days?: number;
   last_7d_estimated_cost: number;
@@ -389,6 +390,7 @@ const defaultCost: CostData = {
   current_month_cost: 0,
   average_daily_burn_rate: 0,
   projected_month_end_cost: 0,
+  projection_mode: "weighted",
   current_month_days_elapsed: 0,
   current_month_total_days: 0,
   last_7d_estimated_cost: 0,
@@ -694,6 +696,7 @@ function normalizeCost(raw: unknown): CostData {
     current_month_cost: asNumber(src.current_month_cost),
     average_daily_burn_rate: asNumber(src.average_daily_burn_rate),
     projected_month_end_cost: asNumber(src.projected_month_end_cost),
+    projection_mode: asString(src.projection_mode, "weighted"),
     current_month_days_elapsed: asNumber(src.current_month_days_elapsed),
     current_month_total_days: asNumber(src.current_month_total_days),
     last_7d_estimated_cost: asNumber(src.last_7d_estimated_cost),
@@ -1121,7 +1124,25 @@ function renderCampaignLabel(name: string, _campaignId: string, _secondary?: str
 }
 
 function renderUserLabel(userLabel: string, userId: string, _secondary?: string): string {
-  return asString(userLabel, asString(userId, "unknown_user"));
+  const normalizedLabel = asString(userLabel, "").trim();
+  if (normalizedLabel && !looksLikeRawUserId(normalizedLabel)) {
+    return normalizedLabel;
+  }
+  const normalizedId = asString(userId, "").trim();
+  if (normalizedId && !looksLikeRawUserId(normalizedId)) {
+    return normalizedId;
+  }
+  return "Unknown user";
+}
+
+function looksLikeRawUserId(value: string): boolean {
+  const v = String(value || "").trim().toLowerCase();
+  if (!v) return false;
+  if (v.startsWith("user_")) return true;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(v)) {
+    return true;
+  }
+  return /^[a-z0-9_-]{20,}$/.test(v) && !v.includes("@") && !v.includes(" ");
 }
 
 function resolveGuardrailStyle(status: CostData["guardrail_status"]): {
@@ -1512,6 +1533,22 @@ export default function MissionControlPage() {
   const showFeatureAttributionNote =
     asNumber(currentMonthFeatureConfidence.inferred_or_other_percent) >= 15 ||
     asNumber(currentMonthFeatureConfidence.other_llm_percent) >= 10;
+  const projectionModeLabel =
+    asString(cost.projection_mode, "weighted") === "recent_override"
+      ? "Recent override (24h drop detected)"
+      : "Weighted (24h/7d/MTD blend)";
+  const cloudDailySeriesForWindow = useMemo(() => {
+    const normalizedDays = timeframe === "24h" ? 1 : timeframe === "7d" ? 7 : 30;
+    const cutoff = new Date();
+    cutoff.setHours(0, 0, 0, 0);
+    cutoff.setDate(cutoff.getDate() - (normalizedDays - 1));
+    return (cloudInfraCost.daily_cloud_cost_series || []).filter((row) => {
+      const rowDate = new Date(String(row.date || ""));
+      if (Number.isNaN(rowDate.getTime())) return false;
+      rowDate.setHours(0, 0, 0, 0);
+      return rowDate >= cutoff;
+    });
+  }, [cloudInfraCost.daily_cloud_cost_series, timeframe]);
 
   const handleResolveFailure = useCallback(async (failureId: string) => {
     const normalized = asString(failureId, "");
@@ -1823,7 +1860,7 @@ export default function MissionControlPage() {
                         LLM (AnalyticsEvent LLM-only) + Cloud Billing + Qdrant estimate + Fixed SaaS config. */}
                     <div className="rounded-lg border border-slate-200 bg-white p-4">
                       <div className="mb-3 flex items-center justify-between gap-2">
-                        <p className="text-sm font-semibold">Total Monthly Spend</p>
+                        <p className="text-sm font-semibold">Total Spend ({timeframeLabel})</p>
                         <span className="text-xs text-slate-500">
                           Blended view: metered/actual + estimated accrual categories
                         </span>
@@ -1844,28 +1881,29 @@ export default function MissionControlPage() {
                         </div>
                       ) : null}
                       <div className="mb-3 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                        Cloud MTD is billing-export metered and may lag. Qdrant and fixed SaaS MTD are estimated accruals.
+                        Current values are for the selected timeframe. Projection uses weighted recent behavior and can switch to recent-override after sharp drops.
                       </div>
                       <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-3">
                         <Metric
-                          label="Blended MTD Spend (Actual/Metered + Estimated)"
+                          label={`Blended Spend (${timeframeLabel})`}
                           value={`$${asNumber(cost.current_month_blended_total_spend || cost.current_month_total_spend).toFixed(2)}`}
                         />
                         <Metric
-                          label="Actual or Metered MTD"
+                          label={`Actual or Metered (${timeframeLabel})`}
                           value={`$${asNumber(cost.current_month_actual_or_metered_spend).toFixed(2)}`}
                         />
                         <Metric
-                          label="Estimated Accrual MTD"
+                          label={`Estimated Accrual (${timeframeLabel})`}
                           value={`$${asNumber(cost.current_month_estimated_accrual_spend).toFixed(2)}`}
                         />
                       </div>
                       <div className="mb-4 grid grid-cols-1 gap-3 md:grid-cols-1">
                         <Metric label="Projected Month-End Spend" value={`$${asNumber(cost.projected_month_end_total_spend).toFixed(2)}`} />
+                        <p className="text-xs text-slate-500">Projection mode: {projectionModeLabel}</p>
                       </div>
                       <SimpleTable
                         emptyLabel="No total spend category breakdown available."
-                        columns={["Category", "Current MTD (Semantics)", "Projected (Month-End)"]}
+                        columns={["Category", `Current (${timeframeLabel})`, "Projected (Month-End)"]}
                         rows={cost.total_spend_breakdown.map((row) => [
                           row.category,
                           `${`$${asNumber(row.current).toFixed(2)}`} (${row.current_semantics === "actual_or_metered_mtd" ? "actual/metered" : "estimated accrual"})`,
@@ -1881,7 +1919,7 @@ export default function MissionControlPage() {
                         </p>
                         <SimpleTable
                           emptyLabel="No fixed SaaS composition configured."
-                          columns={["Component", "Current MTD (estimated accrual)", "Projected (Month-End)"]}
+                          columns={["Component", `Current (${timeframeLabel}, est. accrual)`, "Projected (Month-End)"]}
                           rows={cost.fixed_saas_component_breakdown.map((row) => [
                             row.component,
                             `$${asNumber(row.current_mtd).toFixed(2)}`,
@@ -1953,7 +1991,7 @@ export default function MissionControlPage() {
                       </div>
                     </div>
                     <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-                      <Metric label="Current Month LLM Spend (MTD)" value={`$${asNumber(cost.current_month_llm_spend).toFixed(2)}`} />
+                      <Metric label={`Selected Window LLM Spend (${timeframeLabel})`} value={`$${asNumber(cost.selected_window_cost).toFixed(2)}`} />
                       <Metric label="Avg Daily LLM Burn" value={`$${asNumber(cost.average_daily_burn_rate).toFixed(2)} / day`} />
                       <Metric label="Projected Month-End LLM Spend" value={`$${asNumber(cost.projected_month_end_llm_spend).toFixed(2)}`} />
                       <Metric label="Last 7d LLM Spend" value={`$${asNumber(cost.last_7d_estimated_cost).toFixed(2)}`} />
@@ -2012,17 +2050,17 @@ export default function MissionControlPage() {
                       ) : (
                         <div className="space-y-4">
                           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                            <Metric label="Current Month Cloud Spend" value={`$${asNumber(cloudInfraCost.current_month_cloud_cost).toFixed(2)}`} />
-                            <Metric label="Projected Month-End Cloud Spend" value={`$${asNumber(cloudInfraCost.projected_month_end_cloud_cost).toFixed(2)}`} />
+                            <Metric label={`Cloud Spend (${timeframeLabel})`} value={`$${asNumber(cost.current_month_cloud_spend).toFixed(2)}`} />
+                            <Metric label="Projected Month-End Cloud Spend" value={`$${asNumber(cost.projected_month_end_cloud_spend).toFixed(2)}`} />
                           </div>
                           <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
                             <LineChartCard
-                              title="Daily Cloud Cost Trend"
+                              title={`Daily Cloud Cost Trend (${timeframeLabel})`}
                               series={[
                                 {
                                   name: "Cloud Cost",
                                   color: "#0369a1",
-                                  points: cloudInfraCost.daily_cloud_cost_series.map((p) => ({
+                                  points: cloudDailySeriesForWindow.map((p) => ({
                                     x: safeDateLabel(p.date),
                                     y: p.cost,
                                   })),
@@ -2030,7 +2068,7 @@ export default function MissionControlPage() {
                               ]}
                             />
                             <div className="rounded-lg border border-slate-200 bg-white p-4">
-                              <p className="mb-2 text-sm font-semibold">Cloud Service Breakdown (MTD)</p>
+                              <p className="mb-2 text-sm font-semibold">Cloud Service Breakdown (Billing MTD)</p>
                               <SimpleTable
                                 emptyLabel="No cloud service breakdown available."
                                 columns={["Service", "Cost"]}

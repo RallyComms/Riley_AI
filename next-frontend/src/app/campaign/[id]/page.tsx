@@ -79,7 +79,7 @@ export default function CampaignOverviewPage() {
     : "Campaign workspace overview";
   const recentActivity = useMemo(() => events.slice(0, 8), [events]);
   const getAccessRequesterLabel = (event: CampaignEventItem) =>
-    event.requester_display_name?.trim() || event.user_id?.trim() || "Unknown user";
+    event.requester_display_name?.trim() || "Unknown user";
 
   const sortedTeamMembers = useMemo(() => {
     const rank = (s?: string | null) => {

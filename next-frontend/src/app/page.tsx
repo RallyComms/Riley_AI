@@ -144,7 +144,7 @@ function resolveUserLabel(member: CampaignMember): string {
     if (emailPrefix) return emailPrefix;
   }
 
-  return String(member.user_id || "").trim() || "Unknown user";
+  return "Unknown user";
 }
 
 function getGreeting(): string {
