@@ -5151,6 +5151,10 @@ class GraphService:
         avatar_url: Optional[str] = None,
         fetch_from_clerk_if_missing: bool = False,
     ) -> Dict[str, Optional[str]]:
+        def _is_meaningful_identity_value(value: Optional[str]) -> bool:
+            normalized = str(value or "").strip().lower()
+            return normalized not in {"", "unknown user", "unknown", "unknown_user", "none", "null"}
+
         normalized_user_id = str(user_id or "").strip()
         if not normalized_user_id:
             return {"user_id": None, "display_name": None, "email": None, "avatar_url": None}
@@ -5179,10 +5183,10 @@ class GraphService:
             user_id=normalized_user_id,
             email_fallback=normalized_email,
         )
-        has_resolved_identity = bool(
-            str(profile.get("display_name") or "").strip()
-            or str(profile.get("username") or "").strip()
-            or str(profile.get("email") or "").strip()
+        has_resolved_identity = (
+            _is_meaningful_identity_value(profile.get("display_name"))
+            or _is_meaningful_identity_value(profile.get("username"))
+            or _is_meaningful_identity_value(profile.get("email"))
         )
 
         if (not has_resolved_identity) and fetch_from_clerk_if_missing:

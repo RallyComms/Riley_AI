@@ -542,6 +542,36 @@ async def _rows(graph: GraphService, query: str, **params: Any) -> List[Dict[str
     return items
 
 
+async def _batch_resolve_user_identities(
+    graph: GraphService,
+    user_ids: List[Optional[str]],
+) -> Dict[str, Dict[str, Optional[str]]]:
+    resolved: Dict[str, Dict[str, Optional[str]]] = {}
+    unique_ids = sorted(
+        {
+            str(value or "").strip()
+            for value in user_ids
+            if str(value or "").strip()
+            and str(value or "").strip().lower() not in {"unknown_user", "unknown", "none", "null"}
+            and not str(value or "").strip().lower().startswith("system:")
+        }
+    )
+    for user_id in unique_ids:
+        try:
+            identity = await graph.ensure_user_identity(
+                user_id=user_id,
+                fetch_from_clerk_if_missing=True,
+            )
+        except Exception:
+            identity = {}
+        resolved[user_id] = {
+            "display_name": str(identity.get("display_name") or "").strip() or "Unknown user",
+            "email": str(identity.get("email") or "").strip() or None,
+            "avatar_url": str(identity.get("avatar_url") or "").strip() or None,
+        }
+    return resolved
+
+
 @router.get("/mission-control/overview")
 async def mission_control_overview(
     timeframe: str = Query("30d", pattern="^(24h|7d|30d)$"),
@@ -774,6 +804,10 @@ async def mission_control_overview(
         str(row.get("day") or ""): round(float(row.get("cost") or 0.0), 4)
         for row in llm_trend_cost_rows
     }
+    overview_user_identity = await _batch_resolve_user_identities(
+        graph,
+        [row.get("user_id") for row in user_usage_rows],
+    )
     return {
         "active_users_7d": int(active_users.get("value") or 0),
         "active_campaigns_7d": int(active_campaigns.get("value") or 0),
@@ -825,10 +859,33 @@ async def mission_control_overview(
         "user_usage_7d": [
             {
                 "user_id": row.get("user_id"),
+                "display_name": (
+                    overview_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("display_name")
+                    or _safe_user_label(
+                        display_name=row.get("user_display_name"),
+                        username=row.get("username"),
+                        email=row.get("email"),
+                        user_id=row.get("user_id"),
+                    )
+                ),
+                "email": (
+                    overview_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("email")
+                    or (str(row.get("email") or "").strip() or None)
+                ),
+                "avatar_url": (
+                    overview_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("avatar_url")
+                    or None
+                ),
                 "user_label": _safe_user_label(
-                    display_name=row.get("user_display_name"),
+                    display_name=(
+                        overview_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("display_name")
+                        or row.get("user_display_name")
+                    ),
                     username=row.get("username"),
-                    email=row.get("email"),
+                    email=(
+                        overview_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("email")
+                        or row.get("email")
+                    ),
                     user_id=row.get("user_id"),
                 ),
                 "user_secondary": _safe_user_secondary(
@@ -1622,6 +1679,10 @@ async def mission_control_cost_summary(
     last_30d_feature_rollup = _rollup_llm_feature_cost(rows=llm_last_30d_rows, settings=settings)
     current_month_llm_cost_by_feature = list(current_month_feature_rollup.get("rows") or [])
     last_30d_llm_cost_by_feature = list(last_30d_feature_rollup.get("rows") or [])
+    cost_user_identity = await _batch_resolve_user_identities(
+        graph,
+        [row.get("user_id") for row in llm_cost_by_user_rows],
+    )
     projected_curve = []
     for day in range(1, days_in_month + 1):
         projected_value = float(llm_projection.get("projected_daily") or 0.0) * float(day)
@@ -1732,10 +1793,33 @@ async def mission_control_cost_summary(
         "cost_by_user_30d": [
             {
                 "user_id": row.get("user_id"),
+                "display_name": (
+                    cost_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("display_name")
+                    or _safe_user_label(
+                        display_name=row.get("user_display_name"),
+                        username=row.get("username"),
+                        email=row.get("email"),
+                        user_id=row.get("user_id"),
+                    )
+                ),
+                "email": (
+                    cost_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("email")
+                    or (str(row.get("email") or "").strip() or None)
+                ),
+                "avatar_url": (
+                    cost_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("avatar_url")
+                    or None
+                ),
                 "user_label": _safe_user_label(
-                    display_name=row.get("user_display_name"),
+                    display_name=(
+                        cost_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("display_name")
+                        or row.get("user_display_name")
+                    ),
                     username=row.get("username"),
-                    email=row.get("email"),
+                    email=(
+                        cost_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("email")
+                        or row.get("email")
+                    ),
                     user_id=row.get("user_id"),
                 ),
                 "user_secondary": _safe_user_secondary(
@@ -1951,6 +2035,10 @@ async def mission_control_adoption_summary(
         """,
         window_start_iso=window_start_iso,
     )
+    adoption_user_identity = await _batch_resolve_user_identities(
+        graph,
+        [row.get("user_id") for row in user_rows],
+    )
     return {
         "timeframe": window["timeframe"],
         "timeframe_label": window["label"],
@@ -1962,10 +2050,33 @@ async def mission_control_adoption_summary(
         "user_activity_30d": [
             {
                 "user_id": row.get("user_id"),
+                "display_name": (
+                    adoption_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("display_name")
+                    or _safe_user_label(
+                        display_name=row.get("user_display_name"),
+                        username=row.get("username"),
+                        email=row.get("email"),
+                        user_id=row.get("user_id"),
+                    )
+                ),
+                "email": (
+                    adoption_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("email")
+                    or (str(row.get("email") or "").strip() or None)
+                ),
+                "avatar_url": (
+                    adoption_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("avatar_url")
+                    or None
+                ),
                 "user_label": _safe_user_label(
-                    display_name=row.get("user_display_name"),
+                    display_name=(
+                        adoption_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("display_name")
+                        or row.get("user_display_name")
+                    ),
                     username=row.get("username"),
-                    email=row.get("email"),
+                    email=(
+                        adoption_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("email")
+                        or row.get("email")
+                    ),
                     user_id=row.get("user_id"),
                 ),
                 "user_secondary": _safe_user_secondary(
@@ -2105,6 +2216,14 @@ async def mission_control_workflow_health_summary(
         LIMIT 50
         """,
     )
+    workflow_user_identity = await _batch_resolve_user_identities(
+        graph,
+        [
+            *[row.get("user_id") for row in pending_access_rows],
+            *[row.get("assigned_user_id") for row in overdue_deadline_rows],
+            *[row.get("assigned_user_id") for row in stale_assignment_rows],
+        ],
+    )
     return {
         "timeframe": window["timeframe"],
         "timeframe_label": window["label"],
@@ -2121,10 +2240,33 @@ async def mission_control_workflow_health_summary(
                 "campaign_name": _safe_campaign_name(row.get("campaign_name"), row.get("campaign_id")),
                 "campaign_secondary": _safe_campaign_secondary(row.get("campaign_id")),
                 "user_id": row.get("user_id"),
+                "display_name": (
+                    workflow_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("display_name")
+                    or _safe_user_label(
+                        display_name=row.get("user_display_name"),
+                        username=row.get("username"),
+                        email=row.get("email"),
+                        user_id=row.get("user_id"),
+                    )
+                ),
+                "email": (
+                    workflow_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("email")
+                    or (str(row.get("email") or "").strip() or None)
+                ),
+                "avatar_url": (
+                    workflow_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("avatar_url")
+                    or None
+                ),
                 "user_label": _safe_user_label(
-                    display_name=row.get("user_display_name"),
+                    display_name=(
+                        workflow_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("display_name")
+                        or row.get("user_display_name")
+                    ),
                     username=row.get("username"),
-                    email=row.get("email"),
+                    email=(
+                        workflow_user_identity.get(str(row.get("user_id") or "").strip(), {}).get("email")
+                        or row.get("email")
+                    ),
                     user_id=row.get("user_id"),
                 ),
                 "user_secondary": _safe_user_secondary(
@@ -2149,10 +2291,33 @@ async def mission_control_workflow_health_summary(
                 "title": row.get("title") or "Untitled deadline",
                 "due_at": row.get("due_at"),
                 "assigned_user_id": row.get("assigned_user_id"),
+                "assigned_user_display_name": (
+                    workflow_user_identity.get(str(row.get("assigned_user_id") or "").strip(), {}).get("display_name")
+                    or _safe_user_label(
+                        display_name=row.get("assignee_display_name"),
+                        username=row.get("assignee_username"),
+                        email=row.get("assignee_email"),
+                        user_id=row.get("assigned_user_id"),
+                    )
+                ),
+                "assigned_user_email": (
+                    workflow_user_identity.get(str(row.get("assigned_user_id") or "").strip(), {}).get("email")
+                    or (str(row.get("assignee_email") or "").strip() or None)
+                ),
+                "assigned_user_avatar_url": (
+                    workflow_user_identity.get(str(row.get("assigned_user_id") or "").strip(), {}).get("avatar_url")
+                    or None
+                ),
                 "assigned_user_label": _safe_user_label(
-                    display_name=row.get("assignee_display_name"),
+                    display_name=(
+                        workflow_user_identity.get(str(row.get("assigned_user_id") or "").strip(), {}).get("display_name")
+                        or row.get("assignee_display_name")
+                    ),
                     username=row.get("assignee_username"),
-                    email=row.get("assignee_email"),
+                    email=(
+                        workflow_user_identity.get(str(row.get("assigned_user_id") or "").strip(), {}).get("email")
+                        or row.get("assignee_email")
+                    ),
                     user_id=row.get("assigned_user_id"),
                 ),
                 "assigned_user_secondary": _safe_user_secondary(
@@ -2176,10 +2341,33 @@ async def mission_control_workflow_health_summary(
                 "title": row.get("title") or "Untitled deadline",
                 "due_at": row.get("due_at"),
                 "assigned_user_id": row.get("assigned_user_id"),
+                "assigned_user_display_name": (
+                    workflow_user_identity.get(str(row.get("assigned_user_id") or "").strip(), {}).get("display_name")
+                    or _safe_user_label(
+                        display_name=row.get("assignee_display_name"),
+                        username=row.get("assignee_username"),
+                        email=row.get("assignee_email"),
+                        user_id=row.get("assigned_user_id"),
+                    )
+                ),
+                "assigned_user_email": (
+                    workflow_user_identity.get(str(row.get("assigned_user_id") or "").strip(), {}).get("email")
+                    or (str(row.get("assignee_email") or "").strip() or None)
+                ),
+                "assigned_user_avatar_url": (
+                    workflow_user_identity.get(str(row.get("assigned_user_id") or "").strip(), {}).get("avatar_url")
+                    or None
+                ),
                 "assigned_user_label": _safe_user_label(
-                    display_name=row.get("assignee_display_name"),
+                    display_name=(
+                        workflow_user_identity.get(str(row.get("assigned_user_id") or "").strip(), {}).get("display_name")
+                        or row.get("assignee_display_name")
+                    ),
                     username=row.get("assignee_username"),
-                    email=row.get("assignee_email"),
+                    email=(
+                        workflow_user_identity.get(str(row.get("assigned_user_id") or "").strip(), {}).get("email")
+                        or row.get("assignee_email")
+                    ),
                     user_id=row.get("assigned_user_id"),
                 ),
                 "assigned_user_secondary": _safe_user_secondary(
