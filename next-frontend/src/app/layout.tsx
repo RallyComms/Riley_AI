@@ -3,6 +3,7 @@ import "@app/styles/globals.css";
 import { cn } from "@app/lib/utils";
 import { Providers } from "./providers";
 import { GridBackground } from "@app/components/layout/GridBackground";
+import { GlobalNotificationBell } from "@app/components/layout/GlobalNotificationBell";
 import { ClerkProvider } from "@clerk/nextjs";
 import { dark } from "@clerk/themes";
 
@@ -34,6 +35,7 @@ export default function RootLayout({
           }}
         >
           <Providers>
+            <GlobalNotificationBell />
             {children}
           </Providers>
         </ClerkProvider>

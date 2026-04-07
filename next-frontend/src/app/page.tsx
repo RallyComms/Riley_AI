@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useAuth, useUser, UserButton } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
-import { Archive, BookOpen, CheckCircle2, ChevronDown, Globe, Plus } from "lucide-react";
+import { Archive, BookOpen, ChevronDown, Globe, Plus } from "lucide-react";
 import { CreateCampaignModal } from "@app/components/dashboard/CreateCampaignModal";
 import { CampaignDirectory } from "@app/components/dashboard/CampaignDirectory";
 import { apiFetch } from "@app/lib/api";
@@ -49,22 +49,6 @@ interface CampaignBucket {
   userRole: "Lead" | "Member";
   themeColor: string;
   campaignId: string;
-}
-
-interface NotificationItem {
-  id: string;
-  user_id: string;
-  type: string;
-  entity_id?: string | null;
-  campaign_id?: string | null;
-  message: string;
-  status: "unread" | "read" | "completed";
-  created_at?: string | null;
-  acted_at?: string | null;
-}
-
-interface NotificationsResponse {
-  notifications: NotificationItem[];
 }
 
 interface UserCampaign {
@@ -169,34 +153,6 @@ function getGreeting(): string {
   return "Good evening";
 }
 
-function notificationTimeLabel(iso?: string | null): string {
-  if (!iso) return "Just now";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Just now";
-  return date.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function notificationPrimaryText(notification: NotificationItem): string {
-  return notification.message || "Campaign update";
-}
-
-function notificationOpenPath(notification: NotificationItem): string {
-  const campaignId = notification.campaign_id;
-  if (!campaignId) return "/campaign";
-  if (notification.type === "campaign_message_mentioned_user") {
-    return `/campaign/${encodeURIComponent(campaignId)}/conversations`;
-  }
-  if (notification.type === "document_mentioned_user") {
-    return `/campaign/${encodeURIComponent(campaignId)}/assets`;
-  }
-  return `/campaign/${encodeURIComponent(campaignId)}`;
-}
-
 export default function HomePage() {
   const router = useRouter();
   const { user } = useUser();
@@ -215,11 +171,6 @@ export default function HomePage() {
   const [campaignsVersion, setCampaignsVersion] = useState(0);
 
   const [canAccessMissionControl, setCanAccessMissionControl] = useState(false);
-  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
-  const [isNotificationsLoading, setIsNotificationsLoading] = useState(false);
-  const [notificationsError, setNotificationsError] = useState<string | null>(null);
-  const [dismissLoadingId, setDismissLoadingId] = useState<string | null>(null);
-  const [decisionLoadingId, setDecisionLoadingId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -302,33 +253,6 @@ export default function HomePage() {
     void refreshCampaigns();
   }, [isLoaded, user?.id, getToken]);
 
-  const refreshNotifications = async () => {
-    if (!isLoaded || !user?.id) {
-      setNotifications([]);
-      setNotificationsError(null);
-      return;
-    }
-    try {
-      setIsNotificationsLoading(true);
-      setNotificationsError(null);
-      const token = await getToken();
-      if (!token) throw new Error("No authentication token available");
-      const data = await apiFetch<NotificationsResponse>("/api/v1/notifications?limit=30", {
-        token,
-        method: "GET",
-      });
-      setNotifications(data.notifications || []);
-    } catch (err) {
-      setNotifications([]);
-      setNotificationsError(err instanceof Error ? err.message : "Unable to load notifications.");
-    } finally {
-      setIsNotificationsLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    void refreshNotifications();
-  }, [isLoaded, user?.id, getToken]);
 
   const visibleCampaigns = useMemo(() => {
     return directoryCampaigns.filter(
@@ -416,97 +340,6 @@ export default function HomePage() {
     } finally {
       setTerminatingCampaignId(null);
     }
-  };
-
-  const handleNotificationMarkRead = async (notificationId: string) => {
-    try {
-      const token = await getToken();
-      if (!token) throw new Error("No authentication token available");
-      await apiFetch(`/api/v1/notifications/${encodeURIComponent(notificationId)}/mark-read`, {
-        token,
-        method: "POST",
-      });
-      setNotifications((prev) =>
-        prev.map((item) =>
-          item.id === notificationId
-            ? { ...item, status: "read", acted_at: new Date().toISOString() }
-            : item,
-        ),
-      );
-    } catch (err) {
-      alert(`Failed to mark as read: ${err instanceof Error ? err.message : "Unknown error"}`);
-    }
-  };
-
-  const handleNotificationDismiss = async (notificationId: string) => {
-    try {
-      setDismissLoadingId(notificationId);
-      const token = await getToken();
-      if (!token) throw new Error("No authentication token available");
-      await apiFetch(`/api/v1/notifications/${encodeURIComponent(notificationId)}/complete`, {
-        token,
-        method: "POST",
-      });
-      setNotifications((prev) => prev.filter((item) => item.id !== notificationId));
-    } catch (err) {
-      alert(`Failed to dismiss notification: ${err instanceof Error ? err.message : "Unknown error"}`);
-    } finally {
-      setDismissLoadingId(null);
-    }
-  };
-
-  const handleAccessDecision = async (
-    notification: NotificationItem,
-    action: "approve" | "deny",
-  ) => {
-    const requestId = String(notification.entity_id || "").trim();
-    const campaignId = String(notification.campaign_id || "").trim();
-    if (!requestId || !campaignId) return;
-    try {
-      setDecisionLoadingId(notification.id);
-      const token = await getToken();
-      if (!token) throw new Error("No authentication token available");
-      await apiFetch(
-        `/api/v1/campaigns/${encodeURIComponent(campaignId)}/access-requests/${encodeURIComponent(requestId)}/decision`,
-        {
-          token,
-          method: "POST",
-          body: { action },
-        },
-      );
-      await apiFetch(`/api/v1/notifications/${encodeURIComponent(notification.id)}/complete`, {
-        token,
-        method: "POST",
-      });
-      setNotifications((prev) => prev.filter((item) => item.id !== notification.id));
-      void refreshNotifications();
-    } catch (err) {
-      alert(`Failed to ${action} request: ${err instanceof Error ? err.message : "Unknown error"}`);
-    } finally {
-      setDecisionLoadingId(null);
-    }
-  };
-
-  const handleNotificationOpen = async (notification: NotificationItem) => {
-    try {
-      const token = await getToken();
-      if (token && notification.status === "unread") {
-        await apiFetch(`/api/v1/notifications/${encodeURIComponent(notification.id)}/mark-read`, {
-          token,
-          method: "POST",
-        });
-      }
-    } catch {
-      // Navigation is the primary action; don't block on mark-read failure.
-    }
-    setNotifications((prev) =>
-      prev.map((item) =>
-        item.id === notification.id
-          ? { ...item, status: item.status === "unread" ? "read" : item.status }
-          : item,
-      ),
-    );
-    router.push(notificationOpenPath(notification));
   };
 
   return (
@@ -648,119 +481,6 @@ export default function HomePage() {
           </div>
         )}
 
-        <section className="mt-12">
-          <div className="mb-4 flex items-center justify-between">
-            <h3 className="font-serif text-xl font-medium text-[#1f2a44]">Notifications</h3>
-            <button
-              type="button"
-              onClick={() => void refreshNotifications()}
-              className="rounded-md border border-[#ddd5c5] px-3 py-1.5 text-xs font-medium text-[#4d5871] hover:bg-[#f1ece2]"
-            >
-              Refresh
-            </button>
-          </div>
-          <div className="overflow-hidden rounded-lg border border-[#e6dece] bg-[#fbf8f2]">
-            {isNotificationsLoading ? (
-              <div className="px-5 py-6 text-sm text-[#5b6578]">Loading notifications...</div>
-            ) : notificationsError ? (
-              <div className="px-5 py-6 text-sm text-[#9e3434]">{notificationsError}</div>
-            ) : notifications.length === 0 ? (
-              <div className="px-5 py-8 text-sm text-[#5b6578]">No notifications right now.</div>
-            ) : (
-              <ul className="divide-y divide-[#ece4d4]">
-                {notifications.map((notification) => {
-                  const statusValue = String(notification.status || "unread");
-                  const isRead = statusValue === "read" || statusValue === "completed";
-                  const statusLabel = statusValue === "completed" ? "Completed" : isRead ? "Read" : "Unread";
-                  const canResolveAccess =
-                    notification.type === "access_request_created" &&
-                    Boolean(notification.entity_id) &&
-                    Boolean(notification.campaign_id);
-                  const isMention =
-                    notification.type === "document_mentioned_user" ||
-                    notification.type === "campaign_message_mentioned_user";
-                  return (
-                    <li key={notification.id} className="px-5 py-4">
-                      <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                        <div className="min-w-0 flex-1">
-                          <div className="mb-1 flex items-center gap-2 text-xs">
-                            <span
-                              className={`inline-flex items-center rounded-full px-2 py-0.5 font-semibold ${
-                                isRead
-                                  ? "bg-[#e4efe9] text-[#2e5e4b]"
-                                  : "bg-[#e6d8ad] text-[#4b4223]"
-                              }`}
-                            >
-                              {statusLabel}
-                            </span>
-                            <span className="text-[#7b8394]">
-                              {notification.campaign_id || "Campaign"}
-                            </span>
-                            <span className="text-[#98a1b2]">
-                              {notificationTimeLabel(notification.created_at)}
-                            </span>
-                          </div>
-                          <p className="text-sm font-medium text-[#1f2a44]">
-                            {notificationPrimaryText(notification)}
-                          </p>
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          {canResolveAccess ? (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => void handleAccessDecision(notification, "approve")}
-                                disabled={decisionLoadingId === notification.id}
-                                className="rounded-md border border-[#8db9a6] px-2.5 py-1.5 text-xs font-medium text-[#2e5e4b] hover:bg-[#e4efe9] disabled:opacity-60"
-                              >
-                                Approve
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => void handleAccessDecision(notification, "deny")}
-                                disabled={decisionLoadingId === notification.id}
-                                className="rounded-md border border-[#d8b4b4] px-2.5 py-1.5 text-xs font-medium text-[#7f3b3b] hover:bg-[#f7e9e9] disabled:opacity-60"
-                              >
-                                Deny
-                              </button>
-                            </>
-                          ) : null}
-                          {isMention ? (
-                            <button
-                              type="button"
-                              onClick={() => void handleNotificationOpen(notification)}
-                              className="rounded-md border border-[#cfd9ee] px-2.5 py-1.5 text-xs font-medium text-[#385a8f] hover:bg-[#edf2fb]"
-                            >
-                              Open
-                            </button>
-                          ) : null}
-                          {!isRead ? (
-                            <button
-                              type="button"
-                              onClick={() => void handleNotificationMarkRead(notification.id)}
-                              className="inline-flex items-center gap-1 rounded-md border border-[#ddd5c5] px-2.5 py-1.5 text-xs font-medium text-[#4d5871] hover:bg-[#f1ece2]"
-                            >
-                              <CheckCircle2 className="h-3.5 w-3.5" />
-                              Mark as read
-                            </button>
-                          ) : null}
-                          <button
-                            type="button"
-                            onClick={() => void handleNotificationDismiss(notification.id)}
-                            disabled={dismissLoadingId === notification.id}
-                            className="rounded-md border border-[#ddd5c5] px-2.5 py-1.5 text-xs font-medium text-[#4d5871] hover:bg-[#f1ece2] disabled:opacity-60"
-                          >
-                            Dismiss
-                          </button>
-                        </div>
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-          </div>
-        </section>
       </main>
 
       <CreateCampaignModal
