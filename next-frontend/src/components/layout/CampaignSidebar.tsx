@@ -125,6 +125,17 @@ export function CampaignSidebar({ isCollapsed, onToggle }: CampaignSidebarProps)
             {(campaignName || "C").slice(0, 1).toUpperCase()}
           </div>
         )}
+        {isCollapsed ? (
+          <button
+            type="button"
+            onClick={onToggle}
+            className="mt-3 inline-flex w-full items-center justify-center rounded-md border border-[#c3d7cf] bg-[#dcebe5] p-2 text-[#1f2a44] hover:bg-[#d7e8e0]"
+            aria-label="Expand sidebar"
+            title="Expand sidebar"
+          >
+            <ChevronRight className="h-4 w-4" />
+          </button>
+        ) : null}
       </div>
 
       {/* Navigation */}
