@@ -13,6 +13,10 @@ router = APIRouter()
 class NotificationItem(BaseModel):
     id: str
     user_id: str
+    actor_user_id: Optional[str] = None
+    target_user_id: Optional[str] = None
+    actor_display_name: Optional[str] = None
+    target_display_name: Optional[str] = None
     type: str
     entity_id: Optional[str] = None
     campaign_id: Optional[str] = None

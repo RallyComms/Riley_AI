@@ -294,12 +294,7 @@ def _resolve_display_name_from_member(member: Dict[str, Any]) -> str:
     display_name = str(member.get("display_name") or "").strip()
     if display_name:
         return display_name
-    email = str(member.get("email") or "").strip()
-    if email and "@" in email:
-        return email.split("@")[0]
-    if email:
-        return email
-    return str(member.get("user_id") or member.get("id") or "Unknown User").strip()
+    return "Unknown user"
 
 
 async def _get_campaign_member_display_map(
@@ -735,9 +730,11 @@ async def list_file_comments(
             author_display_name = (
                 display_map.get(author_id)
                 or str(item.get("author_display_name") or "").strip()
-                or author_id
+                or "Unknown user"
             )
-            mention_display_names = [display_map.get(mention_id, mention_id) for mention_id in mention_ids]
+            mention_display_names = [
+                display_map.get(mention_id, "Unknown user") for mention_id in mention_ids
+            ]
             items.append(
                 FileCommentItem(
                     id=str(item.get("id")),
@@ -785,7 +782,7 @@ async def create_file_comment(
         new_comment = {
             "id": str(datetime.now().timestamp()).replace(".", ""),
             "author_user_id": author_user_id,
-            "author_display_name": display_map.get(author_user_id, author_user_id),
+            "author_display_name": display_map.get(author_user_id, "Unknown user"),
             "content": content,
             "mentions": mention_ids,
             "created_at": datetime.now().isoformat(),
@@ -798,9 +795,9 @@ async def create_file_comment(
         )
 
         filename = str(payload.get("filename") or file_id)
-        actor_display = display_map.get(author_user_id, author_user_id)
+        actor_display = display_map.get(author_user_id, "Unknown user")
         for mentioned_user_id in mention_ids:
-            mentioned_display = display_map.get(mentioned_user_id, mentioned_user_id)
+            mentioned_display = display_map.get(mentioned_user_id, "Unknown user")
             await graph.create_campaign_event(
                 campaign_id=tenant_id,
                 event_type="document_mentioned_user",
@@ -819,10 +816,14 @@ async def create_file_comment(
                 FileCommentItem(
                     id=str(item.get("id")),
                     author_user_id=author_id,
-                    author_display_name=display_map.get(author_id, str(item.get("author_display_name") or author_id)),
+                    author_display_name=display_map.get(
+                        author_id, str(item.get("author_display_name") or "").strip() or "Unknown user"
+                    ),
                     content=str(item.get("content") or ""),
                     mentions=item_mentions,
-                    mention_display_names=[display_map.get(mention_id, mention_id) for mention_id in item_mentions],
+                    mention_display_names=[
+                        display_map.get(mention_id, "Unknown user") for mention_id in item_mentions
+                    ],
                     created_at=str(item.get("created_at") or datetime.now().isoformat()),
                 )
             )

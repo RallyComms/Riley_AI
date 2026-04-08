@@ -19,31 +19,6 @@ def canonical_campaign_id(
         return "global"
     return "unknown_campaign"
 
-
-def resolve_riley_display_identity(
-    *,
-    display_name: Optional[str] = None,
-    username: Optional[str] = None,
-    email: Optional[str] = None,
-    user_id: Optional[str] = None,
-) -> str:
-    """Riley-first identity resolver: display_name -> username -> email prefix -> email -> user_id."""
-    normalized_display_name = str(display_name or "").strip()
-    if normalized_display_name:
-        return normalized_display_name
-    normalized_username = str(username or "").strip()
-    if normalized_username:
-        return normalized_username
-    normalized_email = str(email or "").strip()
-    if normalized_email:
-        email_prefix = normalized_email.split("@")[0].strip()
-        if email_prefix:
-            return email_prefix
-        return normalized_email
-    normalized_user_id = str(user_id or "").strip()
-    return normalized_user_id or "Unknown User"
-
-
 def classify_chat_type(*, source_entity: str, is_private_thread: Optional[bool] = None) -> Optional[str]:
     """Normalize dual chat systems into canonical chat classes."""
     entity = (source_entity or "").strip()

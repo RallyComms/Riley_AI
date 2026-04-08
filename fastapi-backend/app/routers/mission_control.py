@@ -110,35 +110,11 @@ def _safe_user_label(
     email: Optional[str],
     user_id: Optional[str],
 ) -> str:
-    display = str(display_name or "").strip()
-    if display:
-        return display
-    uname = str(username or "").strip()
-    if uname:
-        return uname
-    em = str(email or "").strip()
-    if em:
-        prefix = em.split("@")[0].strip()
-        if prefix:
-            return prefix
-        return em
-    uid = str(user_id or "").strip()
-    if "@" in uid:
-        uid_prefix = uid.split("@")[0].strip()
-        if uid_prefix:
-            return uid_prefix
     return "Unknown user"
 
 
 def _safe_user_secondary(user_id: Optional[str], primary_label: str) -> str:
-    uid = str(user_id or "").strip()
-    if (
-        not uid
-        or uid == primary_label
-        or primary_label.lower() == "unknown user"
-    ):
-        return ""
-    return uid
+    return ""
 
 
 def _failure_type_label(event_type: str) -> str:
@@ -546,7 +522,6 @@ async def _batch_resolve_user_identities(
     graph: GraphService,
     user_ids: List[Optional[str]],
 ) -> Dict[str, Dict[str, Optional[str]]]:
-    resolved: Dict[str, Dict[str, Optional[str]]] = {}
     unique_ids = sorted(
         {
             str(value or "").strip()
@@ -556,20 +531,16 @@ async def _batch_resolve_user_identities(
             and not str(value or "").strip().lower().startswith("system:")
         }
     )
+    resolved = await graph.resolve_user_identities_batch(unique_ids)
+    normalized: Dict[str, Dict[str, Optional[str]]] = {}
     for user_id in unique_ids:
-        try:
-            identity = await graph.ensure_user_identity(
-                user_id=user_id,
-                fetch_from_clerk_if_missing=True,
-            )
-        except Exception:
-            identity = {}
-        resolved[user_id] = {
+        identity = resolved.get(user_id) or {}
+        normalized[user_id] = {
             "display_name": str(identity.get("display_name") or "").strip() or "Unknown user",
             "email": str(identity.get("email") or "").strip() or None,
             "avatar_url": str(identity.get("avatar_url") or "").strip() or None,
         }
-    return resolved
+    return normalized
 
 
 @router.get("/mission-control/overview")
@@ -763,7 +734,6 @@ async def mission_control_overview(
              END as email_prefix
         RETURN
           user_id,
-          coalesce(u["display_name"], "") as user_display_name,
           coalesce(u["username"], "") as username,
           coalesce(u["email"], "") as email,
           coalesce(email_prefix, "") as email_prefix,
@@ -1211,7 +1181,6 @@ async def mission_control_cost_summary(
              END as email_prefix
         RETURN
           user_id,
-          coalesce(u["display_name"], "") as user_display_name,
           coalesce(u["username"], "") as username,
           coalesce(u["email"], "") as email,
           coalesce(email_prefix, "") as email_prefix,
@@ -1388,7 +1357,6 @@ async def mission_control_cost_summary(
              END as email_prefix
         RETURN
           user_id,
-          coalesce(u["display_name"], "") as user_display_name,
           coalesce(u["username"], "") as username,
           coalesce(u["email"], "") as email,
           coalesce(email_prefix, "") as email_prefix,
@@ -2025,7 +1993,6 @@ async def mission_control_adoption_summary(
              END as email_prefix
         RETURN
           user_id,
-          coalesce(u["display_name"], "") as user_display_name,
           coalesce(u["username"], "") as username,
           coalesce(u["email"], "") as email,
           coalesce(email_prefix, "") as email_prefix,
@@ -2146,7 +2113,6 @@ async def mission_control_workflow_health_summary(
           ar.status as status,
           coalesce(c.name, c.title, "") as campaign_name,
           ar.user_id as user_id,
-          coalesce(u["display_name"], "") as user_display_name,
           coalesce(u["username"], "") as username,
           coalesce(u["email"], "") as email,
           coalesce(email_prefix, "") as email_prefix,
@@ -2177,7 +2143,6 @@ async def mission_control_workflow_health_summary(
           d.title as title,
           toString(d.due_at) as due_at,
           d.assigned_user_id as assigned_user_id,
-          coalesce(u["display_name"], "") as assignee_display_name,
           coalesce(u["username"], "") as assignee_username,
           coalesce(u["email"], "") as assignee_email,
           coalesce(assignee_email_prefix, "") as assignee_email_prefix
@@ -2208,7 +2173,6 @@ async def mission_control_workflow_health_summary(
           d.title as title,
           toString(d.due_at) as due_at,
           d.assigned_user_id as assigned_user_id,
-          coalesce(u["display_name"], "") as assignee_display_name,
           coalesce(u["username"], "") as assignee_username,
           coalesce(u["email"], "") as assignee_email,
           coalesce(assignee_email_prefix, "") as assignee_email_prefix

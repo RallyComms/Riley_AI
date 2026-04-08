@@ -264,35 +264,26 @@ async def verify_clerk_token(
 
         # Best-effort identity source-of-truth sync for all authenticated traffic.
         # This keeps User nodes hydrated and avoids UI fallback to raw IDs.
+        resolved_identity: Dict[str, Optional[str]] = {}
         if graph is not None and user_id:
             raw_username = str(decoded.get("username", "") or "").strip() or None
             given_name = str(decoded.get("given_name", "") or "").strip() or None
             family_name = str(decoded.get("family_name", "") or "").strip() or None
-            fallback_display_name = (
-                str(decoded.get("name", "") or "").strip()
-                or raw_username
-                or (user_email.split("@")[0].strip() if user_email else "")
-                or "Unknown user"
-            )
+            claim_display_name = str(decoded.get("name", "") or "").strip() or None
             try:
-                await graph.ensure_user_identity(
+                resolved_identity = await graph.ensure_user_identity(
                     user_id=user_id,
                     email=user_email or None,
                     username=raw_username,
                     first_name=given_name,
                     last_name=family_name,
-                    display_name=fallback_display_name,
+                    display_name=claim_display_name,
                     fetch_from_clerk_if_missing=True,
                 )
             except Exception:
                 # Never block auth on identity sync failures.
                 pass
-        resolved_display_name = (
-            str(decoded.get("name", "") or "").strip()
-            or str(decoded.get("username", "") or "").strip()
-            or (user_email.split("@")[0].strip() if user_email else "")
-            or "Unknown user"
-        )
+        resolved_display_name = str(resolved_identity.get("display_name") or "").strip() or "Unknown user"
         return {
             "id": user_id,
             "email": user_email,

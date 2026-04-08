@@ -13,7 +13,6 @@ from app.services.analytics_contract import (
     infer_provider_from_model,
     normalize_event_type,
     now_iso_utc,
-    resolve_riley_display_identity,
     safe_metadata_json,
 )
 
@@ -47,43 +46,6 @@ class GraphService:
             author_id,
         )
         raise ValueError("Team chat message requires a valid author_id")
-
-    def _coerce_team_chat_read_identity(
-        self,
-        *,
-        author_id: Optional[str],
-        author_display_name: Optional[str],
-        author_fallback_level: Optional[int],
-        campaign_id: str,
-        message_id: Optional[str],
-        thread_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Enforce Team Chat read contract + observability for degraded identity."""
-        normalized_author_id = str(author_id or "").strip()
-        if not normalized_author_id:
-            logger.error(
-                "team_chat_message_missing_author_id_read campaign_id=%s thread_id=%s message_id=%s",
-                campaign_id,
-                thread_id or "",
-                message_id,
-            )
-            raise ValueError("Team chat message missing author_id at read time")
-
-        fallback_level_value = int(author_fallback_level or 4)
-        normalized_display = str(author_display_name or "").strip() or "Unknown user"
-        if fallback_level_value > 1:
-            logger.warning(
-                "team_chat_identity_degraded user_id=%s fallback_level=%s message_id=%s",
-                normalized_author_id,
-                fallback_level_value,
-                message_id,
-            )
-
-        return {
-            "author_id": normalized_author_id,
-            "author_display_name": normalized_display,
-            "author_fallback_level": fallback_level_value,
-        }
 
     @property
     def driver(self) -> Any:
@@ -215,18 +177,22 @@ class GraphService:
             is_global=is_global,
         )
         metadata_obj = dict(metadata or {})
-        resolved_user_display = resolve_riley_display_identity(
-            display_name=metadata_obj.get("user_display_name"),
-            username=metadata_obj.get("user_username"),
-            email=metadata_obj.get("user_email"),
-            user_id=user_id,
-        )
-        resolved_actor_display = resolve_riley_display_identity(
-            display_name=metadata_obj.get("actor_display_name"),
-            username=metadata_obj.get("actor_username"),
-            email=metadata_obj.get("actor_email"),
-            user_id=actor_user_id,
-        )
+        resolved_user_display = str(metadata_obj.get("user_display_name") or "").strip()
+        if not resolved_user_display:
+            resolved_user_display = str(metadata_obj.get("user_username") or "").strip()
+        if not resolved_user_display:
+            user_email = str(metadata_obj.get("user_email") or "").strip()
+            resolved_user_display = user_email.split("@")[0].strip() if "@" in user_email else user_email
+        if not resolved_user_display:
+            resolved_user_display = "Unknown user"
+        resolved_actor_display = str(metadata_obj.get("actor_display_name") or "").strip()
+        if not resolved_actor_display:
+            resolved_actor_display = str(metadata_obj.get("actor_username") or "").strip()
+        if not resolved_actor_display:
+            actor_email = str(metadata_obj.get("actor_email") or "").strip()
+            resolved_actor_display = actor_email.split("@")[0].strip() if "@" in actor_email else actor_email
+        if not resolved_actor_display:
+            resolved_actor_display = "Unknown user"
         metadata_obj.setdefault("user_display_name_normalized", resolved_user_display)
         metadata_obj.setdefault("actor_display_name_normalized", resolved_actor_display)
         chat_type = classify_chat_type(
@@ -2201,11 +2167,7 @@ class GraphService:
             )
             OPTIONAL MATCH (owner:User)-[owner_rel:MEMBER_OF]->(c)
             WHERE owner_rel.role = "Lead"
-            WITH c, owner,
-                 CASE
-                    WHEN owner.email IS NULL OR trim(owner.email) = "" THEN NULL
-                    ELSE split(owner.email, "@")[0]
-                 END as owner_email_prefix
+            WITH c, owner
             OPTIONAL MATCH (me:User {id: $user_id})-[r:MEMBER_OF]->(c)
             RETURN
                 c.id as id,
@@ -2215,13 +2177,6 @@ class GraphService:
                 coalesce(c.status, "active") as status,
                 toString(c.archived_at) as archived_at,
                 owner.id as owner_id,
-                CASE
-                    WHEN owner.display_name IS NOT NULL AND trim(owner.display_name) <> "" THEN owner.display_name
-                    WHEN owner.username IS NOT NULL AND trim(owner.username) <> "" THEN owner.username
-                    WHEN owner_email_prefix IS NOT NULL AND trim(owner_email_prefix) <> "" THEN owner_email_prefix
-                    WHEN owner.email IS NOT NULL AND trim(owner.email) <> "" THEN owner.email
-                    ELSE "Unknown owner"
-                END as owner_name,
                 CASE WHEN r IS NULL THEN "requestable" ELSE "member" END as access,
                 r.role as role
             ORDER BY c.created_at DESC
@@ -2241,8 +2196,18 @@ class GraphService:
                         "status": record.get("status") or "active",
                         "archived_at": record.get("archived_at"),
                         "owner_id": record.get("owner_id"),
-                        "owner_name": record.get("owner_name"),
+                        "owner_name": "Unknown user",
                     }
+                )
+            owner_identity = await self.resolve_user_identities_batch(
+                [str(campaign.get("owner_id") or "").strip() for campaign in campaigns]
+            )
+            for campaign in campaigns:
+                owner_id = str(campaign.get("owner_id") or "").strip()
+                if not owner_id:
+                    continue
+                campaign["owner_name"] = (
+                    owner_identity.get(owner_id, {}).get("display_name") or "Unknown user"
                 )
             return campaigns
 
@@ -2421,26 +2386,12 @@ class GraphService:
             query = """
             MATCH (ar:CampaignAccessRequest {campaign_id: $campaign_id})
             OPTIONAL MATCH (u:User {id: ar.user_id})
-            WITH
-                ar,
-                u,
-                CASE
-                    WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                    ELSE split(u.email, "@")[0]
-                END as email_prefix
             WHERE ($status = "" OR ar.status = $status)
             RETURN
                 ar.id as id,
                 ar.campaign_id as campaign_id,
                 ar.user_id as user_id,
                 coalesce(u.email, "") as user_email,
-                CASE
-                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                    ELSE "Unknown user"
-                END as user_name,
                 ar.message as message,
                 ar.status as status,
                 toString(ar.created_at) as created_at,
@@ -2463,7 +2414,7 @@ class GraphService:
                         "campaign_id": record.get("campaign_id"),
                         "user_id": record.get("user_id"),
                         "user_email": record.get("user_email") or "",
-                        "user_name": record.get("user_name") or "",
+                        "user_name": "",
                         "message": record.get("message"),
                         "status": record.get("status") or "pending",
                         "created_at": record.get("created_at"),
@@ -2471,6 +2422,17 @@ class GraphService:
                         "decided_by": record.get("decided_by"),
                     }
                 )
+            identity_map = await self.resolve_user_identities_batch(
+                [str(item.get("user_id") or "").strip() for item in requests]
+            )
+            for item in requests:
+                item_user_id = str(item.get("user_id") or "").strip()
+                if not item_user_id:
+                    continue
+                identity = identity_map.get(item_user_id) or {}
+                item["user_name"] = str(identity.get("display_name") or "").strip() or "Unknown user"
+                if not item.get("user_email"):
+                    item["user_email"] = str(identity.get("email") or "").strip()
             return requests
 
     async def decide_campaign_access_request(
@@ -2609,6 +2571,8 @@ class GraphService:
                     campaign_id=campaign_id,
                     message=decision_message,
                     status="unread",
+                    actor_user_id=actor_user_id,
+                    target_user_id=target_user_id,
                 )
                 if decided_type == "access_request_approved":
                     await self.create_notification(
@@ -2618,6 +2582,8 @@ class GraphService:
                         campaign_id=campaign_id,
                         message=f"You were added to Campaign {campaign_id}",
                         status="unread",
+                        actor_user_id=actor_user_id,
+                        target_user_id=target_user_id,
                     )
             return decided_payload
 
@@ -2631,14 +2597,6 @@ class GraphService:
         async with self._driver.session() as session:
             query = """
             MATCH (e:CampaignEvent {campaign_id: $campaign_id})
-            OPTIONAL MATCH (requester:User {id: e.user_id})
-            WITH
-                e,
-                requester,
-                CASE
-                    WHEN requester.email IS NULL OR trim(requester.email) = "" THEN NULL
-                    ELSE split(requester.email, "@")[0]
-                END as requester_email_prefix
             WHERE
                 (
                     $viewer_user_id IS NULL
@@ -2691,14 +2649,6 @@ class GraphService:
                 e.user_id as user_id,
                 e.actor_user_id as actor_user_id,
                 e.request_id as request_id,
-                CASE
-                    WHEN requester.display_name IS NOT NULL AND trim(requester.display_name) <> "" THEN requester.display_name
-                    WHEN requester.username IS NOT NULL AND trim(requester.username) <> "" THEN requester.username
-                    WHEN requester_email_prefix IS NOT NULL AND trim(requester_email_prefix) <> "" THEN requester_email_prefix
-                    WHEN requester.email IS NOT NULL AND trim(requester.email) <> "" THEN requester.email
-                    WHEN e.user_id IS NOT NULL AND trim(e.user_id) <> "" THEN e.user_id
-                    ELSE e.user_id
-                END as requester_display_name,
                 toString(e.created_at) as created_at
             ORDER BY e.created_at DESC
             LIMIT $limit
@@ -2719,9 +2669,19 @@ class GraphService:
                         "user_id": record.get("user_id"),
                         "actor_user_id": record.get("actor_user_id"),
                         "request_id": record.get("request_id"),
-                        "requester_display_name": record.get("requester_display_name"),
+                        "requester_display_name": None,
                         "created_at": record.get("created_at"),
                     }
+                )
+            requester_identity = await self.resolve_user_identities_batch(
+                [str(item.get("user_id") or "").strip() for item in items]
+            )
+            for item in items:
+                requester_id = str(item.get("user_id") or "").strip()
+                if not requester_id:
+                    continue
+                item["requester_display_name"] = (
+                    requester_identity.get(requester_id, {}).get("display_name") or "Unknown user"
                 )
             return items
 
@@ -2734,6 +2694,8 @@ class GraphService:
         campaign_id: Optional[str],
         message: str,
         status: str = "unread",
+        actor_user_id: Optional[str] = None,
+        target_user_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         notification_id = str(uuid.uuid4())
         normalized_entity_id = str(entity_id or "").strip() or None
@@ -2752,6 +2714,8 @@ class GraphService:
                     ON CREATE SET
                         n.id = $notification_id,
                         n.user_id = $user_id,
+                        n.actor_user_id = $actor_user_id,
+                        n.target_user_id = coalesce($target_user_id, $user_id),
                         n.type = $notification_type,
                         n.entity_id = $entity_id,
                         n.campaign_id = $campaign_id,
@@ -2760,11 +2724,15 @@ class GraphService:
                         n.created_at = datetime(),
                         n.acted_at = null
                     ON MATCH SET
-                        n.message = coalesce($message, n.message)
+                        n.message = coalesce($message, n.message),
+                        n.actor_user_id = coalesce($actor_user_id, n.actor_user_id),
+                        n.target_user_id = coalesce($target_user_id, n.target_user_id, n.user_id)
                     MERGE (u)-[:HAS_NOTIFICATION]->(n)
                     RETURN
                         n.id as id,
                         n.user_id as user_id,
+                        n.actor_user_id as actor_user_id,
+                        n.target_user_id as target_user_id,
                         n.type as type,
                         n.entity_id as entity_id,
                         n.campaign_id as campaign_id,
@@ -2781,6 +2749,8 @@ class GraphService:
                     campaign_id=normalized_campaign_id,
                     message=message,
                     status=status,
+                    actor_user_id=actor_user_id,
+                    target_user_id=target_user_id,
                 )
             else:
                 result = await session.run(
@@ -2789,6 +2759,8 @@ class GraphService:
                     CREATE (n:Notification {
                         id: $notification_id,
                         user_id: $user_id,
+                        actor_user_id: $actor_user_id,
+                        target_user_id: coalesce($target_user_id, $user_id),
                         type: $notification_type,
                         entity_id: $entity_id,
                         campaign_id: $campaign_id,
@@ -2801,6 +2773,8 @@ class GraphService:
                     RETURN
                         n.id as id,
                         n.user_id as user_id,
+                        n.actor_user_id as actor_user_id,
+                        n.target_user_id as target_user_id,
                         n.type as type,
                         n.entity_id as entity_id,
                         n.campaign_id as campaign_id,
@@ -2816,6 +2790,8 @@ class GraphService:
                     campaign_id=normalized_campaign_id,
                     message=message,
                     status=status,
+                    actor_user_id=actor_user_id,
+                    target_user_id=target_user_id,
                 )
             record = await result.single()
             if not record:
@@ -2835,6 +2811,8 @@ class GraphService:
                 RETURN
                     n.id as id,
                     n.user_id as user_id,
+                    coalesce(n.actor_user_id, null) as actor_user_id,
+                    coalesce(n.target_user_id, n.user_id) as target_user_id,
                     n.type as type,
                     n.entity_id as entity_id,
                     n.campaign_id as campaign_id,
@@ -2851,6 +2829,23 @@ class GraphService:
             items: List[Dict[str, Any]] = []
             async for row in result:
                 items.append(dict(row))
+            identity_map = await self.resolve_user_identities_batch(
+                [
+                    str(candidate_id).strip()
+                    for item in items
+                    for candidate_id in [item.get("actor_user_id"), item.get("target_user_id")]
+                    if str(candidate_id or "").strip()
+                ]
+            )
+            for item in items:
+                actor_user_id = str(item.get("actor_user_id") or "").strip()
+                target_user_id = str(item.get("target_user_id") or "").strip()
+                item["actor_display_name"] = (
+                    identity_map.get(actor_user_id, {}).get("display_name") if actor_user_id else None
+                )
+                item["target_display_name"] = (
+                    identity_map.get(target_user_id, {}).get("display_name") if target_user_id else None
+                )
             return items
 
     async def update_notification_status(
@@ -2971,6 +2966,8 @@ class GraphService:
                     campaign_id=campaign_id,
                     message=message,
                     status="unread",
+                    actor_user_id=actor_user_id,
+                    target_user_id=user_id,
                 )
             except Exception:
                 logger.exception(
@@ -3396,11 +3393,7 @@ class GraphService:
                     RETURN count(message) as unread_count
                 }
                 OPTIONAL MATCH (participant:User)-[:CONVERSATION_MEMBER]->(conv)
-                WITH conv, membership, unread_count, participant,
-                     CASE
-                        WHEN participant.email IS NULL OR trim(participant.email) = "" THEN NULL
-                        ELSE split(participant.email, "@")[0]
-                     END as participant_email_prefix
+                WITH conv, membership, unread_count, participant
                 RETURN
                     conv.id as id,
                     conv.type as type,
@@ -3414,14 +3407,7 @@ class GraphService:
                     collect(DISTINCT CASE
                         WHEN participant IS NULL THEN NULL
                         ELSE {
-                            user_id: participant.id,
-                            display_name: CASE
-                                WHEN participant.display_name IS NOT NULL AND trim(participant.display_name) <> "" THEN participant.display_name
-                                WHEN participant.username IS NOT NULL AND trim(participant.username) <> "" THEN participant.username
-                                WHEN participant_email_prefix IS NOT NULL AND trim(participant_email_prefix) <> "" THEN participant_email_prefix
-                                WHEN participant.email IS NOT NULL AND trim(participant.email) <> "" THEN participant.email
-                                ELSE "Unknown user"
-                            END
+                            user_id: participant.id
                         }
                     END) as participants
                 ORDER BY
@@ -3432,26 +3418,20 @@ class GraphService:
                 user_id=user_id,
             )
             conversations: List[Dict[str, Any]] = []
+            all_participant_ids: List[str] = []
             async for record in result:
                 participants_raw = record.get("participants") or []
                 participants: List[Dict[str, str]] = []
                 for participant in participants_raw:
                     if isinstance(participant, dict) and participant.get("user_id"):
                         participant_user_id = str(participant.get("user_id"))
-                        participant_label = str(participant.get("display_name") or "").strip()
-                        if not participant_label or participant_label.lower() == "unknown user":
-                            identity = await self.ensure_user_identity(
-                                user_id=participant_user_id,
-                                display_name=participant_label,
-                                fetch_from_clerk_if_missing=True,
-                            )
-                            participant_label = str(identity.get("display_name") or "").strip()
                         participants.append(
                             {
                                 "user_id": participant_user_id,
-                                "display_name": participant_label or "Unknown user",
+                                "display_name": "",
                             }
                         )
+                        all_participant_ids.append(participant_user_id)
                 conversations.append(
                     {
                         "id": record.get("id"),
@@ -3466,6 +3446,14 @@ class GraphService:
                         "participants": participants,
                     }
                 )
+            participant_identity = await self.resolve_user_identities_batch(all_participant_ids)
+            for conversation in conversations:
+                for participant in conversation.get("participants") or []:
+                    participant_user_id = str(participant.get("user_id") or "").strip()
+                    participant["display_name"] = (
+                        participant_identity.get(participant_user_id, {}).get("display_name")
+                        or "Unknown user"
+                    )
             return conversations
 
     async def create_private_conversation(
@@ -3511,11 +3499,7 @@ class GraphService:
                 ON CREATE SET
                     membership.joined_at = datetime(),
                     membership.history_access = "full"
-                WITH conv, member,
-                     CASE
-                        WHEN member.email IS NULL OR trim(member.email) = "" THEN NULL
-                        ELSE split(member.email, "@")[0]
-                     END as member_email_prefix
+                WITH conv, member
                 RETURN
                     conv.id as id,
                     conv.type as type,
@@ -3524,14 +3508,7 @@ class GraphService:
                     conv.name as name,
                     toString(conv.created_at) as created_at,
                     collect(DISTINCT {
-                        user_id: member.id,
-                        display_name: CASE
-                            WHEN member.display_name IS NOT NULL AND trim(member.display_name) <> "" THEN member.display_name
-                            WHEN member.username IS NOT NULL AND trim(member.username) <> "" THEN member.username
-                            WHEN member_email_prefix IS NOT NULL AND trim(member_email_prefix) <> "" THEN member_email_prefix
-                            WHEN member.email IS NOT NULL AND trim(member.email) <> "" THEN member.email
-                            ELSE "Unknown user"
-                        END
+                        user_id: member.id
                     }) as participants
                 """,
                 campaign_id=campaign_id,
@@ -3547,12 +3524,22 @@ class GraphService:
             participants: List[Dict[str, str]] = []
             for participant in participants_raw:
                 if isinstance(participant, dict) and participant.get("user_id"):
+                    participant_user_id = str(participant.get("user_id"))
                     participants.append(
                         {
-                            "user_id": str(participant.get("user_id")),
-                            "display_name": str(participant.get("display_name") or "Unknown user"),
+                            "user_id": participant_user_id,
+                            "display_name": "",
                         }
                     )
+            participant_identity = await self.resolve_user_identities_batch(
+                [str(item.get("user_id") or "").strip() for item in participants]
+            )
+            for participant in participants:
+                participant_user_id = str(participant.get("user_id") or "").strip()
+                participant["display_name"] = (
+                    participant_identity.get(participant_user_id, {}).get("display_name")
+                    or "Unknown user"
+                )
             return {
                 "id": record.get("id"),
                 "type": record.get("type"),
@@ -3655,11 +3642,7 @@ class GraphService:
                     )
                     OR (conv.type = "private" AND membership IS NOT NULL)
                 MATCH (conv)<-[:IN_CONVERSATION]-(message:ConversationMessage)<-[:SENT_CONVERSATION_MESSAGE]-(author:User)
-                WITH conv, membership, message, author,
-                     CASE
-                        WHEN author.email IS NULL OR trim(author.email) = "" THEN NULL
-                        ELSE split(author.email, "@")[0]
-                     END as email_prefix
+                WITH conv, membership, message, author
                 WHERE
                     ($since IS NULL OR message.created_at > datetime($since))
                     AND (
@@ -3673,13 +3656,6 @@ class GraphService:
                     message.content as content,
                     toString(message.created_at) as created_at,
                     author.id as author_id,
-                    CASE
-                        WHEN author.display_name IS NOT NULL AND trim(author.display_name) <> "" THEN author.display_name
-                        WHEN author.username IS NOT NULL AND trim(author.username) <> "" THEN author.username
-                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                        WHEN author.email IS NOT NULL AND trim(author.email) <> "" THEN author.email
-                        ELSE "Unknown user"
-                    END as author_display_name,
                     author.avatar_url as author_avatar_url
                 ORDER BY message.created_at DESC
                 LIMIT $limit
@@ -3699,9 +3675,21 @@ class GraphService:
                         "content": record.get("content") or "",
                         "created_at": record.get("created_at"),
                         "author_id": record.get("author_id"),
-                        "author_display_name": record.get("author_display_name"),
+                        "author_display_name": "",
                         "author_avatar_url": record.get("author_avatar_url"),
                     }
+                )
+            author_identity = await self.resolve_user_identities_batch(
+                [str(item.get("author_id") or "").strip() for item in rows]
+            )
+            for item in rows:
+                author_id = str(item.get("author_id") or "").strip()
+                item["author_display_name"] = (
+                    author_identity.get(author_id, {}).get("display_name") or "Unknown user"
+                )
+                item["author_avatar_url"] = (
+                    author_identity.get(author_id, {}).get("avatar_url")
+                    or item.get("author_avatar_url")
                 )
             rows.reverse()
             await session.run(
@@ -3763,11 +3751,7 @@ class GraphService:
                 MATCH (conv:Conversation {id: $conversation_id, campaign_id: $campaign_id})
                 MATCH (viewer:User {id: $user_id})
                 OPTIONAL MATCH (viewer)-[membership:CONVERSATION_MEMBER]->(conv)
-                WITH conv, viewer, membership,
-                     CASE
-                        WHEN viewer.email IS NULL OR trim(viewer.email) = "" THEN NULL
-                        ELSE split(viewer.email, "@")[0]
-                     END as email_prefix
+                WITH conv, viewer, membership
                 WHERE
                     (
                         conv.type = "public"
@@ -3791,13 +3775,6 @@ class GraphService:
                     message.content as content,
                     toString(message.created_at) as created_at,
                     viewer.id as author_id,
-                    CASE
-                        WHEN viewer.display_name IS NOT NULL AND trim(viewer.display_name) <> "" THEN viewer.display_name
-                        WHEN viewer.username IS NOT NULL AND trim(viewer.username) <> "" THEN viewer.username
-                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                        WHEN viewer.email IS NOT NULL AND trim(viewer.email) <> "" THEN viewer.email
-                        ELSE "Unknown user"
-                    END as author_display_name,
                     viewer.avatar_url as author_avatar_url
                 """,
                 conversation_id=conversation_id,
@@ -3871,6 +3848,10 @@ class GraphService:
                     "mention_count": len(normalized_mentions),
                 },
             )
+            author_identity = await self.resolve_user_identity(
+                user_id=str(record.get("author_id") or "").strip(),
+                email_fallback=user.get("email"),
+            )
 
             return {
                 "id": record.get("id"),
@@ -3878,8 +3859,8 @@ class GraphService:
                 "content": record.get("content") or "",
                 "created_at": record.get("created_at"),
                 "author_id": record.get("author_id"),
-                "author_display_name": record.get("author_display_name"),
-                "author_avatar_url": record.get("author_avatar_url"),
+                "author_display_name": author_identity.get("display_name") or "Unknown user",
+                "author_avatar_url": author_identity.get("avatar_url") or record.get("author_avatar_url"),
             }
 
     async def add_member(
@@ -3993,13 +3974,6 @@ class GraphService:
             query = """
             MATCH (c:Campaign {id: $campaign_id})
             MERGE (u:User {id: $user_id})
-            WITH
-                c,
-                u,
-                CASE
-                    WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                    ELSE split(u.email, "@")[0]
-                END as email_prefix
             CREATE (m:TeamMessage {
                 id: $message_id,
                 content: $content,
@@ -4011,20 +3985,6 @@ class GraphService:
                 m.content as content,
                 toString(m.timestamp) as timestamp,
                 u.id as author_id,
-                CASE
-                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                    ELSE "Unknown user"
-                END as author_display_name,
-                CASE
-                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN 1
-                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN 2
-                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN 3
-                    ELSE 4
-                END as author_fallback_level,
                 u.avatar_url as author_avatar_url
             """
             
@@ -4039,22 +3999,17 @@ class GraphService:
             
             if not record:
                 raise Exception("Failed to create team message")
-            
-            identity = self._coerce_team_chat_read_identity(
-                author_id=record.get("author_id"),
-                author_display_name=record.get("author_display_name"),
-                author_fallback_level=record.get("author_fallback_level"),
-                campaign_id=campaign_id,
-                message_id=record.get("id"),
-                thread_id=None,
+            author_identity = await self.resolve_user_identity(
+                user_id=str(record.get("author_id") or "").strip(),
+                email_fallback=user.get("email"),
             )
             created_message = {
                 "id": record["id"],
                 "content": record["content"],
                 "timestamp": record["timestamp"],
-                "author_id": identity["author_id"],
-                "author_display_name": identity["author_display_name"],
-                "author_avatar_url": record.get("author_avatar_url"),
+                "author_id": str(record.get("author_id") or "").strip(),
+                "author_display_name": author_identity.get("display_name") or "Unknown user",
+                "author_avatar_url": author_identity.get("avatar_url") or record.get("author_avatar_url"),
                 "edited_at": None,
                 "deleted_at": None,
             }
@@ -4261,32 +4216,11 @@ class GraphService:
                 query = """
                 MATCH (t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})<-[:IN_THREAD]-(m:ThreadMessage)<-[:SENT_THREAD_MESSAGE]-(u:User)
                 WHERE m.timestamp > datetime($since)
-                WITH
-                    m,
-                    u,
-                    CASE
-                        WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                        ELSE split(u.email, "@")[0]
-                    END as email_prefix
                 RETURN
                     m.id as id,
                     m.content as content,
                     toString(m.timestamp) as timestamp,
                     u.id as author_id,
-                    CASE
-                        WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                        WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                        WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                        ELSE "Unknown user"
-                    END as author_display_name,
-                    CASE
-                        WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
-                        WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN 1
-                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN 2
-                        WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN 3
-                        ELSE 4
-                    END as author_fallback_level,
                     u.avatar_url as author_avatar_url
                 ORDER BY m.timestamp DESC
                 LIMIT $limit
@@ -4301,32 +4235,11 @@ class GraphService:
             else:
                 query = """
                 MATCH (t:ChatThread {id: $thread_id, tenant_id: $campaign_id, is_private: true})<-[:IN_THREAD]-(m:ThreadMessage)<-[:SENT_THREAD_MESSAGE]-(u:User)
-                WITH
-                    m,
-                    u,
-                    CASE
-                        WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                        ELSE split(u.email, "@")[0]
-                    END as email_prefix
                 RETURN
                     m.id as id,
                     m.content as content,
                     toString(m.timestamp) as timestamp,
                     u.id as author_id,
-                    CASE
-                        WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                        WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                        WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                        ELSE "Unknown user"
-                    END as author_display_name,
-                    CASE
-                        WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
-                        WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN 1
-                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN 2
-                        WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN 3
-                        ELSE 4
-                    END as author_fallback_level,
                     u.avatar_url as author_avatar_url
                 ORDER BY m.timestamp DESC
                 LIMIT $limit
@@ -4340,26 +4253,26 @@ class GraphService:
 
             messages: List[Dict[str, Any]] = []
             async for record in result:
-                identity = self._coerce_team_chat_read_identity(
-                    author_id=record.get("author_id"),
-                    author_display_name=record.get("author_display_name"),
-                    author_fallback_level=record.get("author_fallback_level"),
-                    campaign_id=campaign_id,
-                    message_id=record.get("id"),
-                    thread_id=thread_id,
-                )
                 messages.append(
                     {
                         "id": record["id"],
                         "content": record["content"],
                         "timestamp": record["timestamp"],
-                        "author_id": identity["author_id"],
-                        "author_display_name": identity["author_display_name"],
+                        "author_id": str(record.get("author_id") or "").strip(),
+                        "author_display_name": "",
                         "author_avatar_url": record.get("author_avatar_url"),
                         "edited_at": None,
                         "deleted_at": None,
                     }
                 )
+            identity_map = await self.resolve_user_identities_batch(
+                [str(item.get("author_id") or "").strip() for item in messages]
+            )
+            for item in messages:
+                author_id = str(item.get("author_id") or "").strip()
+                identity = identity_map.get(author_id) or {}
+                item["author_display_name"] = identity.get("display_name") or "Unknown user"
+                item["author_avatar_url"] = identity.get("avatar_url") or item.get("author_avatar_url")
             messages.reverse()
             return messages
 
@@ -4416,32 +4329,11 @@ class GraphService:
             CREATE (u)-[:SENT_THREAD_MESSAGE]->(m)-[:IN_THREAD]->(t)
             MERGE (u)-[read:THREAD_READ]->(t)
             SET read.last_read_at = datetime()
-            WITH
-                m,
-                u,
-                CASE
-                    WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                    ELSE split(u.email, "@")[0]
-                END as email_prefix
             RETURN
                 m.id as id,
                 m.content as content,
                 toString(m.timestamp) as timestamp,
                 u.id as author_id,
-                CASE
-                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                    ELSE "Unknown user"
-                END as author_display_name,
-                CASE
-                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN 1
-                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN 2
-                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN 3
-                    ELSE 4
-                END as author_fallback_level,
                 u.avatar_url as author_avatar_url
             """
             result = await session.run(
@@ -4455,22 +4347,16 @@ class GraphService:
             record = await result.single()
             if not record:
                 raise Exception("Failed to post thread message")
-
-            identity = self._coerce_team_chat_read_identity(
-                author_id=record.get("author_id"),
-                author_display_name=record.get("author_display_name"),
-                author_fallback_level=record.get("author_fallback_level"),
-                campaign_id=campaign_id,
-                message_id=record.get("id"),
-                thread_id=thread_id,
+            author_identity = await self.resolve_user_identity(
+                user_id=str(record.get("author_id") or "").strip()
             )
             created_message = {
                 "id": record["id"],
                 "content": record["content"],
                 "timestamp": record["timestamp"],
-                "author_id": identity["author_id"],
-                "author_display_name": identity["author_display_name"],
-                "author_avatar_url": record.get("author_avatar_url"),
+                "author_id": str(record.get("author_id") or "").strip(),
+                "author_display_name": author_identity.get("display_name") or "Unknown user",
+                "author_avatar_url": author_identity.get("avatar_url") or record.get("author_avatar_url"),
                 "edited_at": None,
                 "deleted_at": None,
             }
@@ -4559,32 +4445,11 @@ class GraphService:
             MATCH (c:Campaign {id: $campaign_id})<-[:POSTED_IN]-(m:TeamMessage)<-[:SENT]-(u:User {id: $user_id})
             WHERE m.id = $message_id
             SET m.content = $content, m.edited_at = datetime()
-            WITH
-                m,
-                u,
-                CASE
-                    WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                    ELSE split(u.email, "@")[0]
-                END as email_prefix
             RETURN
                 m.id as id,
                 m.content as content,
                 toString(m.timestamp) as timestamp,
                 u.id as author_id,
-                CASE
-                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                    ELSE "Unknown user"
-                END as author_display_name,
-                CASE
-                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN 1
-                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN 2
-                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN 3
-                    ELSE 4
-                END as author_fallback_level,
                 u.avatar_url as author_avatar_url,
                 toString(m.edited_at) as edited_at,
                 toString(m.deleted_at) as deleted_at
@@ -4600,22 +4465,16 @@ class GraphService:
 
             if not update_record:
                 raise Exception("Failed to update team message")
-
-            identity = self._coerce_team_chat_read_identity(
-                author_id=update_record.get("author_id"),
-                author_display_name=update_record.get("author_display_name"),
-                author_fallback_level=update_record.get("author_fallback_level"),
-                campaign_id=campaign_id,
-                message_id=update_record.get("id"),
-                thread_id=None,
+            author_identity = await self.resolve_user_identity(
+                user_id=str(update_record.get("author_id") or "").strip()
             )
             return {
                 "id": update_record["id"],
                 "content": update_record["content"],
                 "timestamp": update_record["timestamp"],
-                "author_id": identity["author_id"],
-                "author_display_name": identity["author_display_name"],
-                "author_avatar_url": update_record.get("author_avatar_url"),
+                "author_id": str(update_record.get("author_id") or "").strip(),
+                "author_display_name": author_identity.get("display_name") or "Unknown user",
+                "author_avatar_url": author_identity.get("avatar_url") or update_record.get("author_avatar_url"),
                 "edited_at": update_record.get("edited_at"),
                 "deleted_at": update_record.get("deleted_at"),
             }
@@ -4648,32 +4507,11 @@ class GraphService:
             WHERE m.id = $message_id
             SET m.deleted_at = coalesce(m.deleted_at, datetime()),
                 m.content = ""
-            WITH
-                m,
-                u,
-                CASE
-                    WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                    ELSE split(u.email, "@")[0]
-                END as email_prefix
             RETURN
                 m.id as id,
                 m.content as content,
                 toString(m.timestamp) as timestamp,
                 u.id as author_id,
-                CASE
-                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                    ELSE "Unknown user"
-                END as author_display_name,
-                CASE
-                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN 1
-                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN 2
-                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN 3
-                    ELSE 4
-                END as author_fallback_level,
                 u.avatar_url as author_avatar_url,
                 toString(m.edited_at) as edited_at,
                 toString(m.deleted_at) as deleted_at
@@ -4688,22 +4526,16 @@ class GraphService:
 
             if not delete_record:
                 raise Exception("Failed to delete team message")
-
-            identity = self._coerce_team_chat_read_identity(
-                author_id=delete_record.get("author_id"),
-                author_display_name=delete_record.get("author_display_name"),
-                author_fallback_level=delete_record.get("author_fallback_level"),
-                campaign_id=campaign_id,
-                message_id=delete_record.get("id"),
-                thread_id=None,
+            author_identity = await self.resolve_user_identity(
+                user_id=str(delete_record.get("author_id") or "").strip()
             )
             return {
                 "id": delete_record["id"],
                 "content": delete_record["content"],
                 "timestamp": delete_record["timestamp"],
-                "author_id": identity["author_id"],
-                "author_display_name": identity["author_display_name"],
-                "author_avatar_url": delete_record.get("author_avatar_url"),
+                "author_id": str(delete_record.get("author_id") or "").strip(),
+                "author_display_name": author_identity.get("display_name") or "Unknown user",
+                "author_avatar_url": author_identity.get("avatar_url") or delete_record.get("author_avatar_url"),
                 "edited_at": delete_record.get("edited_at"),
                 "deleted_at": delete_record.get("deleted_at"),
             }
@@ -4732,32 +4564,11 @@ class GraphService:
                 query = """
                 MATCH (c:Campaign {id: $campaign_id})<-[:POSTED_IN]-(m:TeamMessage)<-[:SENT]-(u:User)
                 WHERE m.timestamp > datetime($since)
-                WITH
-                    m,
-                    u,
-                    CASE
-                        WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                        ELSE split(u.email, "@")[0]
-                    END as email_prefix
                 RETURN
                     m.id as id,
                     m.content as content,
                     toString(m.timestamp) as timestamp,
                     u.id as author_id,
-                    CASE
-                        WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                        WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                        WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                        ELSE "Unknown user"
-                    END as author_display_name,
-                    CASE
-                        WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
-                        WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN 1
-                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN 2
-                        WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN 3
-                        ELSE 4
-                    END as author_fallback_level,
                     u.avatar_url as author_avatar_url,
                     toString(m.edited_at) as edited_at,
                     toString(m.deleted_at) as deleted_at
@@ -4773,32 +4584,11 @@ class GraphService:
             else:
                 query = """
                 MATCH (c:Campaign {id: $campaign_id})<-[:POSTED_IN]-(m:TeamMessage)<-[:SENT]-(u:User)
-                WITH
-                    m,
-                    u,
-                    CASE
-                        WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                        ELSE split(u.email, "@")[0]
-                    END as email_prefix
                 RETURN
                     m.id as id,
                     m.content as content,
                     toString(m.timestamp) as timestamp,
                     u.id as author_id,
-                    CASE
-                        WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                        WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                        WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                        ELSE "Unknown user"
-                    END as author_display_name,
-                    CASE
-                        WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN 0
-                        WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN 1
-                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN 2
-                        WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN 3
-                        ELSE 4
-                    END as author_fallback_level,
                     u.avatar_url as author_avatar_url,
                     toString(m.edited_at) as edited_at,
                     toString(m.deleted_at) as deleted_at
@@ -4813,24 +4603,24 @@ class GraphService:
             
             messages = []
             async for record in result:
-                identity = self._coerce_team_chat_read_identity(
-                    author_id=record.get("author_id"),
-                    author_display_name=record.get("author_display_name"),
-                    author_fallback_level=record.get("author_fallback_level"),
-                    campaign_id=campaign_id,
-                    message_id=record.get("id"),
-                    thread_id=None,
-                )
                 messages.append({
                     "id": record["id"],
                     "content": record["content"],
                     "timestamp": record["timestamp"],
-                    "author_id": identity["author_id"],
-                    "author_display_name": identity["author_display_name"],
+                    "author_id": str(record.get("author_id") or "").strip(),
+                    "author_display_name": "",
                     "author_avatar_url": record.get("author_avatar_url"),
                     "edited_at": record.get("edited_at"),
                     "deleted_at": record.get("deleted_at"),
                 })
+            identity_map = await self.resolve_user_identities_batch(
+                [str(item.get("author_id") or "").strip() for item in messages]
+            )
+            for item in messages:
+                author_id = str(item.get("author_id") or "").strip()
+                identity = identity_map.get(author_id) or {}
+                item["author_display_name"] = identity.get("display_name") or "Unknown user"
+                item["author_avatar_url"] = identity.get("avatar_url") or item.get("author_avatar_url")
             
             # Reverse to get chronological order (oldest -> newest)
             messages.reverse()
@@ -4907,44 +4697,15 @@ class GraphService:
         async with self._driver.session() as session:
             query = """
             MATCH (u:User)-[r:MEMBER_OF]->(c:Campaign {id: $campaign_id})
-            WITH
-                u,
-                r,
-                coalesce(u.email, "") as email_value,
-                CASE
-                    WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                    ELSE split(u.email, "@")[0]
-                END as email_prefix
             RETURN
                 u.id as user_id,
-                CASE
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                    ELSE NULL
-                END as username,
-                CASE
-                    WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                    ELSE NULL
-                END as email,
-                CASE
-                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                    WHEN email_value <> "" THEN email_value
-                    ELSE "Unknown user"
-                END as display_name,
+                u.username as username,
+                u.email as email,
                 u.avatar_url as avatar_url,
                 r.role as role,
                 coalesce(u.status, "active") as status,
                 toString(u.status_updated_at) as status_updated_at
-            ORDER BY toLower(
-                CASE
-                    WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                    WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                    WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                    WHEN email_value <> "" THEN email_value
-                    ELSE "Unknown user"
-                END
-            ) ASC
+            ORDER BY toLower(coalesce(u.display_name, u.username, u.email, u.id, "")) ASC
             """
 
             result = await session.run(query, campaign_id=campaign_id)
@@ -4953,7 +4714,7 @@ class GraphService:
                 members.append(
                     {
                         "user_id": record["user_id"],
-                        "display_name": record["display_name"],
+                        "display_name": None,
                         "username": record.get("username"),
                         "email": record.get("email"),
                         "avatar_url": record.get("avatar_url"),
@@ -4993,21 +4754,15 @@ class GraphService:
                     by_user_id[user_id] = member
 
             deduped = list(by_user_id.values())
+            identity_map = await self.resolve_user_identities_batch(
+                [str(item.get("user_id") or "").strip() for item in deduped]
+            )
             for item in deduped:
-                current_label = str(item.get("display_name") or "").strip().lower()
-                if current_label and current_label != "unknown user":
+                item_user_id = str(item.get("user_id") or "").strip()
+                if not item_user_id:
+                    item["display_name"] = "Unknown user"
                     continue
-                user_id = str(item.get("user_id") or "").strip()
-                if not user_id:
-                    continue
-                identity = await self.ensure_user_identity(
-                    user_id=user_id,
-                    email=item.get("email"),
-                    username=item.get("username"),
-                    display_name=item.get("display_name"),
-                    avatar_url=item.get("avatar_url"),
-                    fetch_from_clerk_if_missing=True,
-                )
+                identity = identity_map.get(item_user_id) or {}
                 item["display_name"] = identity.get("display_name") or "Unknown user"
                 item["email"] = identity.get("email") or item.get("email")
                 item["avatar_url"] = identity.get("avatar_url") or item.get("avatar_url")
@@ -5118,26 +4873,53 @@ class GraphService:
         user_id: str,
         email_fallback: Optional[str] = None,
     ) -> str:
-        """Resolve display_name -> username -> email_prefix -> email -> Unknown user chain."""
-        await self.ensure_user_identity(
+        """Resolve and return canonical display name for a user id."""
+        identity = await self.resolve_user_identity(
             user_id=user_id,
+            email_fallback=email_fallback,
+        )
+        return str(identity.get("display_name") or "").strip() or "Unknown user"
+
+    async def resolve_user_identity(
+        self,
+        *,
+        user_id: str,
+        email_fallback: Optional[str] = None,
+    ) -> Dict[str, Optional[str]]:
+        """Canonical identity resolver used by all user-facing payloads."""
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            return {
+                "user_id": None,
+                "display_name": "Unknown user",
+                "email": None,
+                "avatar_url": None,
+            }
+        return await self.ensure_user_identity(
+            user_id=normalized_user_id,
             email=email_fallback,
             fetch_from_clerk_if_missing=True,
         )
-        profile = await self.get_user_profile(user_id=user_id, email_fallback=email_fallback)
-        display_name = str(profile.get("display_name") or "").strip()
-        if display_name:
-            return display_name
-        username = str(profile.get("username") or "").strip()
-        if username:
-            return username
-        email = str(profile.get("email") or "").strip()
-        if email:
-            email_prefix = email.split("@")[0].strip()
-            if email_prefix:
-                return email_prefix
-            return email
-        return "Unknown user"
+
+    async def resolve_user_identities_batch(
+        self,
+        user_ids: List[str],
+    ) -> Dict[str, Dict[str, Optional[str]]]:
+        """Batch wrapper around canonical resolver with dedupe."""
+        unique_ids: List[str] = []
+        seen: set[str] = set()
+        for raw_user_id in user_ids:
+            normalized_user_id = str(raw_user_id or "").strip()
+            if not normalized_user_id or normalized_user_id in seen:
+                continue
+            seen.add(normalized_user_id)
+            unique_ids.append(normalized_user_id)
+        identity_map: Dict[str, Dict[str, Optional[str]]] = {}
+        for normalized_user_id in unique_ids:
+            identity_map[normalized_user_id] = await self.resolve_user_identity(
+                user_id=normalized_user_id
+            )
+        return identity_map
 
     async def ensure_user_identity(
         self,
@@ -5343,7 +5125,7 @@ class GraphService:
                 user_id=normalized_user_id,
                 email=(str(email or "").strip() or None),
                 username=(str(username or "").strip() or None),
-                display_name=str(display_name or "").strip() or "Unknown user",
+                display_name=(str(display_name or "").strip() or None),
                 avatar_url=(str(avatar_url or "").strip() or None),
             )
 
@@ -5380,29 +5162,18 @@ class GraphService:
             result = await session.run(
                 """
                 MATCH (u:User)
-                WITH
-                    u,
-                    CASE
-                        WHEN u.email IS NULL OR trim(u.email) = "" THEN NULL
-                        ELSE split(u.email, "@")[0]
-                    END as email_prefix
                 WHERE
                     (u.id IS NOT NULL AND toLower(u.id) CONTAINS $search_text)
                     OR (u.email IS NOT NULL AND toLower(u.email) CONTAINS $search_text)
-                    OR (email_prefix IS NOT NULL AND toLower(email_prefix) CONTAINS $search_text)
+                    OR (
+                        u.email IS NOT NULL
+                        AND toLower(split(u.email, "@")[0]) CONTAINS $search_text
+                    )
                     OR (u.username IS NOT NULL AND toLower(u.username) CONTAINS $search_text)
                     OR (u.display_name IS NOT NULL AND toLower(u.display_name) CONTAINS $search_text)
                 RETURN
                     u.id as id,
-                    coalesce(u.email, "") as email,
-                    CASE
-                        WHEN u.display_name IS NOT NULL AND trim(u.display_name) <> "" THEN u.display_name
-                        WHEN u.username IS NOT NULL AND trim(u.username) <> "" THEN u.username
-                        WHEN email_prefix IS NOT NULL AND trim(email_prefix) <> "" THEN email_prefix
-                        WHEN u.email IS NOT NULL AND trim(u.email) <> "" THEN u.email
-                        WHEN u.id IS NOT NULL AND trim(u.id) <> "" THEN u.id
-                        ELSE "Unknown user"
-                    END as display_name
+                    coalesce(u.email, "") as email
                 ORDER BY coalesce(u.updated_at, u.status_updated_at, datetime({epochMillis: 0})) DESC
                 LIMIT $limit
                 """,
@@ -5421,9 +5192,15 @@ class GraphService:
                     {
                         "id": user_id,
                         "email": email,
-                        "display_name": str(record.get("display_name") or user_id).strip() or user_id,
+                        "display_name": "",
                     }
                 )
+            identity_map = await self.resolve_user_identities_batch(
+                [str(user.get("id") or "").strip() for user in users]
+            )
+            for user in users:
+                identity = identity_map.get(str(user.get("id") or "").strip()) or {}
+                user["display_name"] = str(identity.get("display_name") or "").strip() or "Unknown user"
             logger.info(
                 "campaign_user_search_completed query=%s count=%d",
                 normalized_query,
