@@ -4996,11 +4996,15 @@ class GraphService:
                 )
 
         resolved_display_name = str(profile.get("display_name") or "").strip()
+        if not _is_meaningful_identity_value(resolved_display_name):
+            resolved_display_name = ""
         if not resolved_display_name:
-            resolved_display_name = str(profile.get("username") or "").strip()
+            resolved_username = str(profile.get("username") or "").strip()
+            if _is_meaningful_identity_value(resolved_username):
+                resolved_display_name = resolved_username
         if not resolved_display_name:
             resolved_email = str(profile.get("email") or "").strip()
-            if resolved_email:
+            if _is_meaningful_identity_value(resolved_email):
                 resolved_display_name = resolved_email.split("@")[0].strip() or resolved_email
         if not resolved_display_name:
             resolved_display_name = "Unknown user"
