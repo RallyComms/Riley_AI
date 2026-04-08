@@ -4947,9 +4947,9 @@ class GraphService:
         normalized_avatar = str(avatar_url or "").strip() or None
         normalized_display_name = str(display_name or "").strip() or None
         if not normalized_display_name:
-            normalized_display_name = full_name or normalized_username
-        if not normalized_display_name and normalized_email:
-            normalized_display_name = normalized_email.split("@")[0].strip() or None
+            normalized_display_name = full_name or None
+        if not _is_meaningful_identity_value(normalized_display_name):
+            normalized_display_name = None
 
         await self.upsert_user_identity(
             user_id=normalized_user_id,
@@ -4965,11 +4965,7 @@ class GraphService:
             user_id=normalized_user_id,
             email_fallback=normalized_email,
         )
-        has_resolved_identity = (
-            _is_meaningful_identity_value(profile.get("display_name"))
-            or _is_meaningful_identity_value(profile.get("username"))
-            or _is_meaningful_identity_value(profile.get("email"))
-        )
+        has_resolved_identity = _is_meaningful_identity_value(profile.get("display_name"))
 
         if (not has_resolved_identity) and fetch_from_clerk_if_missing:
             clerk_user: Optional[Dict[str, str]] = None
@@ -4981,13 +4977,23 @@ class GraphService:
                     normalized_user_id,
                 )
             if clerk_user:
+                clerk_first = str(clerk_user.get("first_name") or "").strip()
+                clerk_last = str(clerk_user.get("last_name") or "").strip()
+                clerk_full_name = f"{clerk_first} {clerk_last}".strip()
+                clerk_display = str(clerk_user.get("display_name") or "").strip()
+                if _is_meaningful_identity_value(clerk_full_name):
+                    preferred_clerk_display = clerk_full_name
+                elif _is_meaningful_identity_value(clerk_display):
+                    preferred_clerk_display = clerk_display
+                else:
+                    preferred_clerk_display = None
                 await self.upsert_user_identity(
                     user_id=normalized_user_id,
                     email=clerk_user.get("email"),
                     username=clerk_user.get("username"),
                     first_name=clerk_user.get("first_name"),
                     last_name=clerk_user.get("last_name"),
-                    display_name=clerk_user.get("display_name"),
+                    display_name=preferred_clerk_display,
                     avatar_url=clerk_user.get("avatar_url"),
                 )
                 profile = await self.get_user_profile(
