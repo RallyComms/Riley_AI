@@ -2599,12 +2599,6 @@ class GraphService:
             MATCH (e:CampaignEvent {campaign_id: $campaign_id})
             WHERE
                 (
-                    $viewer_user_id IS NULL
-                    OR NOT EXISTS {
-                        MATCH (:User {id: $viewer_user_id})-[:DISMISSED_FEED_EVENT]->(e)
-                    }
-                )
-                AND (
                     NOT (e.type IN [
                         "document_assigned_to_user",
                         "document_tagged_for_review",
@@ -2670,6 +2664,7 @@ class GraphService:
                         "actor_user_id": record.get("actor_user_id"),
                         "request_id": record.get("request_id"),
                         "requester_display_name": None,
+                        "notification_status": None,
                         "created_at": record.get("created_at"),
                     }
                 )
@@ -2683,7 +2678,65 @@ class GraphService:
                 item["requester_display_name"] = (
                     requester_identity.get(requester_id, {}).get("display_name") or "Unknown user"
                 )
+            if viewer_user_id and items:
+                event_ids = [str(item.get("id") or "").strip() for item in items if str(item.get("id") or "").strip()]
+                if event_ids:
+                    status_result = await session.run(
+                        """
+                        MATCH (n:Notification {user_id: $viewer_user_id})
+                        WHERE coalesce(n.event_id, n.entity_id) IN $event_ids
+                        RETURN
+                            coalesce(n.event_id, n.entity_id) as event_id,
+                            n.status as status,
+                            toString(coalesce(n.acted_at, n.created_at)) as state_time
+                        ORDER BY state_time DESC
+                        """,
+                        viewer_user_id=viewer_user_id,
+                        event_ids=event_ids,
+                    )
+                    by_event_id: Dict[str, str] = {}
+                    async for row in status_result:
+                        row_event_id = str(row.get("event_id") or "").strip()
+                        row_status = str(row.get("status") or "").strip().lower()
+                        if not row_event_id or row_event_id in by_event_id:
+                            continue
+                        if row_status not in {"unread", "read", "completed"}:
+                            continue
+                        by_event_id[row_event_id] = row_status
+                    for item in items:
+                        item_id = str(item.get("id") or "").strip()
+                        if not item_id:
+                            continue
+                        item["notification_status"] = by_event_id.get(item_id)
             return items
+
+    async def dismiss_campaign_event_for_user(
+        self,
+        *,
+        campaign_id: str,
+        event_id: str,
+        user_id: str,
+    ) -> Dict[str, Any]:
+        """Persist dismissal state for a campaign activity event for a user."""
+        normalized_campaign_id = str(campaign_id or "").strip()
+        normalized_event_id = str(event_id or "").strip()
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_campaign_id or not normalized_event_id or not normalized_user_id:
+            raise ValueError("campaign_id, event_id, and user_id are required")
+        notification = await self.create_notification(
+            user_id=normalized_user_id,
+            notification_type="campaign_activity_event",
+            entity_id=normalized_event_id,
+            campaign_id=normalized_campaign_id,
+            message="Campaign activity dismissed",
+            status="read",
+            target_user_id=normalized_user_id,
+            event_id=normalized_event_id,
+        )
+        return {
+            "event_id": normalized_event_id,
+            "dismissed_at": notification.get("acted_at"),
+        }
 
     async def create_notification(
         self,
@@ -2696,10 +2749,14 @@ class GraphService:
         status: str = "unread",
         actor_user_id: Optional[str] = None,
         target_user_id: Optional[str] = None,
+        event_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         notification_id = str(uuid.uuid4())
         normalized_entity_id = str(entity_id or "").strip() or None
         normalized_campaign_id = str(campaign_id or "").strip() or None
+        normalized_event_id = str(event_id or normalized_entity_id or "").strip() or None
+        status_value = str(status or "").strip().lower()
+        normalized_status = status_value if status_value in {"unread", "read", "completed"} else "unread"
         dedupe_key = (
             f"{user_id}|{notification_type}|{normalized_campaign_id or ''}|{normalized_entity_id or ''}"
             if normalized_entity_id
@@ -2718,15 +2775,17 @@ class GraphService:
                         n.target_user_id = coalesce($target_user_id, $user_id),
                         n.type = $notification_type,
                         n.entity_id = $entity_id,
+                        n.event_id = $event_id,
                         n.campaign_id = $campaign_id,
                         n.message = $message,
                         n.status = $status,
                         n.created_at = datetime(),
-                        n.acted_at = null
+                        n.acted_at = CASE WHEN $status = "unread" THEN null ELSE datetime() END
                     ON MATCH SET
                         n.message = coalesce($message, n.message),
                         n.actor_user_id = coalesce($actor_user_id, n.actor_user_id),
-                        n.target_user_id = coalesce($target_user_id, n.target_user_id, n.user_id)
+                        n.target_user_id = coalesce($target_user_id, n.target_user_id, n.user_id),
+                        n.event_id = coalesce($event_id, n.event_id)
                     MERGE (u)-[:HAS_NOTIFICATION]->(n)
                     RETURN
                         n.id as id,
@@ -2735,6 +2794,7 @@ class GraphService:
                         n.target_user_id as target_user_id,
                         n.type as type,
                         n.entity_id as entity_id,
+                        n.event_id as event_id,
                         n.campaign_id as campaign_id,
                         n.message as message,
                         n.status as status,
@@ -2746,9 +2806,10 @@ class GraphService:
                     user_id=user_id,
                     notification_type=notification_type,
                     entity_id=normalized_entity_id,
+                    event_id=normalized_event_id,
                     campaign_id=normalized_campaign_id,
                     message=message,
-                    status=status,
+                    status=normalized_status,
                     actor_user_id=actor_user_id,
                     target_user_id=target_user_id,
                 )
@@ -2763,11 +2824,12 @@ class GraphService:
                         target_user_id: coalesce($target_user_id, $user_id),
                         type: $notification_type,
                         entity_id: $entity_id,
+                        event_id: $event_id,
                         campaign_id: $campaign_id,
                         message: $message,
                         status: $status,
                         created_at: datetime(),
-                        acted_at: null
+                        acted_at: CASE WHEN $status = "unread" THEN null ELSE datetime() END
                     })
                     MERGE (u)-[:HAS_NOTIFICATION]->(n)
                     RETURN
@@ -2777,6 +2839,7 @@ class GraphService:
                         n.target_user_id as target_user_id,
                         n.type as type,
                         n.entity_id as entity_id,
+                        n.event_id as event_id,
                         n.campaign_id as campaign_id,
                         n.message as message,
                         n.status as status,
@@ -2787,9 +2850,10 @@ class GraphService:
                     user_id=user_id,
                     notification_type=notification_type,
                     entity_id=normalized_entity_id,
+                    event_id=normalized_event_id,
                     campaign_id=normalized_campaign_id,
                     message=message,
-                    status=status,
+                    status=normalized_status,
                     actor_user_id=actor_user_id,
                     target_user_id=target_user_id,
                 )
@@ -2807,7 +2871,7 @@ class GraphService:
         async with self._driver.session() as session:
             result = await session.run(
                 """
-                MATCH (n:Notification {user_id: $user_id})
+                MATCH (n:Notification {user_id: $user_id, status: "unread"})
                 RETURN
                     n.id as id,
                     n.user_id as user_id,
@@ -2815,6 +2879,7 @@ class GraphService:
                     coalesce(n.target_user_id, n.user_id) as target_user_id,
                     n.type as type,
                     n.entity_id as entity_id,
+                    n.event_id as event_id,
                     n.campaign_id as campaign_id,
                     n.message as message,
                     n.status as status,
@@ -2855,6 +2920,8 @@ class GraphService:
         notification_id: str,
         status: str,
     ) -> Dict[str, Any]:
+        status_value = str(status or "").strip().lower()
+        normalized_status = status_value if status_value in {"unread", "read", "completed"} else "unread"
         async with self._driver.session() as session:
             result = await session.run(
                 """
@@ -2867,6 +2934,7 @@ class GraphService:
                     n.user_id as user_id,
                     n.type as type,
                     n.entity_id as entity_id,
+                    n.event_id as event_id,
                     n.campaign_id as campaign_id,
                     n.message as message,
                     n.status as status,
@@ -2875,7 +2943,7 @@ class GraphService:
                 """,
                 notification_id=notification_id,
                 user_id=user_id,
-                status=status,
+                status=normalized_status,
             )
             record = await result.single()
             if not record:
@@ -2968,6 +3036,7 @@ class GraphService:
                     status="unread",
                     actor_user_id=actor_user_id,
                     target_user_id=user_id,
+                    event_id=event_id,
                 )
             except Exception:
                 logger.exception(

@@ -86,6 +86,7 @@ class CampaignEventItem(BaseModel):
     actor_user_id: Optional[str] = None
     request_id: Optional[str] = None
     requester_display_name: Optional[str] = None
+    notification_status: Optional[Literal["unread", "read", "completed"]] = None
     created_at: Optional[str] = None
 
 
@@ -597,16 +598,29 @@ async def dismiss_campaign_event_for_user(
     tenant_id: str,
     event_id: str,
     current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
 ) -> DismissFeedEventResponse:
-    """Deprecated endpoint retained for backward compatibility."""
+    """Dismiss a campaign activity event for the current user."""
     user_id = current_user.get("id", "unknown")
+    try:
+        dismissed = await graph.dismiss_campaign_event_for_user(
+            campaign_id=tenant_id,
+            event_id=event_id,
+            user_id=user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     logger.info(
-        "events_feed_deprecated action=dismiss_campaign_event user_id=%s tenant_id=%s event_id=%s",
+        "campaign_event_dismissed user_id=%s tenant_id=%s event_id=%s",
         user_id,
         tenant_id,
         event_id,
     )
-    return DismissFeedEventResponse(ok=True, event_id=event_id, dismissed_at=None)
+    return DismissFeedEventResponse(
+        ok=True,
+        event_id=event_id,
+        dismissed_at=dismissed.get("dismissed_at"),
+    )
 
 
 @router.post("/campaigns/events/feed/{event_id}/dismiss", response_model=DismissFeedEventResponse)
