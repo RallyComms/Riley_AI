@@ -18,6 +18,7 @@ interface CampaignEventItem {
   actor_user_id?: string | null;
   created_at?: string | null;
   requester_display_name?: string | null;
+  notification_status?: "unread" | "read" | "completed" | null;
 }
 
 interface DirectoryUserResult {
@@ -77,7 +78,16 @@ export default function CampaignOverviewPage() {
   const headerSubtitle = campaignName?.trim()
     ? `${campaignName} — Campaign workspace overview`
     : "Campaign workspace overview";
-  const recentActivity = useMemo(() => events.slice(0, 8), [events]);
+  const recentActivity = useMemo(
+    () =>
+      events
+        .filter((event) => {
+          const status = String(event.notification_status || "").trim().toLowerCase();
+          return status !== "read" && status !== "completed";
+        })
+        .slice(0, 8),
+    [events]
+  );
   const getAccessRequesterLabel = (event: CampaignEventItem) =>
     event.requester_display_name?.trim() || "Unknown user";
 
