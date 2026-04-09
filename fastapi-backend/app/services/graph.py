@@ -47,6 +47,45 @@ class GraphService:
         )
         raise ValueError("Team chat message requires a valid author_id")
 
+    def _normalize_notification_message(
+        self,
+        *,
+        notification_type: str,
+        message: str,
+        campaign_id: Optional[str],
+    ) -> str:
+        raw_message = str(message or "").strip()
+        raw_lower = raw_message.lower()
+        looks_malformed = (
+            len(raw_message) < 3
+            or raw_lower.startswith("verify-")
+            or raw_lower.startswith("verify_")
+            or raw_lower.startswith("test-")
+            or raw_lower.startswith("test_")
+        )
+        if raw_message and not looks_malformed:
+            return raw_message
+        normalized_campaign_id = str(campaign_id or "").strip()
+        campaign_suffix = f" for Campaign {normalized_campaign_id}" if normalized_campaign_id else ""
+        mapping = {
+            "access_request_created": "New access request pending review",
+            "access_request_approved": "Access request approved",
+            "access_request_denied": "Access request denied",
+            "campaign_member_added_notification": (
+                f"You were added to Campaign {normalized_campaign_id}"
+                if normalized_campaign_id
+                else "You were added to a campaign"
+            ),
+            "campaign_message_mentioned_user": "You were mentioned in campaign chat",
+            "document_mentioned_user": "You were mentioned in a document",
+            "document_assigned_to_user": "A document was assigned to you",
+            "document_tagged_for_review": "A document was tagged for your review",
+            "private_conversation_message": "New private conversation message",
+            "campaign_activity_event": "Campaign activity updated",
+        }
+        normalized_type = str(notification_type or "").strip()
+        return mapping.get(normalized_type, f"Campaign update{campaign_suffix}")
+
     @property
     def driver(self) -> Any:
         """Return the Neo4j driver instance."""
@@ -105,6 +144,10 @@ class GraphService:
             """
             CREATE CONSTRAINT notification_dedupe_key_unique IF NOT EXISTS
             FOR (n:Notification) REQUIRE n.dedupe_key IS UNIQUE
+            """,
+            """
+            CREATE CONSTRAINT notification_user_event_unique IF NOT EXISTS
+            FOR (n:Notification) REQUIRE (n.user_id, n.event_id) IS UNIQUE
             """,
             # Rollup keys used by Mission Control queries
             """
@@ -2723,6 +2766,27 @@ class GraphService:
         normalized_user_id = str(user_id or "").strip()
         if not normalized_campaign_id or not normalized_event_id or not normalized_user_id:
             raise ValueError("campaign_id, event_id, and user_id are required")
+        async with self._driver.session() as session:
+            existing_result = await session.run(
+                """
+                MATCH (n:Notification {user_id: $user_id, event_id: $event_id})
+                RETURN n.id as id
+                LIMIT 1
+                """,
+                user_id=normalized_user_id,
+                event_id=normalized_event_id,
+            )
+            existing_record = await existing_result.single()
+        if existing_record and existing_record.get("id"):
+            updated = await self.update_notification_status(
+                user_id=normalized_user_id,
+                notification_id=str(existing_record.get("id")),
+                status="read",
+            )
+            return {
+                "event_id": normalized_event_id,
+                "dismissed_at": updated.get("acted_at"),
+            }
         notification = await self.create_notification(
             user_id=normalized_user_id,
             notification_type="campaign_activity_event",
@@ -2755,6 +2819,11 @@ class GraphService:
         normalized_entity_id = str(entity_id or "").strip() or None
         normalized_campaign_id = str(campaign_id or "").strip() or None
         normalized_event_id = str(event_id or normalized_entity_id or "").strip() or None
+        normalized_message = self._normalize_notification_message(
+            notification_type=notification_type,
+            message=message,
+            campaign_id=normalized_campaign_id,
+        )
         status_value = str(status or "").strip().lower()
         normalized_status = status_value if status_value in {"unread", "read", "completed"} else "unread"
         dedupe_key = (
@@ -2763,6 +2832,31 @@ class GraphService:
             else None
         )
         async with self._driver.session() as session:
+            if normalized_event_id:
+                existing_result = await session.run(
+                    """
+                    MATCH (n:Notification {user_id: $user_id, event_id: $event_id})
+                    RETURN
+                        n.id as id,
+                        n.user_id as user_id,
+                        n.actor_user_id as actor_user_id,
+                        n.target_user_id as target_user_id,
+                        n.type as type,
+                        n.entity_id as entity_id,
+                        n.event_id as event_id,
+                        n.campaign_id as campaign_id,
+                        n.message as message,
+                        n.status as status,
+                        toString(n.created_at) as created_at,
+                        toString(n.acted_at) as acted_at
+                    LIMIT 1
+                    """,
+                    user_id=user_id,
+                    event_id=normalized_event_id,
+                )
+                existing_record = await existing_result.single()
+                if existing_record:
+                    return dict(existing_record)
             if dedupe_key:
                 result = await session.run(
                     """
@@ -2777,12 +2871,12 @@ class GraphService:
                         n.entity_id = $entity_id,
                         n.event_id = $event_id,
                         n.campaign_id = $campaign_id,
-                        n.message = $message,
+                        n.message = $normalized_message,
                         n.status = $status,
                         n.created_at = datetime(),
                         n.acted_at = CASE WHEN $status = "unread" THEN null ELSE datetime() END
                     ON MATCH SET
-                        n.message = coalesce($message, n.message),
+                        n.message = coalesce($normalized_message, n.message),
                         n.actor_user_id = coalesce($actor_user_id, n.actor_user_id),
                         n.target_user_id = coalesce($target_user_id, n.target_user_id, n.user_id),
                         n.event_id = coalesce($event_id, n.event_id)
@@ -2808,7 +2902,7 @@ class GraphService:
                     entity_id=normalized_entity_id,
                     event_id=normalized_event_id,
                     campaign_id=normalized_campaign_id,
-                    message=message,
+                    normalized_message=normalized_message,
                     status=normalized_status,
                     actor_user_id=actor_user_id,
                     target_user_id=target_user_id,
@@ -2826,7 +2920,7 @@ class GraphService:
                         entity_id: $entity_id,
                         event_id: $event_id,
                         campaign_id: $campaign_id,
-                        message: $message,
+                        message: $normalized_message,
                         status: $status,
                         created_at: datetime(),
                         acted_at: CASE WHEN $status = "unread" THEN null ELSE datetime() END
@@ -2852,7 +2946,7 @@ class GraphService:
                     entity_id=normalized_entity_id,
                     event_id=normalized_event_id,
                     campaign_id=normalized_campaign_id,
-                    message=message,
+                    normalized_message=normalized_message,
                     status=normalized_status,
                     actor_user_id=actor_user_id,
                     target_user_id=target_user_id,

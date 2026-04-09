@@ -19,6 +19,7 @@ class NotificationItem(BaseModel):
     target_display_name: Optional[str] = None
     type: str
     entity_id: Optional[str] = None
+    event_id: Optional[str] = None
     campaign_id: Optional[str] = None
     message: str
     status: Literal["unread", "read", "completed"]
