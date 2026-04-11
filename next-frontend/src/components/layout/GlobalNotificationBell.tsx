@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
-import { usePathname, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { Bell, CheckCircle2 } from "lucide-react";
 import { apiFetch } from "@app/lib/api";
 
@@ -34,6 +34,14 @@ interface CampaignsResponse {
   campaigns: BackendCampaign[];
 }
 
+interface CampaignNameCachePayload {
+  expiresAt: number;
+  map: Record<string, string>;
+}
+
+const CAMPAIGN_NAME_CACHE_TTL_MS = 10 * 60 * 1000;
+const UNREAD_REFRESH_INTERVAL_MS = 60 * 1000;
+
 function notificationTimeLabel(iso?: string | null): string {
   if (!iso) return "Just now";
   const date = new Date(iso);
@@ -62,7 +70,6 @@ export function GlobalNotificationBell() {
   const { getToken, isLoaded } = useAuth();
   const { user } = useUser();
   const router = useRouter();
-  const pathname = usePathname();
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   const [isOpen, setIsOpen] = useState(false);
@@ -73,6 +80,8 @@ export function GlobalNotificationBell() {
   const [dismissLoadingId, setDismissLoadingId] = useState<string | null>(null);
   const [decisionLoadingId, setDecisionLoadingId] = useState<string | null>(null);
   const [campaignNameById, setCampaignNameById] = useState<Record<string, string>>({});
+
+  const campaignNameCacheKey = user?.id ? `global-notification-campaign-name-map:${user.id}` : null;
 
   const resolveCampaignName = (campaignId?: string | null): string | null => {
     const id = String(campaignId || "").trim();
@@ -143,10 +152,30 @@ export function GlobalNotificationBell() {
     }
   };
 
-  const refreshCampaignNameMap = async () => {
+  const refreshCampaignNameMap = async (opts?: { force?: boolean }) => {
     if (!isLoaded || !user?.id) {
       setCampaignNameById({});
       return;
+    }
+    if (!opts?.force && campaignNameCacheKey) {
+      try {
+        const raw = window.localStorage.getItem(campaignNameCacheKey);
+        if (raw) {
+          const parsed = JSON.parse(raw) as CampaignNameCachePayload;
+          if (
+            parsed &&
+            typeof parsed.expiresAt === "number" &&
+            parsed.expiresAt > Date.now() &&
+            parsed.map &&
+            typeof parsed.map === "object"
+          ) {
+            setCampaignNameById(parsed.map);
+            return;
+          }
+        }
+      } catch {
+        // Ignore malformed cache values and continue with network fetch.
+      }
     }
     try {
       const token = await getToken();
@@ -162,6 +191,13 @@ export function GlobalNotificationBell() {
         if (id && name) nextMap[id] = name;
       }
       setCampaignNameById(nextMap);
+      if (campaignNameCacheKey) {
+        const payload: CampaignNameCachePayload = {
+          expiresAt: Date.now() + CAMPAIGN_NAME_CACHE_TTL_MS,
+          map: nextMap,
+        };
+        window.localStorage.setItem(campaignNameCacheKey, JSON.stringify(payload));
+      }
     } catch {
       // Keep previous name map on transient failures.
     }
@@ -169,11 +205,31 @@ export function GlobalNotificationBell() {
 
   useEffect(() => {
     void refreshUnreadCount();
-  }, [isLoaded, user?.id, getToken, pathname]);
+  }, [isLoaded, user?.id, getToken]);
 
   useEffect(() => {
     void refreshCampaignNameMap();
-  }, [isLoaded, user?.id, getToken, pathname]);
+  }, [isLoaded, user?.id, getToken, campaignNameCacheKey]);
+
+  useEffect(() => {
+    if (!isLoaded || !user?.id) return;
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") {
+        void refreshUnreadCount();
+      }
+    };
+    const intervalId = window.setInterval(refreshIfVisible, UNREAD_REFRESH_INTERVAL_MS);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        void refreshUnreadCount();
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [isLoaded, user?.id, getToken]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -191,7 +247,12 @@ export function GlobalNotificationBell() {
   const toggleOpen = () => {
     const nextOpen = !isOpen;
     setIsOpen(nextOpen);
-    if (nextOpen) void refreshNotifications();
+    if (nextOpen) {
+      void refreshNotifications();
+      // Campaign names are cached with a TTL, so opening the bell only refetches when stale.
+      void refreshCampaignNameMap();
+      void refreshUnreadCount();
+    }
   };
 
   const handleNotificationMarkRead = async (notificationId: string) => {

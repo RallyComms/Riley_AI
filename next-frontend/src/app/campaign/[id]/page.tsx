@@ -133,6 +133,7 @@ export default function CampaignOverviewPage() {
 
   useEffect(() => {
     let mounted = true;
+    let intervalId: number | null = null;
     const fetchEvents = async () => {
       if (!isLoaded || !campaignId) return;
       try {
@@ -152,17 +153,42 @@ export default function CampaignOverviewPage() {
         console.error("Failed to load campaign activity events:", err);
       }
     };
-    fetchEvents();
-    const interval = setInterval(fetchEvents, 15000);
+
+    const stopPolling = () => {
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+
+    const startPollingIfVisible = () => {
+      if (document.visibilityState !== "visible") {
+        stopPolling();
+        return;
+      }
+      if (intervalId !== null) return;
+      intervalId = window.setInterval(() => {
+        void fetchEvents();
+      }, 30000);
+    };
+
+    if (document.visibilityState === "visible") {
+      void fetchEvents();
+    }
+    startPollingIfVisible();
+
     const handleVisibility = () => {
       if (document.visibilityState === "visible") {
-        fetchEvents();
+        void fetchEvents();
+        startPollingIfVisible();
+      } else {
+        stopPolling();
       }
     };
     document.addEventListener("visibilitychange", handleVisibility);
     return () => {
       mounted = false;
-      clearInterval(interval);
+      stopPolling();
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, [campaignId, getToken, isLoaded]);

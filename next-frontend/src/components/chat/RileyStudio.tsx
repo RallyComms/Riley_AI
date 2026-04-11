@@ -157,6 +157,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [openSourcesByMessageId, setOpenSourcesByMessageId] = useState<Record<string, boolean>>({});
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [isSubmittingReport, setIsSubmittingReport] = useState(false);
+  const [hasInFlightReportJobs, setHasInFlightReportJobs] = useState(false);
   const [reportType, setReportType] = useState<
     "summary" | "strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief"
   >("summary");
@@ -172,6 +173,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
   const skipNextHistoryLoadConversationIdRef = useRef<string | null>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
   
   // Check if this is Global Riley (Imperial Amber theme)
   const isGlobal = tenantId === "global";
@@ -186,6 +188,10 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: instantScrollRef.current ? "auto" : "smooth" });
   }, [messages]);
+
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
 
   // Load persisted conversation list for this tenant/user scope.
   useEffect(() => {
@@ -396,16 +402,27 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         string,
         "queued" | "processing" | "cancelling" | "cancelled" | "complete" | "failed" | "deleted"
       > = {};
+      let nextHasInFlightReportJobs = false;
       visibleMapped.forEach((job) => {
         nextStatuses[job.reportJobId] = job.status;
+        if (job.status === "queued" || job.status === "processing" || job.status === "cancelling") {
+          nextHasInFlightReportJobs = true;
+        }
       });
       knownReportStatusRef.current = nextStatuses;
+      setHasInFlightReportJobs(nextHasInFlightReportJobs);
       // Add concise chat notifications for relevant status transitions.
       for (const job of visibleMapped) {
         const previous = previousStatuses[job.reportJobId];
         if (previous === undefined) continue;
         if (previous === job.status) continue;
-        if (job.conversationId && activeConversationId && job.conversationId !== activeConversationId) continue;
+        if (
+          job.conversationId &&
+          activeConversationIdRef.current &&
+          job.conversationId !== activeConversationIdRef.current
+        ) {
+          continue;
+        }
         if (job.status === "complete") {
           setMessages((prev) => {
             const messageId = `report-complete-${job.reportJobId}`;
@@ -445,19 +462,57 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     if (isGlobal || !tenantId || !authLoaded || !userLoaded || !user) return;
     let cancelled = false;
     let intervalId: number | null = null;
-    const poll = async () => {
+
+    const stopPolling = () => {
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+        intervalId = null;
+      }
+    };
+
+    const pollOnce = async () => {
       if (cancelled) return;
       await loadReportJobs({ silent: true });
     };
-    void poll();
-    intervalId = window.setInterval(() => {
-      void poll();
-    }, 8000);
+
+    const startPollingIfNeeded = () => {
+      if (!hasInFlightReportJobs) {
+        stopPolling();
+        return;
+      }
+      if (document.visibilityState !== "visible") {
+        stopPolling();
+        return;
+      }
+      if (intervalId !== null) return;
+      // Removed unconditional 8s polling: only poll while report jobs are actively in-flight.
+      intervalId = window.setInterval(() => {
+        void pollOnce();
+      }, 8000);
+    };
+
+    if (document.visibilityState === "visible") {
+      void pollOnce();
+    }
+    startPollingIfNeeded();
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") {
+        stopPolling();
+        return;
+      }
+      if (!hasInFlightReportJobs) return;
+      void pollOnce();
+      startPollingIfNeeded();
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+
     return () => {
       cancelled = true;
-      if (intervalId) window.clearInterval(intervalId);
+      stopPolling();
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
     };
-  }, [isGlobal, tenantId, authLoaded, userLoaded, user, getToken, activeConversationId]);
+  }, [isGlobal, tenantId, authLoaded, userLoaded, user, getToken, hasInFlightReportJobs]);
 
   const extractCitations = (content: string): SourceCitation[] => {
     if (!content) return [];
