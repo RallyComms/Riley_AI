@@ -14,7 +14,7 @@ import { apiFetch } from "@app/lib/api";
 import { cn } from "@app/lib/utils";
 
 const MAX_UPLOAD_BATCH_SIZE = 10;
-const UPLOAD_STATUS_POLL_INTERVAL_MS = 3000;
+const UPLOAD_STATUS_POLL_INTERVAL_MS = 10000;
 const UPLOAD_STATUS_MAX_POLL_MS = 180000;
 const TERMINAL_INGESTION_STATUSES = new Set(["indexed", "partial", "failed", "low_text", "ocr_needed"]);
 const TRANSIENT_INGESTION_STATUSES = new Set(["queued", "processing", "uploaded"]);
@@ -167,6 +167,13 @@ export default function CampaignAssetsPage() {
     uploadPollStartedAtRef.current = null;
   }, []);
 
+  const pauseUploadStatusPolling = useCallback(() => {
+    if (uploadPollIntervalRef.current !== null) {
+      window.clearInterval(uploadPollIntervalRef.current);
+      uploadPollIntervalRef.current = null;
+    }
+  }, []);
+
   const showToast = useCallback((kind: "success" | "error", message: string) => {
     setToast({ kind, message });
     window.setTimeout(() => {
@@ -275,9 +282,9 @@ export default function CampaignAssetsPage() {
       stopUploadStatusPolling();
       return;
     }
-    if (uploadPollIntervalRef.current !== null) return;
-
-    uploadPollStartedAtRef.current = Date.now();
+    if (uploadPollStartedAtRef.current === null) {
+      uploadPollStartedAtRef.current = Date.now();
+    }
 
     const pollOnce = async () => {
       const latestAssets = await fetchFiles();
@@ -299,11 +306,47 @@ export default function CampaignAssetsPage() {
       }
     };
 
-    void pollOnce();
-    uploadPollIntervalRef.current = window.setInterval(() => {
+    const startPollingInterval = () => {
+      if (uploadPollIntervalRef.current !== null || document.visibilityState !== "visible") {
+        return;
+      }
+      uploadPollIntervalRef.current = window.setInterval(() => {
+        void pollOnce();
+      }, UPLOAD_STATUS_POLL_INTERVAL_MS);
+    };
+
+    if (document.visibilityState === "visible") {
       void pollOnce();
-    }, UPLOAD_STATUS_POLL_INTERVAL_MS);
-  }, [areRecentUploadsSettled, fetchFiles, recentUploadedNames, stopUploadStatusPolling]);
+      startPollingInterval();
+    } else {
+      pauseUploadStatusPolling();
+    }
+
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== "visible") {
+        pauseUploadStatusPolling();
+        return;
+      }
+      void pollOnce().then(() => {
+        const trackedNames = recentUploadedNamesRef.current;
+        if (trackedNames.length === 0) return;
+        if (uploadPollStartedAtRef.current === null) return;
+        startPollingInterval();
+      });
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      pauseUploadStatusPolling();
+    };
+  }, [
+    areRecentUploadsSettled,
+    fetchFiles,
+    pauseUploadStatusPolling,
+    recentUploadedNames,
+    stopUploadStatusPolling,
+  ]);
 
   const handleUpload = () => {
     fileInputRef.current?.click();
