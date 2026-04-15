@@ -60,7 +60,7 @@ router = APIRouter()
 
 
 class ChatRequest(BaseModel):
-    query: str = Field(..., max_length=2000, description="User query text (max 2000 characters)")
+    query: str = Field(..., max_length=20000, description="User query text (max 20000 characters)")
     tenant_id: str = Field(..., max_length=50, description="Tenant/client identifier (max 50 characters)")
     # Accept legacy "normal" mode from older frontend builds and treat it as "fast".
     mode: Literal["fast", "deep", "normal"] = "fast"
@@ -138,7 +138,7 @@ class RileyConversationMessagesResponse(BaseModel):
 class CreateRileyConversationMessageRequest(BaseModel):
     tenant_id: str = Field(..., max_length=50, description="Tenant/client identifier (or 'global')")
     role: Literal["user", "model"] = Field(..., description="Message role")
-    content: str = Field(..., max_length=2000, description="Message content text")
+    content: str = Field(..., max_length=20000, description="Message content text (max 20000 characters)")
 
 
 class RileyProjectResponse(BaseModel):

@@ -5,6 +5,7 @@ from typing import Optional
 from neo4j import AsyncDriver, AsyncGraphDatabase
 
 from app.core.config import get_settings
+from app.services.graph import GraphService
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,7 @@ DEEP_DAILY_LIMIT = 10
 REPORTS_MONTHLY_LIMIT = 5
 
 _driver: Optional[AsyncDriver] = None
+_graph_service: Optional[GraphService] = None
 
 
 class LLMCostGuardrailExceeded(RuntimeError):
@@ -25,6 +27,11 @@ class UserOperationLimitExceeded(RuntimeError):
 
 
 def _get_driver() -> AsyncDriver:
+    # Prefer the application-managed GraphService driver so we do not create
+    # an unmanaged second long-lived Neo4j connection pool in API runtime.
+    if _graph_service is not None:
+        return _graph_service.driver
+
     global _driver
     if _driver is None:
         settings = get_settings()
@@ -33,6 +40,20 @@ def _get_driver() -> AsyncDriver:
             auth=(settings.NEO4J_USER, settings.NEO4J_PASSWORD),
         )
     return _driver
+
+
+def configure_guardrail_graph_service(graph: Optional[GraphService]) -> None:
+    """Configure guardrail Neo4j access to reuse app-managed GraphService."""
+    global _graph_service
+    _graph_service = graph
+
+
+async def close_guardrail_driver() -> None:
+    """Close fallback lazy Neo4j driver when one was created."""
+    global _driver
+    if _driver is not None:
+        await _driver.close()
+        _driver = None
 
 
 async def get_current_month_llm_cost_usd() -> float:

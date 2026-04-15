@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 
 from anyio import CapacityLimiter, to_thread
-from fastapi import FastAPI, Request, Depends
+from fastapi import FastAPI, Request, Depends, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -32,6 +32,10 @@ from app.dependencies.auth import verify_clerk_token, extract_tenant_id
 from app.services.graph import GraphService
 from app.services.pricing_registry import estimate_worker_runtime_cost
 from app.services.qdrant import vector_service
+from app.services.llm_cost_guardrail import (
+    configure_guardrail_graph_service,
+    close_guardrail_driver,
+)
 from app.services.request_observability import (
     classify_operation_type,
     cloud_task_retry_count,
@@ -46,6 +50,7 @@ async def lifespan(app: FastAPI):
     """Manage application lifespan: startup and shutdown events."""
     # Startup: Initialize Neo4j connection and store in app.state
     app.state.graph = GraphService()
+    configure_guardrail_graph_service(app.state.graph)
     try:
         await app.state.graph.ensure_mission_control_schema()
     except Exception as exc:
@@ -53,6 +58,18 @@ async def lifespan(app: FastAPI):
 
     # Startup: Log Qdrant connection mode
     settings = get_settings()
+    if (
+        settings.NEO4J_URI
+        and "localhost" not in settings.NEO4J_URI
+        and settings.NEO4J_USER == "neo4j"
+        and settings.NEO4J_PASSWORD == "password"
+    ):
+        logger.warning(
+            "neo4j_credentials_using_defaults uri=%s user=%s",
+            settings.NEO4J_URI,
+            settings.NEO4J_USER,
+        )
+
     if settings.QDRANT_URL:
         # Sanitize URL for logging (remove API key if accidentally included)
         sanitized_url = settings.QDRANT_URL.split("?")[0]  # Remove query params
@@ -87,6 +104,8 @@ async def lifespan(app: FastAPI):
     
     yield
     # Shutdown: Close Neo4j connection
+    configure_guardrail_graph_service(None)
+    await close_guardrail_driver()
     if hasattr(app.state, "graph") and app.state.graph:
         await app.state.graph.close()
 
@@ -301,6 +320,25 @@ async def healthz():
     Returns a simple status to indicate the service is running.
     """
     return {"status": "ok"}
+
+
+@app.get("/healthz/graph")
+async def healthz_graph(request: Request):
+    """Lightweight graph readiness probe for Neo4j cutover verification."""
+    graph = getattr(request.app.state, "graph", None)
+    if graph is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Graph service not initialized",
+        )
+    try:
+        await graph.verify_connectivity()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Neo4j connectivity check failed: {exc}",
+        ) from exc
+    return {"status": "ok", "graph": "reachable"}
 
 
 @app.exception_handler(Exception)

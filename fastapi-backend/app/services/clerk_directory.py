@@ -217,10 +217,7 @@ def find_user_by_id(user_id: str) -> Optional[Dict[str, str]]:
     settings = get_settings()
     secret_key = getattr(settings, "CLERK_SECRET_KEY", None)
     if not secret_key:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Clerk secret key not configured. Set CLERK_SECRET_KEY environment variable."
-        )
+        return None
 
     normalized_user_id = (user_id or "").strip()
     if not normalized_user_id:

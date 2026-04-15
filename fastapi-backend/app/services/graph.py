@@ -96,6 +96,10 @@ class GraphService:
         if self._driver:
             await self._driver.close()
 
+    async def verify_connectivity(self) -> None:
+        """Verify the configured Neo4j endpoint is reachable."""
+        await self._driver.verify_connectivity()
+
     async def ensure_mission_control_schema(self) -> None:
         """Create high-value indexes/constraints for Mission Control analytics paths."""
         statements = [

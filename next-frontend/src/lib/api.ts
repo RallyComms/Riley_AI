@@ -126,6 +126,18 @@ export async function apiFetch<T = any>(
         const bodyObject = parsedBody as Record<string, unknown>;
         if (typeof bodyObject.detail === "string" && bodyObject.detail.trim()) {
           errorDetail = `HTTP ${response.status}: ${bodyObject.detail}`;
+        } else if (Array.isArray(bodyObject.detail) && bodyObject.detail.length > 0) {
+          const firstDetail = bodyObject.detail[0];
+          if (typeof firstDetail === "string" && firstDetail.trim()) {
+            errorDetail = `HTTP ${response.status}: ${firstDetail}`;
+          } else if (firstDetail && typeof firstDetail === "object") {
+            const detailObject = firstDetail as Record<string, unknown>;
+            if (typeof detailObject.msg === "string" && detailObject.msg.trim()) {
+              errorDetail = `HTTP ${response.status}: ${detailObject.msg}`;
+            } else {
+              errorDetail = `HTTP ${response.status}: ${JSON.stringify(firstDetail)}`;
+            }
+          }
         } else if (typeof bodyObject.message === "string" && bodyObject.message.trim()) {
           errorDetail = `HTTP ${response.status}: ${bodyObject.message}`;
         } else {
