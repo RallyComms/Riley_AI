@@ -6,7 +6,7 @@ import { useAuth, useUser } from "@clerk/nextjs";
 import { Users, FileText, Calendar, Plus, X } from "lucide-react";
 import { cn } from "@app/lib/utils";
 import { useCampaignName } from "@app/lib/useCampaignName";
-import { apiFetch } from "@app/lib/api";
+import { apiFetch, getApiBaseUrl } from "@app/lib/api";
 
 interface CampaignEventItem {
   id: string;
@@ -133,9 +133,18 @@ export default function CampaignOverviewPage() {
 
   useEffect(() => {
     let mounted = true;
-    let intervalId: number | null = null;
+    let streamAbortController: AbortController | null = null;
+    let reconnectTimeoutId: number | null = null;
+    let reconnectAttempt = 0;
+    let fetchInFlight = false;
+    let shouldRefetchAfterCurrent = false;
     const fetchEvents = async () => {
       if (!isLoaded || !campaignId) return;
+      if (fetchInFlight) {
+        shouldRefetchAfterCurrent = true;
+        return;
+      }
+      fetchInFlight = true;
       try {
         const token = await getToken();
         if (!token) return;
@@ -151,47 +160,152 @@ export default function CampaignOverviewPage() {
         }
       } catch (err) {
         console.error("Failed to load campaign activity events:", err);
+      } finally {
+        fetchInFlight = false;
+        if (shouldRefetchAfterCurrent) {
+          shouldRefetchAfterCurrent = false;
+          void fetchEvents();
+        }
       }
     };
 
-    const stopPolling = () => {
-      if (intervalId !== null) {
-        window.clearInterval(intervalId);
-        intervalId = null;
+    const clearReconnectTimeout = () => {
+      if (reconnectTimeoutId !== null) {
+        window.clearTimeout(reconnectTimeoutId);
+        reconnectTimeoutId = null;
       }
     };
 
-    const startPollingIfVisible = () => {
-      if (document.visibilityState !== "visible") {
-        stopPolling();
+    const stopStream = () => {
+      clearReconnectTimeout();
+      if (streamAbortController) {
+        streamAbortController.abort();
+        streamAbortController = null;
+      }
+    };
+
+    const scheduleReconnect = () => {
+      if (!mounted || document.visibilityState !== "visible") return;
+      clearReconnectTimeout();
+      const delayMs = Math.min(30000, 1000 * 2 ** reconnectAttempt);
+      reconnectAttempt += 1;
+      reconnectTimeoutId = window.setTimeout(() => {
+        void startStream();
+      }, delayMs);
+    };
+
+    const processSseEventBlock = (rawBlock: string) => {
+      const normalizedBlock = rawBlock.replace(/\r/g, "");
+      const lines = normalizedBlock.split("\n");
+      let eventName = "message";
+      const dataLines: string[] = [];
+      for (const line of lines) {
+        if (!line || line.startsWith(":")) continue;
+        if (line.startsWith("event:")) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith("data:")) {
+          dataLines.push(line.slice(5).trimStart());
+        }
+      }
+      if (eventName !== "campaign_event_update") return;
+      if (dataLines.length === 0) return;
+      try {
+        JSON.parse(dataLines.join("\n"));
+      } catch {
         return;
       }
-      if (intervalId !== null) return;
-      intervalId = window.setInterval(() => {
-        void fetchEvents();
-      }, 120000);
+      void fetchEvents();
     };
 
-    if (document.visibilityState === "visible") {
+    const startStream = async () => {
+      if (!mounted || !isLoaded || !campaignId || document.visibilityState !== "visible") return;
+      if (streamAbortController) return;
+      let controller: AbortController | null = null;
+      try {
+        const token = await getToken();
+        if (!token) {
+          scheduleReconnect();
+          return;
+        }
+        controller = new AbortController();
+        streamAbortController = controller;
+        const response = await fetch(
+          `${getApiBaseUrl()}/api/v1/campaigns/${campaignId}/events/stream`,
+          {
+            method: "GET",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: "text/event-stream",
+            },
+            signal: controller.signal,
+            cache: "no-store",
+          }
+        );
+        if (!response.ok || !response.body) {
+          throw new Error(`SSE request failed with status ${response.status}`);
+        }
+
+        reconnectAttempt = 0;
+        let buffer = "";
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        while (mounted && !controller.signal.aborted) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          let boundaryMatch = buffer.match(/\r?\n\r?\n/);
+          while (boundaryMatch && typeof boundaryMatch.index === "number") {
+            const boundaryIndex = boundaryMatch.index;
+            const eventBlock = buffer.slice(0, boundaryIndex);
+            buffer = buffer.slice(boundaryIndex + boundaryMatch[0].length);
+            processSseEventBlock(eventBlock);
+            boundaryMatch = buffer.match(/\r?\n\r?\n/);
+          }
+        }
+        if (mounted && !controller.signal.aborted) {
+          scheduleReconnect();
+        }
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return;
+        }
+        console.error("Campaign events SSE connection failed:", err);
+        scheduleReconnect();
+      } finally {
+        if (controller && streamAbortController === controller) {
+          streamAbortController = null;
+        }
+      }
+    };
+
+    const startVisibleLifecycle = () => {
+      if (document.visibilityState !== "visible") return;
       void fetchEvents();
-    }
-    startPollingIfVisible();
+      void startStream();
+    };
+    startVisibleLifecycle();
 
     const handleVisibility = () => {
       if (document.visibilityState === "visible") {
-        void fetchEvents();
-        startPollingIfVisible();
+        startVisibleLifecycle();
       } else {
-        stopPolling();
+        stopStream();
+      }
+    };
+    const handleWindowFocus = () => {
+      if (document.visibilityState === "visible") {
+        void fetchEvents();
       }
     };
     document.addEventListener("visibilitychange", handleVisibility);
+    window.addEventListener("focus", handleWindowFocus);
     return () => {
       mounted = false;
-      stopPolling();
+      stopStream();
       document.removeEventListener("visibilitychange", handleVisibility);
+      window.removeEventListener("focus", handleWindowFocus);
     };
-  }, [campaignId, isLoaded]);
+  }, [campaignId, getToken, isLoaded]);
 
   useEffect(() => {
     const fetchTeamMembers = async () => {

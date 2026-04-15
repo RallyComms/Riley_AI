@@ -2121,7 +2121,9 @@ class GraphService:
                 name: $name,
                 description: $description,
                 status: "active",
-                created_at: datetime()
+                created_at: datetime(),
+                events_version: 0,
+                events_updated_at: datetime()
             })
             CREATE (u)-[:MEMBER_OF {
                 role: "Lead",
@@ -3078,6 +3080,7 @@ class GraphService:
         event_id = str(uuid.uuid4())
         async with self._driver.session() as session:
             query = """
+            MATCH (c:Campaign {id: $campaign_id})
             CREATE (e:CampaignEvent {
                 id: $event_id,
                 campaign_id: $campaign_id,
@@ -3088,8 +3091,12 @@ class GraphService:
                 request_id: $request_id,
                 created_at: datetime()
             })
+            SET
+                c.events_version = coalesce(c.events_version, 0) + 1,
+                c.events_updated_at = datetime()
+            RETURN c.id as campaign_id
             """
-            await session.run(
+            result = await session.run(
                 query,
                 event_id=event_id,
                 campaign_id=campaign_id,
@@ -3099,6 +3106,9 @@ class GraphService:
                 actor_user_id=actor_user_id,
                 request_id=request_id,
             )
+            record = await result.single()
+            if not record:
+                raise ValueError(f"Campaign {campaign_id} not found")
         logger.info(
             "notification_created event_id=%s type=%s campaign_id=%s target_user_id=%s actor_user_id=%s",
             event_id, event_type, campaign_id, user_id, actor_user_id,
@@ -3143,6 +3153,32 @@ class GraphService:
                     campaign_id,
                     user_id,
                 )
+
+    async def get_campaign_event_stream_state(self, campaign_id: str) -> Dict[str, Any]:
+        """Read campaign event-stream version marker for SSE polling."""
+        async with self._driver.session() as session:
+            result = await session.run(
+                """
+                MATCH (c:Campaign {id: $campaign_id})
+                RETURN
+                    coalesce(c.events_version, 0) as events_version,
+                    toString(
+                        coalesce(
+                            c.events_updated_at,
+                            c.created_at,
+                            datetime()
+                        )
+                    ) as events_updated_at
+                """,
+                campaign_id=campaign_id,
+            )
+            record = await result.single()
+            if not record:
+                raise ValueError(f"Campaign {campaign_id} not found")
+            return {
+                "events_version": int(record.get("events_version") or 0),
+                "events_updated_at": record.get("events_updated_at") or now_iso_utc(),
+            }
 
     async def create_campaign_deadline(
         self,

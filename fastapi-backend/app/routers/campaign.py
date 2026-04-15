@@ -1,7 +1,10 @@
 import logging
+import asyncio
+import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Union
-from fastapi import APIRouter, HTTPException, Depends, Query, status
+from fastapi import APIRouter, HTTPException, Depends, Query, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -15,6 +18,10 @@ from app.services.clerk_directory import find_user_by_email, find_user_by_id, se
 
 
 router = APIRouter()
+
+
+def _format_sse(event_name: str, data: Dict[str, Any]) -> str:
+    return f"event: {event_name}\ndata: {json.dumps(data)}\n\n"
 
 
 class CreateCampaignRequest(BaseModel):
@@ -580,6 +587,81 @@ async def list_campaign_events(
         tenant_id, viewer_user_id, len(events),
     )
     return CampaignEventsResponse(events=[CampaignEventItem(**item) for item in events])
+
+
+@router.get("/campaigns/{tenant_id}/events/stream")
+async def stream_campaign_event_updates(
+    tenant_id: str,
+    request: Request,
+    _current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> StreamingResponse:
+    """Stream campaign activity update signals as SSE notifications."""
+    async def event_generator():
+        poll_interval_seconds = 3
+        heartbeat_interval_seconds = 30
+        last_heartbeat_at = asyncio.get_running_loop().time()
+        try:
+            stream_state = await graph.get_campaign_event_stream_state(tenant_id)
+            last_seen_version = int(stream_state.get("events_version") or 0)
+        except ValueError:
+            return
+        except Exception:
+            logger.exception(
+                "campaign_event_stream_init_failed campaign_id=%s",
+                tenant_id,
+            )
+            return
+
+        yield _format_sse(
+            "campaign_event_stream_ready",
+            {
+                "campaign_id": tenant_id,
+                "version": last_seen_version,
+                "ts": stream_state.get("events_updated_at") or datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        while True:
+            if await request.is_disconnected():
+                break
+            try:
+                stream_state = await graph.get_campaign_event_stream_state(tenant_id)
+                current_version = int(stream_state.get("events_version") or 0)
+                if current_version > last_seen_version:
+                    last_seen_version = current_version
+                    yield _format_sse(
+                        "campaign_event_update",
+                        {
+                            "campaign_id": tenant_id,
+                            "version": current_version,
+                            "ts": stream_state.get("events_updated_at")
+                            or datetime.now(timezone.utc).isoformat(),
+                        },
+                    )
+                now_monotonic = asyncio.get_running_loop().time()
+                if now_monotonic - last_heartbeat_at >= heartbeat_interval_seconds:
+                    # Lightweight heartbeat to keep proxies from closing idle streams.
+                    last_heartbeat_at = now_monotonic
+                    yield ": ping\n\n"
+            except ValueError:
+                break
+            except Exception:
+                logger.exception(
+                    "campaign_event_stream_poll_failed campaign_id=%s",
+                    tenant_id,
+                )
+                yield ": ping\n\n"
+            await asyncio.sleep(poll_interval_seconds)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/campaigns/events/feed", response_model=UserCampaignFeedResponse)
