@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { useParams } from "next/navigation";
 import { useAuth } from "@clerk/nextjs";
 import { Upload, Loader2 } from "lucide-react";
@@ -15,9 +15,10 @@ import { cn } from "@app/lib/utils";
 
 const MAX_UPLOAD_BATCH_SIZE = 10;
 const UPLOAD_STATUS_POLL_INTERVAL_MS = 10000;
-const UPLOAD_STATUS_MAX_POLL_MS = 180000;
 const TERMINAL_INGESTION_STATUSES = new Set(["indexed", "partial", "failed", "low_text", "ocr_needed"]);
 const TRANSIENT_INGESTION_STATUSES = new Set(["queued", "processing", "uploaded"]);
+const TRANSIENT_MULTIMODAL_STATUSES = new Set(["pending", "ocr_attempted"]);
+const TRANSIENT_AUX_STATUSES = new Set(["queued", "processing"]);
 
 type UploadStatusItem = {
   fileName: string;
@@ -150,7 +151,6 @@ export default function CampaignAssetsPage() {
   const [toast, setToast] = useState<{ kind: "success" | "error"; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const uploadPollIntervalRef = useRef<number | null>(null);
-  const uploadPollStartedAtRef = useRef<number | null>(null);
   const recentUploadedNamesRef = useRef<string[]>([]);
 
   const normalizeFilename = useCallback((name: string) => name.trim().toLowerCase(), []);
@@ -164,7 +164,6 @@ export default function CampaignAssetsPage() {
       window.clearInterval(uploadPollIntervalRef.current);
       uploadPollIntervalRef.current = null;
     }
-    uploadPollStartedAtRef.current = null;
   }, []);
 
   const pauseUploadStatusPolling = useCallback(() => {
@@ -257,6 +256,36 @@ export default function CampaignAssetsPage() {
     };
   }, [stopUploadStatusPolling]);
 
+  const normalizeStatus = useCallback((status: unknown) => String(status || "").trim().toLowerCase(), []);
+
+  const isAssetInProcessingState = useCallback(
+    (asset: Asset): boolean => {
+      const ingestionStatus = normalizeStatus(asset.ingestionStatus);
+      if (TRANSIENT_INGESTION_STATUSES.has(ingestionStatus)) return true;
+      if (ingestionStatus && !TERMINAL_INGESTION_STATUSES.has(ingestionStatus)) return true;
+
+      const ocrStatus = normalizeStatus(asset.ocrStatus);
+      if (TRANSIENT_AUX_STATUSES.has(ocrStatus)) return true;
+
+      const visionStatus = normalizeStatus(asset.visionStatus);
+      if (TRANSIENT_AUX_STATUSES.has(visionStatus)) return true;
+
+      const previewStatus = normalizeStatus(asset.previewStatus);
+      if (TRANSIENT_AUX_STATUSES.has(previewStatus)) return true;
+
+      const multimodalStatus = normalizeStatus(asset.multimodalStatus);
+      if (TRANSIENT_MULTIMODAL_STATUSES.has(multimodalStatus)) return true;
+
+      return asset.status === "processing";
+    },
+    [normalizeStatus]
+  );
+
+  const hasVisibleAssetsProcessing = useMemo(
+    () => assets.some((asset) => isAssetInProcessingState(asset)),
+    [assets, isAssetInProcessingState]
+  );
+
   const areRecentUploadsSettled = useCallback(
     (latestAssets: Asset[], trackedNames: string[]): boolean => {
       if (trackedNames.length === 0) return true;
@@ -268,42 +297,34 @@ export default function CampaignAssetsPage() {
       for (const rawName of trackedNames) {
         const asset = byName.get(normalizeFilename(rawName));
         if (!asset) return false;
-        const status = String(asset.ingestionStatus || "uploaded").toLowerCase();
-        if (TRANSIENT_INGESTION_STATUSES.has(status)) return false;
-        if (!TERMINAL_INGESTION_STATUSES.has(status)) return false;
+        if (isAssetInProcessingState(asset)) return false;
       }
       return true;
     },
-    [normalizeFilename]
+    [isAssetInProcessingState, normalizeFilename]
   );
 
   useEffect(() => {
-    if (recentUploadedNames.length === 0) {
+    if (recentUploadedNames.length === 0 && !hasVisibleAssetsProcessing) {
       stopUploadStatusPolling();
       return;
     }
-    if (uploadPollStartedAtRef.current === null) {
-      uploadPollStartedAtRef.current = Date.now();
-    }
 
-    const pollOnce = async () => {
+    const pollOnce = async (): Promise<boolean> => {
       const latestAssets = await fetchFiles();
       const trackedNames = recentUploadedNamesRef.current;
-      if (trackedNames.length === 0) {
-        stopUploadStatusPolling();
-        return;
-      }
-      if (areRecentUploadsSettled(latestAssets, trackedNames)) {
-        stopUploadStatusPolling();
+      const recentUploadsSettled = areRecentUploadsSettled(latestAssets, trackedNames);
+      if (trackedNames.length > 0 && recentUploadsSettled) {
         setRecentUploadedNames([]);
-        return;
       }
-      if (
-        uploadPollStartedAtRef.current !== null &&
-        Date.now() - uploadPollStartedAtRef.current > UPLOAD_STATUS_MAX_POLL_MS
-      ) {
+
+      const hasProcessingAssets = latestAssets.some((asset) => isAssetInProcessingState(asset));
+      if (!hasProcessingAssets && (trackedNames.length === 0 || recentUploadsSettled)) {
         stopUploadStatusPolling();
+        return false;
       }
+
+      return true;
     };
 
     const startPollingInterval = () => {
@@ -316,8 +337,10 @@ export default function CampaignAssetsPage() {
     };
 
     if (document.visibilityState === "visible") {
-      void pollOnce();
-      startPollingInterval();
+      void pollOnce().then((shouldContinue) => {
+        if (!shouldContinue) return;
+        startPollingInterval();
+      });
     } else {
       pauseUploadStatusPolling();
     }
@@ -327,10 +350,8 @@ export default function CampaignAssetsPage() {
         pauseUploadStatusPolling();
         return;
       }
-      void pollOnce().then(() => {
-        const trackedNames = recentUploadedNamesRef.current;
-        if (trackedNames.length === 0) return;
-        if (uploadPollStartedAtRef.current === null) return;
+      void pollOnce().then((shouldContinue) => {
+        if (!shouldContinue) return;
         startPollingInterval();
       });
     };
@@ -343,6 +364,8 @@ export default function CampaignAssetsPage() {
   }, [
     areRecentUploadsSettled,
     fetchFiles,
+    hasVisibleAssetsProcessing,
+    isAssetInProcessingState,
     pauseUploadStatusPolling,
     recentUploadedNames,
     stopUploadStatusPolling,
