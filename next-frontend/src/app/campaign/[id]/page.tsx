@@ -169,7 +169,7 @@ export default function CampaignOverviewPage() {
       if (intervalId !== null) return;
       intervalId = window.setInterval(() => {
         void fetchEvents();
-      }, 30000);
+      }, 120000);
     };
 
     if (document.visibilityState === "visible") {
@@ -191,7 +191,7 @@ export default function CampaignOverviewPage() {
       stopPolling();
       document.removeEventListener("visibilitychange", handleVisibility);
     };
-  }, [campaignId, getToken, isLoaded]);
+  }, [campaignId, isLoaded]);
 
   useEffect(() => {
     const fetchTeamMembers = async () => {
