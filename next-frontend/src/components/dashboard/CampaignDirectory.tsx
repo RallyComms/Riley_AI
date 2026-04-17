@@ -108,6 +108,7 @@ function mapBackendToFrontend(backendCampaign: BackendCampaign, index: number): 
 interface CampaignDirectoryProps {
   isOpen: boolean;
   onClose: () => void;
+  variant?: "modal" | "embedded";
   userCampaigns?: UserCampaign[];
   archivedCampaigns?: UserCampaign[];
   onEnterCampaign?: (campaignId: string) => void;
@@ -123,6 +124,7 @@ interface CampaignDirectoryProps {
 export function CampaignDirectory({
   isOpen,
   onClose,
+  variant = "modal",
   onEnterCampaign,
   onRequestAccess,
   onArchive,
@@ -212,19 +214,29 @@ export function CampaignDirectory({
     return "bg-[#f3e3c2] text-[#6a4b20]";
   };
 
-  if (!isOpen) return null;
+  if (variant === "modal" && !isOpen) return null;
 
-  return (
-    <AnimatePresence>
-      <div className="fixed inset-0 z-50 bg-[#f8f5ef]">
-        <motion.div
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 6 }}
-          transition={{ duration: 0.2 }}
-          className="h-full overflow-y-auto"
+  const shell = (
+    <div
+      className={
+        variant === "modal"
+          ? "fixed inset-0 z-50 bg-[#f8f5ef]"
+          : "w-full rounded-2xl border border-[#e3dac8] bg-[#f8f5ef]"
+      }
+    >
+      <motion.div
+        initial={{ opacity: 0, y: 6 }}
+        animate={{ opacity: 1, y: 0 }}
+        exit={{ opacity: 0, y: 6 }}
+        transition={{ duration: 0.2 }}
+        className={variant === "modal" ? "h-full overflow-y-auto" : "h-full"}
+      >
+        <div
+          className={cn(
+            "mx-auto flex w-full max-w-6xl flex-col",
+            variant === "modal" ? "h-full px-8 py-6" : "px-4 py-5 lg:px-6",
+          )}
         >
-          <div className="mx-auto flex h-full w-full max-w-6xl flex-col px-8 py-6">
             <div className="flex items-center justify-between border-b border-[#e3dac8] pb-4">
               <div className="flex items-center gap-3">
                 <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-[#ece4d4] text-[#2a3d64]">
@@ -245,13 +257,15 @@ export function CampaignDirectory({
                   </p>
                 </div>
               </div>
-              <button
-                type="button"
-                onClick={onClose}
-                className="rounded-md p-1.5 text-[#6f788a] transition hover:bg-[#efe6d7] hover:text-[#1f2a44]"
-              >
-                <X className="h-5 w-5" />
-              </button>
+              {variant === "modal" ? (
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="rounded-md p-1.5 text-[#6f788a] transition hover:bg-[#efe6d7] hover:text-[#1f2a44]"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              ) : null}
             </div>
 
             <div className="mt-4 flex items-center gap-2 border-b border-[#e3dac8]">
@@ -336,7 +350,7 @@ export function CampaignDirectory({
                   ) : null}
                 </div>
 
-                <div className="mt-6 flex-1 overflow-y-auto pb-8">
+                <div className={cn("mt-6 pb-8", variant === "modal" ? "flex-1 overflow-y-auto" : "")}>
                   {isLoading ? (
                     <div className="flex flex-col items-center justify-center py-12">
                       <Loader2 className="mb-4 h-8 w-8 animate-spin text-[#d4ad47]" />
@@ -458,20 +472,27 @@ export function CampaignDirectory({
                 </div>
               </>
             ) : (
-              <div className="mt-6 flex-1 overflow-y-auto rounded-xl bg-white p-4 shadow-[0_1px_3px_rgba(31,42,68,0.08)]">
+              <div
+                className={cn(
+                  "mt-6 rounded-xl bg-white p-4 shadow-[0_1px_3px_rgba(31,42,68,0.08)]",
+                  variant === "modal" ? "flex-1 overflow-y-auto" : "",
+                )}
+              >
                 <GlobalDocsList onViewDocument={onViewDocument} />
               </div>
             )}
-          </div>
-        </motion.div>
+        </div>
+      </motion.div>
 
-        <AccessRequestModal
-          isOpen={!!requestingCampaign}
-          campaignName={requestingCampaign?.name || ""}
-          onClose={() => setRequestingCampaign(null)}
-          onSubmit={handleRequestAccess}
-        />
-      </div>
-    </AnimatePresence>
+      <AccessRequestModal
+        isOpen={!!requestingCampaign}
+        campaignName={requestingCampaign?.name || ""}
+        onClose={() => setRequestingCampaign(null)}
+        onSubmit={handleRequestAccess}
+      />
+    </div>
   );
+
+  if (variant === "embedded") return shell;
+  return <AnimatePresence>{shell}</AnimatePresence>;
 }

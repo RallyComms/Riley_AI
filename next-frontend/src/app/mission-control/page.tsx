@@ -1,9 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import Link from "next/link";
 import { useAuth } from "@clerk/nextjs";
-import { Activity, AlertTriangle, BarChart3, ChevronRight, DollarSign, ShieldCheck, Users } from "lucide-react";
+import { Activity, AlertTriangle, BarChart3, DollarSign, ShieldCheck, Users } from "lucide-react";
 import { apiFetch, ApiRequestError } from "@app/lib/api";
 
 type MissionControlTab =
@@ -1579,8 +1578,7 @@ export default function MissionControlPage() {
   }, [getToken, resolvingFailureIds, system.recent_failures]);
 
   return (
-    <div className="min-h-screen bg-slate-100 text-slate-900">
-      <div className="mx-auto max-w-7xl px-6 py-8">
+    <div className="mx-auto w-full max-w-7xl py-2 text-slate-900">
         <header className="mb-8 flex items-center justify-between">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500">Admin Surface</p>
@@ -1616,13 +1614,6 @@ export default function MissionControlPage() {
             >
               Refresh
             </button>
-            <Link
-              href="/"
-              className="inline-flex items-center gap-1 rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
-            >
-              Back to Riley
-              <ChevronRight className="h-4 w-4" />
-            </Link>
           </div>
         </header>
 
@@ -2521,7 +2512,6 @@ export default function MissionControlPage() {
             </section>
           </>
         )}
-      </div>
     </div>
   );
 }

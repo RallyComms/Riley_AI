@@ -1,12 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useAuth, useUser, UserButton } from "@clerk/nextjs";
-import { usePathname, useRouter } from "next/navigation";
-import { Archive, BarChart3, BookOpen, Compass, Globe, LayoutDashboard, Plus, Shield } from "lucide-react";
-import { CreateCampaignModal } from "@app/components/dashboard/CreateCampaignModal";
-import { CampaignDirectory } from "@app/components/dashboard/CampaignDirectory";
-import { GlobalNotificationBell } from "@app/components/layout/GlobalNotificationBell";
+import { useAuth, useUser } from "@clerk/nextjs";
+import { useRouter } from "next/navigation";
+import { Archive } from "lucide-react";
 import { apiFetch } from "@app/lib/api";
 
 interface BackendCampaign {
@@ -40,17 +37,6 @@ interface CampaignMembersResponse {
 interface TeamMeta {
   count: number;
   names: string[];
-}
-
-interface CampaignBucket {
-  name: string;
-  role: string;
-  lastActive: string;
-  mentions: number;
-  pendingRequests: number;
-  userRole: "Lead" | "Member";
-  themeColor: string;
-  campaignId: string;
 }
 
 interface UserCampaign {
@@ -92,19 +78,6 @@ function mapBackendToUserCampaign(campaign: BackendCampaign, index: number): Use
     description: campaign.description,
     activityAt: campaign.last_activity_at ?? campaign.updated_at ?? campaign.created_at ?? null,
     status: campaign.status,
-  };
-}
-
-function mapUserCampaignToBucket(campaign: UserCampaign): CampaignBucket {
-  return {
-    name: campaign.name,
-    role: campaign.role,
-    lastActive: campaign.lastActive,
-    mentions: campaign.mentions,
-    pendingRequests: campaign.pendingRequests ?? 0,
-    userRole: campaign.userRole ?? "Member",
-    themeColor: campaign.themeColor,
-    campaignId: campaign.campaignId,
   };
 }
 
@@ -157,7 +130,6 @@ function getGreeting(): string {
 
 export default function HomePage() {
   const router = useRouter();
-  const pathname = usePathname();
   const { user } = useUser();
   const { getToken, isLoaded } = useAuth();
 
@@ -165,40 +137,8 @@ export default function HomePage() {
   const [teamMetaByCampaignId, setTeamMetaByCampaignId] = useState<Record<string, TeamMeta>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [isDirectoryOpen, setIsDirectoryOpen] = useState(false);
-  const [terminatingCampaignId, setTerminatingCampaignId] = useState<string | null>(null);
   const [archiveTarget, setArchiveTarget] = useState<{ id: string; name: string } | null>(null);
   const [isArchiving, setIsArchiving] = useState(false);
-  const [campaignsVersion, setCampaignsVersion] = useState(0);
-  const [canAccessMissionControl, setCanAccessMissionControl] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    async function checkMissionControlAccess() {
-      if (!isLoaded || !user?.id) return;
-      try {
-        const token = await getToken();
-        if (!token) return;
-        const result = await apiFetch<{ allowed?: boolean }>("/api/v1/mission-control/access", {
-          token,
-          method: "GET",
-        });
-        if (!cancelled) {
-          setCanAccessMissionControl(Boolean(result?.allowed));
-        }
-      } catch {
-        if (!cancelled) {
-          setCanAccessMissionControl(false);
-        }
-      }
-    }
-    void checkMissionControlAccess();
-    return () => {
-      cancelled = true;
-    };
-  }, [getToken, isLoaded, user?.id]);
 
   const refreshCampaigns = async () => {
     if (!isLoaded) return;
@@ -255,44 +195,14 @@ export default function HomePage() {
     void refreshCampaigns();
   }, [isLoaded, user?.id, getToken]);
 
-
   const visibleCampaigns = useMemo(() => {
     return directoryCampaigns.filter(
       (campaign) => campaign.access === "member" && campaign.status !== "archived",
     );
   }, [directoryCampaigns]);
 
-  const handleCampaignCreated = (newCampaign: CampaignBucket) => {
-    setDirectoryCampaigns((prev) => [
-      {
-        name: newCampaign.name,
-        role: newCampaign.role,
-        lastActive: newCampaign.lastActive,
-        mentions: newCampaign.mentions,
-        pendingRequests: newCampaign.pendingRequests,
-        userRole: newCampaign.userRole,
-        themeColor: newCampaign.themeColor,
-        campaignId: newCampaign.campaignId,
-        access: "member",
-      },
-      ...prev,
-    ]);
-    setIsCreateModalOpen(false);
-    void refreshCampaigns();
-  };
-
   const handleEnterCampaign = (campaignId: string) => {
     router.push(`/campaign/${campaignId}`);
-  };
-
-  const handleRequestAccess = async (campaignId: string, message?: string) => {
-    const token = await getToken();
-    if (!token) throw new Error("No authentication token available");
-    await apiFetch(`/api/v1/campaigns/${encodeURIComponent(campaignId)}/access-requests`, {
-      token,
-      method: "POST",
-      body: { message: message || null },
-    });
   };
 
   const handleArchive = (campaignId: string) => {
@@ -311,7 +221,6 @@ export default function HomePage() {
         method: "PATCH",
       });
       setArchiveTarget(null);
-      setCampaignsVersion((prev) => prev + 1);
       void refreshCampaigns();
     } catch (err) {
       alert(`Failed to archive campaign: ${err instanceof Error ? err.message : "Unknown error"}`);
@@ -320,232 +229,94 @@ export default function HomePage() {
     }
   };
 
-  const handleRestore = () => {
-    console.log("Restore not implemented - campaigns are managed by backend");
-  };
-
-  const handleTerminate = async (campaignId: string) => {
-    if (!confirm("Are you sure you want to permanently terminate this campaign? This cannot be undone.")) {
-      return;
-    }
-    setTerminatingCampaignId(campaignId);
-    try {
-      const token = await getToken();
-      if (!token) throw new Error("No authentication token available");
-      await apiFetch(`/api/v1/campaign/${campaignId}`, {
-        token,
-        method: "DELETE",
-      });
-      void refreshCampaigns();
-    } catch (err) {
-      alert(`Failed to terminate campaign: ${err instanceof Error ? err.message : "Unknown error"}`);
-    } finally {
-      setTerminatingCampaignId(null);
-    }
-  };
-
-  const isHomeRoute = pathname === "/";
-  const isRileyRoute = pathname.startsWith("/riley");
-  const isInsightsRoute = pathname.startsWith("/insights-intelligence");
-  const isMissionControlRoute = pathname.startsWith("/mission-control");
-
-  const sidebarItemClass = (isActive: boolean): string =>
-    [
-      "flex w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-sm font-medium transition-colors",
-      isActive
-        ? "border-[#d9c17a] bg-[#efe2c3] text-[#1f2a44]"
-        : "border-transparent text-[#4d5871] hover:border-[#e6d9bb] hover:bg-[#f8f1df] hover:text-[#1f2a44]",
-    ].join(" ");
-
   return (
-    <div className="min-h-screen bg-[#f6f1e7] text-[#1f2a44]">
-      <div className="flex min-h-screen">
-        <aside className="w-72 shrink-0 border-r border-[#e1d7c4] bg-[#f1ebde]">
-          <div className="border-b border-[#e1d7c4] px-5 py-5">
-            <div className="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-xl bg-[#e6dac1] text-sm font-semibold text-[#2b3650]">
-              R
-            </div>
-            <h1 className="text-lg font-semibold tracking-tight text-[#2b3650]">Riley</h1>
-            <p className="mt-1 text-xs text-[#6d7688]">Global Operations</p>
-          </div>
-
-          <nav className="space-y-1 px-3 py-4">
-            <button
-              type="button"
-              onClick={() => router.push("/")}
-              className={sidebarItemClass(isHomeRoute)}
-            >
-              <LayoutDashboard className="h-4 w-4" />
-              Campaigns
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsCreateModalOpen(true)}
-              className={sidebarItemClass(false)}
-            >
-              <Plus className="h-4 w-4" />
-              New Mission
-            </button>
-            <button
-              type="button"
-              onClick={() => setIsDirectoryOpen(true)}
-              className={sidebarItemClass(false)}
-            >
-              <BookOpen className="h-4 w-4" />
-              Firm Knowledgebase
-            </button>
-            <button
-              type="button"
-              onClick={() => router.push("/riley")}
-              className={sidebarItemClass(isRileyRoute)}
-            >
-              <Globe className="h-4 w-4" />
-              Riley Global
-            </button>
-            <button
-              type="button"
-              onClick={() => router.push("/insights-intelligence")}
-              className={sidebarItemClass(isInsightsRoute)}
-            >
-              <Compass className="h-4 w-4" />
-              Insights & Intelligence
-            </button>
-            {canAccessMissionControl ? (
-              <button
-                type="button"
-                onClick={() => router.push("/mission-control")}
-                className={sidebarItemClass(isMissionControlRoute)}
-              >
-                <BarChart3 className="h-4 w-4" />
-                Mission Control
-                <Shield className="ml-auto h-3.5 w-3.5 text-[#7b869c]" />
-              </button>
-            ) : null}
-          </nav>
-        </aside>
-
-        <div className="flex min-w-0 flex-1 flex-col">
-          <header className="border-b border-[#e6dece] bg-[#f8f4eb]">
-            <div className="flex items-center justify-end gap-3 px-8 py-4">
-              <GlobalNotificationBell />
-              <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full border border-[#d7cfbf] bg-white">
-                <UserButton appearance={{ elements: { userButtonAvatarBox: "h-8 w-8" } }} />
-              </div>
-            </div>
-          </header>
-
-          <main className="flex-1 overflow-y-auto">
-            <div className="mx-auto w-full max-w-6xl px-8 py-10">
-              <div className="mb-10">
-                <h2 className="font-serif text-4xl font-semibold tracking-tight text-[#1f2a44]">
-                  {getGreeting()}, {user?.firstName || user?.username || "there"}
-                </h2>
-                <p className="mt-2 text-sm text-[#5b6578]">
-                  You have {visibleCampaigns.length} active campaigns across your portfolio.
-                </p>
-              </div>
-
-              <div className="mb-6 flex items-center justify-between">
-                <h3 className="font-serif text-xl font-medium text-[#1f2a44]">Your Campaigns</h3>
-              </div>
-
-              {isLoading ? (
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {[1, 2, 3].map((idx) => (
-                    <div key={idx} className="h-52 animate-pulse rounded-lg bg-[#eee7db]" />
-                  ))}
-                </div>
-              ) : error ? (
-                <div className="rounded-lg bg-[#fff3f3] p-5 text-sm text-[#9e3434]">{error}</div>
-              ) : visibleCampaigns.length === 0 ? (
-                <div className="rounded-lg bg-[#f0eadf] p-8 text-center text-sm text-[#5b6578]">
-                  No active campaigns available.
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-                  {visibleCampaigns.map((campaign) => {
-                    const teamMeta = teamMetaByCampaignId[campaign.campaignId] || { count: 0, names: [] };
-                    const statusLabel = "Active";
-                    const clientName =
-                      (campaign.description && campaign.description.trim()) ||
-                      campaign.ownerName ||
-                      "No client or organization listed";
-
-                    return (
-                      <button
-                        key={campaign.campaignId}
-                        type="button"
-                        onClick={() => handleEnterCampaign(campaign.campaignId)}
-                        className="group relative block rounded-lg bg-[#fbf8f2] p-5 text-left shadow-[0_1px_2px_rgba(31,42,68,0.08),0_10px_24px_rgba(31,42,68,0.06)] transition-all hover:-translate-y-0.5 hover:shadow-[0_2px_6px_rgba(31,42,68,0.12),0_14px_28px_rgba(31,42,68,0.08)]"
-                      >
-                        <span
-                          role="button"
-                          aria-label={`Archive ${campaign.name}`}
-                          title="Archive campaign"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleArchive(campaign.campaignId);
-                          }}
-                          className="absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-md text-[#6f788a] opacity-0 transition-opacity hover:bg-[#ece5d8] hover:text-[#4d5871] group-hover:opacity-100"
-                        >
-                          <Archive className="h-3.5 w-3.5" />
-                        </span>
-                        <div className="mb-3 flex items-start justify-between pr-8">
-                          <span className="rounded-full bg-[#e6d8ad] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#3a3f2a]">
-                            {statusLabel}
-                          </span>
-                          <span className="mr-2 text-[11px] text-[#8a90a0]">{relativeTime(campaign.activityAt)}</span>
-                        </div>
-                        <h4 className="mb-1 font-serif text-base font-semibold leading-snug text-[#1f2a44] group-hover:text-[#22386a]">
-                          {campaign.name}
-                        </h4>
-                        <p className="mb-4 line-clamp-2 text-xs text-[#5b6578]">{clientName}</p>
-                        <div className="flex items-center gap-1.5">
-                          {teamMeta.names.slice(0, 4).map((name, idx) => (
-                            <div
-                              key={`${campaign.campaignId}-${idx}`}
-                              className="-ml-1 flex h-6 w-6 items-center justify-center rounded-full border-2 border-[#fbf8f2] bg-[#e7edf8] text-[9px] font-medium text-[#425577] first:ml-0"
-                              title={name}
-                            >
-                              {initials(name)}
-                            </div>
-                          ))}
-                          {teamMeta.count > 4 ? (
-                            <span className="ml-1 text-[10px] text-[#8a90a0]">+{teamMeta.count - 4}</span>
-                          ) : null}
-                          {teamMeta.count === 0 ? (
-                            <span className="text-[10px] text-[#8a90a0]">No team data</span>
-                          ) : null}
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </main>
-        </div>
+    <div className="mx-auto w-full max-w-6xl">
+      <div className="mb-10">
+        <h2 className="font-serif text-4xl font-semibold tracking-tight text-[#1f2a44]">
+          {getGreeting()}, {user?.firstName || user?.username || "there"}
+        </h2>
+        <p className="mt-2 text-sm text-[#5b6578]">
+          You have {visibleCampaigns.length} active campaigns across your portfolio.
+        </p>
       </div>
 
-      <CreateCampaignModal
-        isOpen={isCreateModalOpen}
-        onClose={() => setIsCreateModalOpen(false)}
-        onCampaignCreated={handleCampaignCreated}
-      />
+      <div className="mb-6 flex items-center justify-between">
+        <h3 className="font-serif text-xl font-medium text-[#1f2a44]">Your Campaigns</h3>
+      </div>
 
-      <CampaignDirectory
-        isOpen={isDirectoryOpen}
-        onClose={() => setIsDirectoryOpen(false)}
-        userCampaigns={directoryCampaigns}
-        archivedCampaigns={[]}
-        onEnterCampaign={handleEnterCampaign}
-        onRequestAccess={handleRequestAccess}
-        onArchive={handleArchive}
-        onRestore={handleRestore}
-        onTerminate={handleTerminate}
-        terminatingCampaignId={terminatingCampaignId}
-        campaignsVersion={campaignsVersion}
-      />
+      {isLoading ? (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {[1, 2, 3].map((idx) => (
+            <div key={idx} className="h-52 animate-pulse rounded-lg bg-[#eee7db]" />
+          ))}
+        </div>
+      ) : error ? (
+        <div className="rounded-lg bg-[#fff3f3] p-5 text-sm text-[#9e3434]">{error}</div>
+      ) : visibleCampaigns.length === 0 ? (
+        <div className="rounded-lg bg-[#f0eadf] p-8 text-center text-sm text-[#5b6578]">
+          No active campaigns available.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {visibleCampaigns.map((campaign) => {
+            const teamMeta = teamMetaByCampaignId[campaign.campaignId] || { count: 0, names: [] };
+            const statusLabel = "Active";
+            const clientName =
+              (campaign.description && campaign.description.trim()) ||
+              campaign.ownerName ||
+              "No client or organization listed";
+
+            return (
+              <button
+                key={campaign.campaignId}
+                type="button"
+                onClick={() => handleEnterCampaign(campaign.campaignId)}
+                className="group relative block rounded-lg bg-[#fbf8f2] p-5 text-left shadow-[0_1px_2px_rgba(31,42,68,0.08),0_10px_24px_rgba(31,42,68,0.06)] transition-all hover:-translate-y-0.5 hover:shadow-[0_2px_6px_rgba(31,42,68,0.12),0_14px_28px_rgba(31,42,68,0.08)]"
+              >
+                <span
+                  role="button"
+                  aria-label={`Archive ${campaign.name}`}
+                  title="Archive campaign"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    handleArchive(campaign.campaignId);
+                  }}
+                  className="absolute right-3 top-3 inline-flex h-7 w-7 items-center justify-center rounded-md text-[#6f788a] opacity-0 transition-opacity hover:bg-[#ece5d8] hover:text-[#4d5871] group-hover:opacity-100"
+                >
+                  <Archive className="h-3.5 w-3.5" />
+                </span>
+                <div className="mb-3 flex items-start justify-between pr-8">
+                  <span className="rounded-full bg-[#e6d8ad] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#3a3f2a]">
+                    {statusLabel}
+                  </span>
+                  <span className="mr-2 text-[11px] text-[#8a90a0]">{relativeTime(campaign.activityAt)}</span>
+                </div>
+                <h4 className="mb-1 font-serif text-base font-semibold leading-snug text-[#1f2a44] group-hover:text-[#22386a]">
+                  {campaign.name}
+                </h4>
+                <p className="mb-4 line-clamp-2 text-xs text-[#5b6578]">{clientName}</p>
+                <div className="flex items-center gap-1.5">
+                  {teamMeta.names.slice(0, 4).map((name, idx) => (
+                    <div
+                      key={`${campaign.campaignId}-${idx}`}
+                      className="-ml-1 flex h-6 w-6 items-center justify-center rounded-full border-2 border-[#fbf8f2] bg-[#e7edf8] text-[9px] font-medium text-[#425577] first:ml-0"
+                      title={name}
+                    >
+                      {initials(name)}
+                    </div>
+                  ))}
+                  {teamMeta.count > 4 ? (
+                    <span className="ml-1 text-[10px] text-[#8a90a0]">+{teamMeta.count - 4}</span>
+                  ) : null}
+                  {teamMeta.count === 0 ? (
+                    <span className="text-[10px] text-[#8a90a0]">No team data</span>
+                  ) : null}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {archiveTarget ? (
         <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
