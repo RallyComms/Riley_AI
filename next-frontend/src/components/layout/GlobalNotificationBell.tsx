@@ -40,7 +40,7 @@ interface CampaignNameCachePayload {
 }
 
 const CAMPAIGN_NAME_CACHE_TTL_MS = 10 * 60 * 1000;
-const UNREAD_REFRESH_INTERVAL_MS = 60 * 1000;
+const UNREAD_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
 
 function notificationTimeLabel(iso?: string | null): string {
   if (!iso) return "Just now";
