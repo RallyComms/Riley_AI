@@ -32,13 +32,14 @@ interface CampaignBucket {
 const SIDEBAR_COLLAPSED_KEY = "riley_global_sidebar_collapsed";
 
 function navItemClass(active: boolean, collapsed: boolean): string {
-  const base =
-    "group flex w-full items-center rounded-xl border text-sm transition-colors duration-150";
-  const spacing = collapsed ? "justify-center px-0 py-2.5" : "gap-2.5 px-3 py-2.5";
+  const base = "group flex w-full items-center rounded-xl border transition-all duration-150";
+  const spacing = collapsed
+    ? "mx-auto h-11 w-11 justify-center px-0 py-0"
+    : "gap-3 px-3.5 py-3 text-[15px] font-semibold";
   if (active) {
     return `${base} ${spacing} border-[#d8c289] bg-[#efe4c8] text-[#1f2a44]`;
   }
-  return `${base} ${spacing} border-transparent text-[#52607a] hover:border-[#e3d8c2] hover:bg-[#ece4d3] hover:text-[#1f2a44]`;
+  return `${base} ${spacing} border-transparent text-[#4c5a74] hover:border-[#e3d8c2] hover:bg-[#ece4d3] hover:text-[#1f2a44]`;
 }
 
 export function GlobalShell({ children }: { children: React.ReactNode }) {
@@ -104,7 +105,8 @@ export function GlobalShell({ children }: { children: React.ReactNode }) {
     [pathname],
   );
 
-  const sidebarWidthClass = isSidebarCollapsed ? "w-20" : "w-72";
+  const sidebarWidthClass = isSidebarCollapsed ? "w-24" : "w-72";
+  const navIconClass = isSidebarCollapsed ? "h-5 w-5 shrink-0" : "h-[18px] w-[18px] shrink-0";
 
   return (
     <div className="min-h-screen bg-[#f6f1e7] text-[#1f2a44]">
@@ -113,17 +115,21 @@ export function GlobalShell({ children }: { children: React.ReactNode }) {
           className={`shrink-0 border-r border-[#e1d7c4] bg-[#f1ebde] transition-[width] duration-200 ${sidebarWidthClass}`}
         >
           <div className="border-b border-[#e1d7c4] px-4 py-5">
-            <div className={`flex items-center ${isSidebarCollapsed ? "justify-center" : "justify-between gap-3"}`}>
+            <div
+              className={`flex ${
+                isSidebarCollapsed ? "flex-col items-center gap-3" : "items-start justify-between gap-3"
+              }`}
+            >
               {isSidebarCollapsed ? (
-                <div className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-[#e6dac1] text-sm font-semibold text-[#2b3650]">
+                <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[#dccaa4] bg-[#ecdfc6] text-base font-semibold text-[#2b3650]">
                   R
                 </div>
               ) : (
                 <div>
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.16em] text-[#c2a25a]">
+                  <p className="text-[13px] font-bold uppercase tracking-[0.2em] text-[#cfad5b]">
                     We Are Rally
                   </p>
-                  <p className="mt-1 text-lg font-semibold tracking-tight text-[#2b3650]">Riley</p>
+                  <p className="mt-1 text-[28px] font-semibold leading-none tracking-tight text-[#25314a]">Riley</p>
                 </div>
               )}
               <button
@@ -145,7 +151,7 @@ export function GlobalShell({ children }: { children: React.ReactNode }) {
               className={navItemClass(routeState.campaigns, isSidebarCollapsed)}
               title="Campaigns"
             >
-              <LayoutDashboard className="h-4 w-4 shrink-0" />
+              <LayoutDashboard className={navIconClass} />
               {!isSidebarCollapsed ? <span>Campaigns</span> : null}
             </button>
             <button
@@ -154,7 +160,7 @@ export function GlobalShell({ children }: { children: React.ReactNode }) {
               className={navItemClass(isCreateModalOpen, isSidebarCollapsed)}
               title="New Mission"
             >
-              <Plus className="h-4 w-4 shrink-0" />
+              <Plus className={navIconClass} />
               {!isSidebarCollapsed ? <span>New Mission</span> : null}
             </button>
             <button
@@ -163,7 +169,7 @@ export function GlobalShell({ children }: { children: React.ReactNode }) {
               className={navItemClass(routeState.knowledgebase, isSidebarCollapsed)}
               title="Firm Knowledgebase"
             >
-              <BookOpen className="h-4 w-4 shrink-0" />
+              <BookOpen className={navIconClass} />
               {!isSidebarCollapsed ? <span>Firm Knowledgebase</span> : null}
             </button>
             <button
@@ -172,7 +178,7 @@ export function GlobalShell({ children }: { children: React.ReactNode }) {
               className={navItemClass(routeState.riley, isSidebarCollapsed)}
               title="Riley Global"
             >
-              <Globe className="h-4 w-4 shrink-0" />
+              <Globe className={navIconClass} />
               {!isSidebarCollapsed ? <span>Riley Global</span> : null}
             </button>
             <button
@@ -181,7 +187,7 @@ export function GlobalShell({ children }: { children: React.ReactNode }) {
               className={navItemClass(routeState.insights, isSidebarCollapsed)}
               title="Insights & Intelligence"
             >
-              <Compass className="h-4 w-4 shrink-0" />
+              <Compass className={navIconClass} />
               {!isSidebarCollapsed ? <span>Insights & Intelligence</span> : null}
             </button>
             {canAccessMissionControl ? (
@@ -191,7 +197,7 @@ export function GlobalShell({ children }: { children: React.ReactNode }) {
                 className={navItemClass(routeState.missionControl, isSidebarCollapsed)}
                 title="Mission Control"
               >
-                <BarChart3 className="h-4 w-4 shrink-0" />
+                <BarChart3 className={navIconClass} />
                 {!isSidebarCollapsed ? (
                   <>
                     <span>Mission Control</span>

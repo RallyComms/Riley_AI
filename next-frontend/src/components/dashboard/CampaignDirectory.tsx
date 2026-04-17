@@ -221,7 +221,7 @@ export function CampaignDirectory({
       className={
         variant === "modal"
           ? "fixed inset-0 z-50 bg-[#f8f5ef]"
-          : "w-full rounded-2xl border border-[#e3dac8] bg-[#f8f5ef]"
+          : "w-full bg-transparent"
       }
     >
       <motion.div
@@ -234,7 +234,7 @@ export function CampaignDirectory({
         <div
           className={cn(
             "mx-auto flex w-full max-w-6xl flex-col",
-            variant === "modal" ? "h-full px-8 py-6" : "px-4 py-5 lg:px-6",
+            variant === "modal" ? "h-full px-8 py-6" : "px-0 py-0",
           )}
         >
             <div className="flex items-center justify-between border-b border-[#e3dac8] pb-4">
@@ -309,7 +309,14 @@ export function CampaignDirectory({
 
             {activeTab === "campaigns" || activeTab === "archive" ? (
               <>
-                <div className="mt-5 rounded-xl bg-white p-4 shadow-[0_1px_3px_rgba(31,42,68,0.08)]">
+                <div
+                  className={cn(
+                    "mt-5",
+                    variant === "modal"
+                      ? "rounded-xl bg-white p-4 shadow-[0_1px_3px_rgba(31,42,68,0.08)]"
+                      : "border-b border-[#e3dac8] pb-4",
+                  )}
+                >
                   <div className="flex items-center gap-2 rounded-lg border border-[#e3dac8] bg-[#fcfaf6] px-3 py-2.5">
                     <Search className="h-4 w-4 text-[#8a90a0]" />
                     <input
@@ -474,8 +481,10 @@ export function CampaignDirectory({
             ) : (
               <div
                 className={cn(
-                  "mt-6 rounded-xl bg-white p-4 shadow-[0_1px_3px_rgba(31,42,68,0.08)]",
-                  variant === "modal" ? "flex-1 overflow-y-auto" : "",
+                  "mt-6",
+                  variant === "modal"
+                    ? "flex-1 overflow-y-auto rounded-xl bg-white p-4 shadow-[0_1px_3px_rgba(31,42,68,0.08)]"
+                    : "",
                 )}
               >
                 <GlobalDocsList onViewDocument={onViewDocument} />

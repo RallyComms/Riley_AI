@@ -62,9 +62,9 @@ export default function KnowledgebasePage() {
 
   return (
     <div className="mx-auto w-full max-w-7xl">
-      <section className="mb-4 rounded-2xl border border-[#e3dac8] bg-[#fbf8f2] px-5 py-5">
+      <section className="mb-3 px-1 py-1">
         <div className="flex items-center gap-3">
-          <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl bg-[#ece4d4] text-[#2a3d64]">
+          <div className="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[#ddd1ba] bg-[#f1e9d8] text-[#2a3d64]">
             <BookOpen className="h-5 w-5" />
           </div>
           <div>
