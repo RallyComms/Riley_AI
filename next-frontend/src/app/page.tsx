@@ -18,6 +18,7 @@ interface BackendCampaign {
   status?: "active" | "archived";
   updated_at?: string | null;
   created_at?: string | null;
+  last_activity_at?: string | null;
   owner_name?: string | null;
 }
 
@@ -64,7 +65,7 @@ interface UserCampaign {
   access: "member" | "requestable";
   ownerName?: string;
   description?: string | null;
-  createdAt?: string | null;
+  activityAt?: string | null;
   status?: "active" | "archived";
 }
 
@@ -89,7 +90,7 @@ function mapBackendToUserCampaign(campaign: BackendCampaign, index: number): Use
     access: campaign.access,
     ownerName: campaign.owner_name ?? undefined,
     description: campaign.description,
-    createdAt: campaign.updated_at ?? campaign.created_at ?? null,
+    activityAt: campaign.last_activity_at ?? campaign.updated_at ?? campaign.created_at ?? null,
     status: campaign.status,
   };
 }
@@ -108,9 +109,9 @@ function mapUserCampaignToBucket(campaign: UserCampaign): CampaignBucket {
 }
 
 function relativeTime(iso?: string | null): string {
-  if (!iso) return "Today";
+  if (!iso) return "today";
   const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "Today";
+  if (Number.isNaN(date.getTime())) return "today";
 
   const now = new Date();
   const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -119,8 +120,8 @@ function relativeTime(iso?: string | null): string {
     (startOfToday.getTime() - startOfTargetDay.getTime()) / (1000 * 60 * 60 * 24),
   );
 
-  if (diffDays <= 0) return "Today";
-  if (diffDays === 1) return "Yesterday";
+  if (diffDays <= 0) return "today";
+  if (diffDays === 1) return "1 day ago";
   return `${diffDays} days ago`;
 }
 
@@ -453,7 +454,7 @@ export default function HomePage() {
                     <span className="rounded-full bg-[#e6d8ad] px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#3a3f2a]">
                       {statusLabel}
                     </span>
-                    <span className="mr-2 text-[11px] text-[#8a90a0]">{relativeTime(campaign.createdAt)}</span>
+                    <span className="mr-2 text-[11px] text-[#8a90a0]">{relativeTime(campaign.activityAt)}</span>
                   </div>
                   <h4 className="mb-1 font-serif text-base font-semibold leading-snug text-[#1f2a44] group-hover:text-[#22386a]">
                     {campaign.name}

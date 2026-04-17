@@ -2122,6 +2122,7 @@ class GraphService:
                 description: $description,
                 status: "active",
                 created_at: datetime(),
+                last_activity_at: datetime(),
                 events_version: 0,
                 events_updated_at: datetime()
             })
@@ -2134,7 +2135,8 @@ class GraphService:
                 c.name as name,
                 c.description as description,
                 c.status as status,
-                toString(c.archived_at) as archived_at
+                toString(c.archived_at) as archived_at,
+                toString(c.last_activity_at) as last_activity_at
             """
             
             result = await session.run(
@@ -2156,6 +2158,7 @@ class GraphService:
                 "role": "Lead",
                 "status": record.get("status") or "active",
                 "archived_at": record.get("archived_at"),
+                "last_activity_at": record.get("last_activity_at"),
             }
 
     async def get_user_campaigns(self, user_id: str, status_filter: str = "active") -> List[Dict[str, Any]]:
@@ -2179,8 +2182,10 @@ class GraphService:
                 c.name as name,
                 c.description as description,
                 r.role as role,
+                toString(c.created_at) as created_at,
                 coalesce(c.status, "active") as status,
-                toString(c.archived_at) as archived_at
+                toString(c.archived_at) as archived_at,
+                toString(c.last_activity_at) as last_activity_at
             ORDER BY c.created_at DESC
             """
             
@@ -2194,13 +2199,21 @@ class GraphService:
                     "description": record.get("description"),
                     "role": record["role"],
                     "access": "member",
+                    "created_at": record.get("created_at"),
                     "status": record.get("status") or "active",
                     "archived_at": record.get("archived_at"),
+                    "last_activity_at": record.get("last_activity_at"),
                 })
             
             return campaigns
 
-    async def get_all_campaigns_with_access(self, user_id: str, status_filter: str = "active") -> List[Dict[str, Any]]:
+    async def get_all_campaigns_with_access(
+        self,
+        user_id: str,
+        status_filter: str = "active",
+        *,
+        force_member: bool = False,
+    ) -> List[Dict[str, Any]]:
         """Return metadata-only campaign list across org with user access status.
 
         access:
@@ -2225,13 +2238,26 @@ class GraphService:
                 toString(c.created_at) as created_at,
                 coalesce(c.status, "active") as status,
                 toString(c.archived_at) as archived_at,
+                toString(c.last_activity_at) as last_activity_at,
                 owner.id as owner_id,
-                CASE WHEN r IS NULL THEN "requestable" ELSE "member" END as access,
-                r.role as role
+                CASE
+                    WHEN $force_member THEN "member"
+                    WHEN r IS NULL THEN "requestable"
+                    ELSE "member"
+                END as access,
+                CASE
+                    WHEN $force_member AND r.role IS NULL THEN "Member"
+                    ELSE r.role
+                END as role
             ORDER BY c.created_at DESC
             """
 
-            result = await session.run(query, user_id=user_id, status_filter=status_filter)
+            result = await session.run(
+                query,
+                user_id=user_id,
+                status_filter=status_filter,
+                force_member=force_member,
+            )
             campaigns: List[Dict[str, Any]] = []
             async for record in result:
                 campaigns.append(
@@ -2244,6 +2270,7 @@ class GraphService:
                         "created_at": record.get("created_at"),
                         "status": record.get("status") or "active",
                         "archived_at": record.get("archived_at"),
+                        "last_activity_at": record.get("last_activity_at"),
                         "owner_id": record.get("owner_id"),
                         "owner_name": "Unknown user",
                     }
@@ -2259,6 +2286,20 @@ class GraphService:
                     owner_identity.get(owner_id, {}).get("display_name") or "Unknown user"
                 )
             return campaigns
+
+    async def touch_campaign_last_activity(self, campaign_id: Optional[str]) -> None:
+        """Best-effort denormalized campaign activity timestamp update."""
+        normalized_campaign_id = str(campaign_id or "").strip()
+        if not normalized_campaign_id or normalized_campaign_id.lower() == "global":
+            return
+        async with self._driver.session() as session:
+            await session.run(
+                """
+                MATCH (c:Campaign {id: $campaign_id})
+                SET c.last_activity_at = datetime()
+                """,
+                campaign_id=normalized_campaign_id,
+            )
 
     async def archive_campaign(self, campaign_id: str) -> Dict[str, Any]:
         """Archive a campaign by setting status and archived timestamp."""
@@ -2534,7 +2575,8 @@ class GraphService:
             SET
                 ar.status = $decision,
                 ar.decided_at = datetime(),
-                ar.decided_by = $actor_user_id
+                ar.decided_by = $actor_user_id,
+                c.last_activity_at = datetime()
             FOREACH (_ IN CASE WHEN $decision = "approved" THEN [1] ELSE [] END |
                 MERGE (u)-[m:MEMBER_OF]->(c)
                 SET m.role = coalesce(m.role, "Member"), m.added_at = datetime()
@@ -3093,7 +3135,8 @@ class GraphService:
             })
             SET
                 c.events_version = coalesce(c.events_version, 0) + 1,
-                c.events_updated_at = datetime()
+                c.events_updated_at = datetime(),
+                c.last_activity_at = datetime()
             RETURN c.id as campaign_id
             """
             result = await session.run(
@@ -3229,6 +3272,7 @@ class GraphService:
                 reminder_now_sent_at: null,
                 reminder_now_event_id: null
             })
+            SET c.last_activity_at = datetime()
             RETURN
                 d.id as id,
                 d.campaign_id as campaign_id,
@@ -3283,106 +3327,6 @@ class GraphService:
                 },
             )
             return created
-
-    async def emit_due_deadline_reminders(self, campaign_id: str) -> None:
-        """Emit personal deadline reminder notifications once per reminder window."""
-        async with self._driver.session() as session:
-            ten_minute_due = await session.run(
-                """
-                MATCH (d:CampaignDeadline {campaign_id: $campaign_id})
-                WHERE
-                    d.completed_at IS NULL
-                    AND d.visibility = "personal"
-                    AND d.assigned_user_id IS NOT NULL
-                    AND trim(d.assigned_user_id) <> ""
-                    AND d.reminder_10m_sent_at IS NULL
-                    AND datetime() >= d.due_at - duration({minutes: 10})
-                    AND datetime() < d.due_at
-                SET
-                    d.reminder_10m_sent_at = datetime(),
-                    d.reminder_10m_event_id = coalesce(d.reminder_10m_event_id, d.id + ":reminder_10m")
-                RETURN
-                    d.id as deadline_id,
-                    d.title as title,
-                    toString(d.due_at) as due_at,
-                    d.assigned_user_id as assigned_user_id,
-                    d.reminder_10m_event_id as reminder_event_id
-                """,
-                campaign_id=campaign_id,
-            )
-            ten_minute_rows = [dict(row) async for row in ten_minute_due]
-
-            due_now = await session.run(
-                """
-                MATCH (d:CampaignDeadline {campaign_id: $campaign_id})
-                WHERE
-                    d.completed_at IS NULL
-                    AND d.visibility = "personal"
-                    AND d.assigned_user_id IS NOT NULL
-                    AND trim(d.assigned_user_id) <> ""
-                    AND d.reminder_now_sent_at IS NULL
-                    AND datetime() >= d.due_at
-                SET
-                    d.reminder_now_sent_at = datetime(),
-                    d.reminder_now_event_id = coalesce(d.reminder_now_event_id, d.id + ":reminder_due_now")
-                RETURN
-                    d.id as deadline_id,
-                    d.title as title,
-                    toString(d.due_at) as due_at,
-                    d.assigned_user_id as assigned_user_id,
-                    d.reminder_now_event_id as reminder_event_id
-                """,
-                campaign_id=campaign_id,
-            )
-            due_now_rows = [dict(row) async for row in due_now]
-
-        for row in ten_minute_rows:
-            assigned_user_id = str(row.get("assigned_user_id") or "").strip()
-            if not assigned_user_id:
-                continue
-            await self.create_campaign_event(
-                campaign_id=campaign_id,
-                event_type="deadline_reminder_10m",
-                message=f"Deadline due in 10 minutes: {row.get('title')} (due {row.get('due_at')})",
-                user_id=assigned_user_id,
-                actor_user_id="system:deadline-reminder",
-                object_id=row.get("reminder_event_id") or f"{row.get('deadline_id')}:reminder_10m",
-                metadata={
-                    "deadline_id": row.get("deadline_id"),
-                    "deadline_due_at": row.get("due_at"),
-                    "reminder_window": "10m",
-                },
-            )
-            logger.info(
-                "deadline_reminder_created event_type=deadline_reminder_10m campaign_id=%s user_id=%s deadline_id=%s",
-                campaign_id,
-                assigned_user_id,
-                row.get("deadline_id"),
-            )
-
-        for row in due_now_rows:
-            assigned_user_id = str(row.get("assigned_user_id") or "").strip()
-            if not assigned_user_id:
-                continue
-            await self.create_campaign_event(
-                campaign_id=campaign_id,
-                event_type="deadline_due_now",
-                message=f"Deadline is due now: {row.get('title')} (due {row.get('due_at')})",
-                user_id=assigned_user_id,
-                actor_user_id="system:deadline-reminder",
-                object_id=row.get("reminder_event_id") or f"{row.get('deadline_id')}:reminder_due_now",
-                metadata={
-                    "deadline_id": row.get("deadline_id"),
-                    "deadline_due_at": row.get("due_at"),
-                    "reminder_window": "due_now",
-                },
-            )
-            logger.info(
-                "deadline_reminder_created event_type=deadline_due_now campaign_id=%s user_id=%s deadline_id=%s",
-                campaign_id,
-                assigned_user_id,
-                row.get("deadline_id"),
-            )
 
     async def list_campaign_deadlines(
         self,
@@ -3463,7 +3407,10 @@ class GraphService:
                         AND coalesce(d.assigned_user_id, d.created_by) = $viewer_user_id
                     )
                 )
-            SET d.completed_at = coalesce(d.completed_at, datetime())
+            MATCH (c:Campaign {id: $campaign_id})
+            SET
+                d.completed_at = coalesce(d.completed_at, datetime()),
+                c.last_activity_at = datetime()
             RETURN
                 d.id as id,
                 d.campaign_id as campaign_id,
@@ -3576,7 +3523,13 @@ class GraphService:
                 "created_at": record.get("created_at"),
             }
 
-    async def list_conversations(self, campaign_id: str, user_id: str) -> List[Dict[str, Any]]:
+    async def list_conversations(
+        self,
+        campaign_id: str,
+        user_id: str,
+        *,
+        allow_permission_bypass: bool = False,
+    ) -> List[Dict[str, Any]]:
         """List public + private conversations visible to the user."""
         await self.ensure_public_conversation(campaign_id=campaign_id, created_by=user_id)
         async with self._driver.session() as session:
@@ -3586,7 +3539,7 @@ class GraphService:
                 MATCH (viewer:User {id: $user_id})
                 OPTIONAL MATCH (viewer)-[membership:CONVERSATION_MEMBER]->(conv)
                 WITH conv, viewer, membership
-                WHERE conv.type = "public" OR membership IS NOT NULL
+                WHERE conv.type = "public" OR membership IS NOT NULL OR $allow_permission_bypass
                 OPTIONAL MATCH (viewer)-[seen:SEEN_CONVERSATION]->(conv)
                 WITH conv, viewer, membership, coalesce(seen.last_seen_at, datetime({epochMillis: 0})) as last_seen_at
                 CALL {
@@ -3619,6 +3572,7 @@ class GraphService:
                 """,
                 campaign_id=campaign_id,
                 user_id=user_id,
+                allow_permission_bypass=allow_permission_bypass,
             )
             conversations: List[Dict[str, Any]] = []
             all_participant_ids: List[str] = []
@@ -3827,6 +3781,7 @@ class GraphService:
         user_id: str,
         limit: int = 50,
         since: Optional[str] = None,
+        allow_permission_bypass: bool = False,
     ) -> List[Dict[str, Any]]:
         """Get messages for a public/private conversation with history access checks."""
         async with self._driver.session() as session:
@@ -3844,6 +3799,7 @@ class GraphService:
                         }
                     )
                     OR (conv.type = "private" AND membership IS NOT NULL)
+                    OR $allow_permission_bypass
                 MATCH (conv)<-[:IN_CONVERSATION]-(message:ConversationMessage)<-[:SENT_CONVERSATION_MESSAGE]-(author:User)
                 WITH conv, membership, message, author
                 WHERE
@@ -3868,6 +3824,7 @@ class GraphService:
                 user_id=user_id,
                 limit=limit,
                 since=since,
+                allow_permission_bypass=allow_permission_bypass,
             )
             rows: List[Dict[str, Any]] = []
             async for record in result:
@@ -3909,12 +3866,14 @@ class GraphService:
                         }
                     )
                     OR (conv.type = "private" AND membership IS NOT NULL)
+                    OR $allow_permission_bypass
                 MERGE (viewer)-[seen:SEEN_CONVERSATION]->(conv)
                 SET seen.last_seen_at = datetime()
                 """,
                 user_id=user_id,
                 conversation_id=conversation_id,
                 campaign_id=campaign_id,
+                allow_permission_bypass=allow_permission_bypass,
             )
             return rows
 
@@ -3926,6 +3885,7 @@ class GraphService:
         user: Dict[str, Any],
         content: str,
         mention_user_ids: Optional[List[str]] = None,
+        allow_permission_bypass: bool = False,
     ) -> Dict[str, Any]:
         """Post a message to a public/private conversation."""
         normalized_content = str(content or "").strip()
@@ -3963,6 +3923,7 @@ class GraphService:
                         }
                     )
                     OR (conv.type = "private" AND membership IS NOT NULL)
+                    OR $allow_permission_bypass
                 CREATE (message:ConversationMessage {
                     id: $message_id,
                     conversation_id: $conversation_id,
@@ -3971,6 +3932,8 @@ class GraphService:
                     created_at: datetime()
                 })
                 CREATE (viewer)-[:SENT_CONVERSATION_MESSAGE]->(message)-[:IN_CONVERSATION]->(conv)
+                MATCH (campaign:Campaign {id: $campaign_id})
+                SET campaign.last_activity_at = datetime()
                 RETURN
                     conv.type as conversation_type,
                     message.id as id,
@@ -3985,6 +3948,7 @@ class GraphService:
                 user_id=author_id,
                 message_id=message_id,
                 content=normalized_content,
+                allow_permission_bypass=allow_permission_bypass,
             )
             record = await result.single()
             if not record:
@@ -4105,7 +4069,10 @@ class GraphService:
             MERGE (u:User {id: $target_user_id})
             MATCH (c:Campaign {id: $tenant_id})
             MERGE (u)-[r:MEMBER_OF]->(c)
-            SET r.role = $role, r.added_at = datetime()
+            SET
+                r.role = $role,
+                r.added_at = datetime(),
+                c.last_activity_at = datetime()
             RETURN c.id as tenant_id, u.id as user_id, r.role as role
             """
             
@@ -4183,6 +4150,7 @@ class GraphService:
                 timestamp: datetime()
             })
             CREATE (u)-[:SENT]->(m)-[:POSTED_IN]->(c)
+            SET c.last_activity_at = datetime()
             RETURN
                 m.id as id,
                 m.content as content,

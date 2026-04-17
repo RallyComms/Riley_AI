@@ -984,6 +984,9 @@ async def upload_file(
             tags=tag_list,
             overwrite=overwrite,
         )
+        # Keep campaign card activity reads cheap by maintaining denormalized last_activity_at.
+        if tenant_id != "global":
+            await graph.touch_campaign_last_activity(tenant_id)
         try:
             target_collection = (
                 settings.QDRANT_COLLECTION_TIER_1

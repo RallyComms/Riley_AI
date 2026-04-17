@@ -9,7 +9,12 @@ from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-from app.dependencies.auth import verify_tenant_access, verify_clerk_token
+from app.dependencies.auth import (
+    is_platform_admin_user,
+    log_platform_admin_action,
+    verify_clerk_token,
+    verify_tenant_access,
+)
 from app.dependencies.graph_dep import get_graph
 from app.services.graph import GraphService
 from app.services.qdrant import vector_service
@@ -36,6 +41,7 @@ class CampaignResponse(BaseModel):
     role: Optional[str] = None
     access: str = "member"
     created_at: Optional[str] = None
+    last_activity_at: Optional[str] = None
     status: Literal["active", "archived"] = "active"
     archived_at: Optional[str] = None
     owner_id: Optional[str] = None
@@ -265,9 +271,26 @@ class UpdateUserProfileRequest(BaseModel):
     display_name: Optional[str] = Field(None, max_length=120)
 
 
-async def _require_lead_for_campaign(campaign_id: str, current_user: Dict, graph: GraphService) -> str:
+async def _require_lead_for_campaign(
+    campaign_id: str,
+    current_user: Dict,
+    graph: GraphService,
+    *,
+    request: Optional[Request] = None,
+    action: str = "campaign_lead_action",
+) -> str:
     """Server-side Lead authorization helper for campaign-scoped management routes."""
     requester_id = current_user.get("id", "unknown")
+    if is_platform_admin_user(current_user):
+        if request is not None:
+            await log_platform_admin_action(
+                request=request,
+                user=current_user,
+                action=f"{action}_lead_bypass",
+                campaign_id=campaign_id,
+                metadata={"authorization": "platform_admin_bypass"},
+            )
+        return requester_id
     requester_role = await graph.get_member_role(requester_id, campaign_id)
     if requester_role != "Lead":
         raise HTTPException(
@@ -405,7 +428,13 @@ async def get_campaigns(
     user_id = current_user.get("id", "unknown")
     
     try:
-        if scope == "all":
+        if is_platform_admin_user(current_user):
+            campaigns = await graph.get_all_campaigns_with_access(
+                user_id,
+                status_filter=status_filter,
+                force_member=True,
+            )
+        elif scope == "all":
             campaigns = await graph.get_all_campaigns_with_access(user_id, status_filter=status_filter)
         else:
             campaigns = await graph.get_user_campaigns(user_id, status_filter=status_filter)
@@ -422,12 +451,19 @@ async def get_campaigns(
 @router.patch("/campaigns/{id}/archive", response_model=ArchiveCampaignResponse)
 async def archive_campaign(
     id: str,
+    request: Request,
     current_user: Dict = Depends(verify_tenant_access),
     graph: GraphService = Depends(get_graph),
 ) -> ArchiveCampaignResponse:
     """Archive a campaign for all members (soft state change)."""
     try:
-        await _require_lead_for_campaign(id, current_user, graph)
+        await _require_lead_for_campaign(
+            id,
+            current_user,
+            graph,
+            request=request,
+            action="campaign_archive",
+        )
         archived = await graph.archive_campaign(campaign_id=id)
         return ArchiveCampaignResponse(
             ok=True,
@@ -598,7 +634,7 @@ async def stream_campaign_event_updates(
 ) -> StreamingResponse:
     """Stream campaign activity update signals as SSE notifications."""
     async def event_generator():
-        poll_interval_seconds = 3
+        poll_interval_seconds = 120
         heartbeat_interval_seconds = 30
         last_heartbeat_at = asyncio.get_running_loop().time()
         try:
@@ -839,6 +875,7 @@ async def search_campaign_users(
 @router.delete("/campaign/{tenant_id}", response_model=TerminationResponse)
 async def terminate_campaign(
     tenant_id: str,
+    request: Request,
     current_user: Dict = Depends(verify_tenant_access),
     graph: GraphService = Depends(get_graph),
 ) -> TerminationResponse:
@@ -862,7 +899,13 @@ async def terminate_campaign(
             status_code=403,
             detail="Cannot terminate 'global' tenant. This is a protected system tenant."
         )
-    await _require_lead_for_campaign(tenant_id, current_user, graph)
+    await _require_lead_for_campaign(
+        tenant_id,
+        current_user,
+        graph,
+        request=request,
+        action="campaign_terminate",
+    )
     is_archived = await graph.is_campaign_archived(tenant_id)
     if not is_archived:
         raise HTTPException(
@@ -1398,16 +1441,13 @@ async def remove_campaign_member(
     Returns:
         Updated list of campaign members
     """
-    requester_id = current_user.get("id", "unknown")
-    
-    # Check if requester is Lead
     try:
-        requester_role = await graph.get_member_role(requester_id, id)
-        if requester_role != "Lead":
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only Lead members can remove members from a campaign"
-            )
+        await _require_lead_for_campaign(
+            id,
+            current_user,
+            graph,
+            action="campaign_remove_member",
+        )
     except HTTPException:
         raise
     except Exception as exc:
