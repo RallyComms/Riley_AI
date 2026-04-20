@@ -5548,30 +5548,84 @@ class GraphService:
                 "already_member": bool(record.get("already_member")),
             }
 
-    async def remove_campaign_member(self, campaign_id: str, target_user_id: str) -> None:
+    async def remove_campaign_member(
+        self,
+        campaign_id: str,
+        target_user_id: str,
+    ) -> Dict[str, Any]:
         """Remove a user from a campaign.
-        
-        Deletes the MEMBER_OF relationship between the user and campaign.
-        
+
+        Deletes the MEMBER_OF relationship between the user and campaign, with
+        a safety rail that prevents removing the sole remaining Lead (which
+        would strand the campaign without any privileged operator).
+
         Args:
             campaign_id: ID of the campaign
             target_user_id: ID of the user to remove
-            
+
+        Returns:
+            Dictionary with removal context:
+            {campaign_id, campaign_name, user_id, role}
+
         Raises:
-            ValueError: If the membership relationship doesn't exist
+            ValueError: If the membership relationship doesn't exist, or if
+                removing this member would leave the campaign with zero Leads.
         """
         async with self._driver.session() as session:
-            query = """
+            lookup_query = """
+            MATCH (c:Campaign {id: $campaign_id})
+            OPTIONAL MATCH (u:User {id: $target_user_id})-[r:MEMBER_OF]->(c)
+            OPTIONAL MATCH (lead:User)-[lr:MEMBER_OF]->(c)
+            WHERE lr.role = "Lead"
+            RETURN
+                c.id as campaign_id,
+                c.name as campaign_name,
+                (r IS NOT NULL) as is_member,
+                r.role as role,
+                count(DISTINCT lead) as lead_count
+            """
+            lookup_result = await session.run(
+                lookup_query,
+                campaign_id=campaign_id,
+                target_user_id=target_user_id,
+            )
+            lookup_record = await lookup_result.single()
+            if not lookup_record:
+                raise ValueError(f"Campaign {campaign_id} not found")
+            if not bool(lookup_record.get("is_member")):
+                raise ValueError(
+                    f"User {target_user_id} is not a member of campaign {campaign_id}"
+                )
+
+            role_value = str(lookup_record.get("role") or "").strip()
+            lead_count = int(lookup_record.get("lead_count") or 0)
+            if role_value == "Lead" and lead_count <= 1:
+                raise ValueError(
+                    "Cannot remove the sole remaining Lead. Promote another member to Lead first."
+                )
+
+            delete_query = """
             MATCH (u:User {id: $target_user_id})-[r:MEMBER_OF]->(c:Campaign {id: $campaign_id})
             DELETE r
             RETURN count(r) as deleted_count
             """
-            
-            result = await session.run(query, campaign_id=campaign_id, target_user_id=target_user_id)
-            record = await result.single()
-            
-            if not record or record["deleted_count"] == 0:
-                raise ValueError(f"User {target_user_id} is not a member of campaign {campaign_id}")
+            delete_result = await session.run(
+                delete_query,
+                campaign_id=campaign_id,
+                target_user_id=target_user_id,
+            )
+            delete_record = await delete_result.single()
+            if not delete_record or int(delete_record.get("deleted_count") or 0) == 0:
+                raise ValueError(
+                    f"User {target_user_id} is not a member of campaign {campaign_id}"
+                )
+
+            return {
+                "campaign_id": lookup_record.get("campaign_id"),
+                "campaign_name": lookup_record.get("campaign_name"),
+                "user_id": target_user_id,
+                "role": role_value or None,
+            }
 
 
 # Global service instance that can be imported by routers.

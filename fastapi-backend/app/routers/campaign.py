@@ -1466,28 +1466,36 @@ async def add_campaign_member(
 async def remove_campaign_member(
     id: str,
     user_id: str,
+    request: Request,
     current_user: Dict = Depends(verify_tenant_access),
     graph: GraphService = Depends(get_graph)
 ) -> MembersListResponse:
     """Remove a member from a campaign.
-    
+
     SECURITY:
     - Requires authentication and campaign membership (enforced by verify_tenant_access)
-    - Additional authorization: requester must be Lead for this campaign (403 otherwise)
-    
+    - Additional authorization: requester must be Lead for this campaign OR a
+      platform admin (403 otherwise). Enforced by `_require_lead_for_campaign`.
+    - Safety rail: refuses to remove the sole remaining Lead so the campaign
+      cannot be stranded without a privileged operator.
+    - On success, writes a `campaign_member_removed` campaign activity event
+      and delivers a notification to the removed user via the existing
+      notification pipeline (the Home notifications bell/page).
+
     Args:
         id: Campaign ID (extracted from path)
         user_id: ID of the user to remove
         current_user: Authenticated user (from verify_tenant_access)
-        
+
     Returns:
         Updated list of campaign members
     """
     try:
-        await _require_lead_for_campaign(
+        actor_user_id = await _require_lead_for_campaign(
             id,
             current_user,
             graph,
+            request=request,
             action="campaign_remove_member",
         )
     except HTTPException:
@@ -1497,24 +1505,58 @@ async def remove_campaign_member(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to check requester role: {exc}"
         ) from exc
-    
+
     # Remove member from campaign
     try:
-        await graph.remove_campaign_member(
+        removed = await graph.remove_campaign_member(
             campaign_id=id,
-            target_user_id=user_id
+            target_user_id=user_id,
         )
     except ValueError as exc:
+        message = str(exc)
+        # Sole-Lead safety rail → 409 Conflict; not-a-member → 404 Not Found
+        if "sole remaining Lead" in message:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=message,
+            ) from exc
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc)
+            detail=message,
         ) from exc
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to remove member: {exc}"
         ) from exc
-    
+
+    # Best-effort campaign activity event + notification for the removed user.
+    # Uses `create_campaign_event` which reuses the existing notification
+    # delivery path (Home notification bell/page) when `user_id` is provided.
+    try:
+        campaign_name = (str(removed.get("campaign_name") or "").strip()) or id
+        await graph.create_campaign_event(
+            campaign_id=id,
+            event_type="campaign_member_removed",
+            message=f"You've been removed from {campaign_name}.",
+            user_id=user_id,
+            actor_user_id=actor_user_id,
+            object_id=f"{id}:campaign_member_removed:{user_id}",
+            metadata={
+                "removed_role": removed.get("role"),
+                "actor_is_platform_admin": bool(
+                    getattr(request.state, "is_platform_admin", False)
+                ),
+            },
+        )
+    except Exception as exc:
+        logger.warning(
+            "campaign_member_removed_notification_failed campaign_id=%s user_id=%s error=%s",
+            id,
+            user_id,
+            exc,
+        )
+
     # Return updated member list
     try:
         members = await graph.list_campaign_members(campaign_id=id)

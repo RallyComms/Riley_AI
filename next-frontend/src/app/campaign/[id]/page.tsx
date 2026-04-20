@@ -75,6 +75,8 @@ export default function CampaignOverviewPage() {
   const [isSearchingMembers, setIsSearchingMembers] = useState(false);
   const [addingMemberUserId, setAddingMemberUserId] = useState<string | null>(null);
   const [addUserError, setAddUserError] = useState<string | null>(null);
+  const [removingMemberUserId, setRemovingMemberUserId] = useState<string | null>(null);
+  const [removeMemberError, setRemoveMemberError] = useState<string | null>(null);
   const headerSubtitle = campaignName?.trim()
     ? `${campaignName} — Campaign workspace overview`
     : "Campaign workspace overview";
@@ -552,6 +554,46 @@ export default function CampaignOverviewPage() {
     return () => clearTimeout(handle);
   }, [campaignId, isAddUserModalOpen, isLead, memberSearchQuery]);
 
+  const handleRemoveMember = async (member: TeamMemberStatusItem) => {
+    if (!isLead) return;
+    const label = member.display_name?.trim() || "this member";
+    const confirmed = window.confirm(
+      `Remove ${label} from this campaign? They will be notified and lose access.`
+    );
+    if (!confirmed) return;
+    try {
+      setRemovingMemberUserId(member.user_id);
+      setRemoveMemberError(null);
+      const token = await getToken();
+      if (!token) throw new Error("No authentication token available");
+      await apiFetch(
+        `/api/v1/campaigns/${campaignId}/members/${encodeURIComponent(member.user_id)}`,
+        {
+          token,
+          method: "DELETE",
+        }
+      );
+      const [eventsData, membersData] = await Promise.all([
+        apiFetch<{ events: CampaignEventItem[] }>(
+          `/api/v1/campaigns/${campaignId}/events?limit=20`,
+          { token, method: "GET" }
+        ),
+        apiFetch<{ members: TeamMemberStatusItem[] }>(
+          `/api/v1/campaigns/${campaignId}/members?mentions_only=true`,
+          { token, method: "GET" }
+        ),
+      ]);
+      setEvents(eventsData.events || []);
+      setTeamMembers(membersData.members || []);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to remove member.";
+      setRemoveMemberError(message);
+      window.alert(message);
+    } finally {
+      setRemovingMemberUserId(null);
+    }
+  };
+
   return (
     <div className="min-h-full overflow-y-auto bg-[#f7f5ef] px-4 py-6 text-[#1f2a44] sm:px-6 lg:px-8 lg:py-8">
       <div className="mx-auto w-full max-w-5xl">
@@ -587,45 +629,75 @@ export default function CampaignOverviewPage() {
                 </button>
               ) : null}
             </div>
+            {removeMemberError ? (
+              <div className="mb-3 rounded-md border border-red-600/20 bg-red-500/10 px-3 py-2 text-xs text-red-700">
+                {removeMemberError}
+              </div>
+            ) : null}
             <div className="space-y-3">
               {sortedTeamMembers.length === 0 ? (
                 <p className="text-sm text-[#8a90a0]">No campaign members found.</p>
               ) : (
-                sortedTeamMembers.map((member) => (
-                  <div key={member.user_id} className="flex items-center gap-3">
-                    <div className="relative">
-                      <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#ebe4d6] text-xs font-medium text-[#1f2a44]">
-                        {member.display_name
-                          .split(" ")
-                          .map((n) => n[0])
-                          .join("")
-                          .slice(0, 2)
-                          .toUpperCase()}
+                sortedTeamMembers.map((member) => {
+                  const isSelf = !!user?.id && member.user_id === user.id;
+                  const canRemove = isLead && !isSelf;
+                  const isRemoving = removingMemberUserId === member.user_id;
+                  return (
+                    <div
+                      key={member.user_id}
+                      className="group flex items-center gap-3"
+                    >
+                      <div className="relative">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#ebe4d6] text-xs font-medium text-[#1f2a44]">
+                          {member.display_name
+                            .split(" ")
+                            .map((n) => n[0])
+                            .join("")
+                            .slice(0, 2)
+                            .toUpperCase()}
+                        </div>
+                        <div
+                          className={cn(
+                            "absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border border-[#f7f5ef]",
+                            member.status === "active"
+                              ? "bg-emerald-500"
+                              : member.status === "away"
+                              ? "bg-amber-500"
+                              : "bg-sky-500"
+                          )}
+                        />
                       </div>
-                      <div
-                        className={cn(
-                          "absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border border-[#f7f5ef]",
-                          member.status === "active"
-                            ? "bg-emerald-500"
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm font-medium text-[#1f2a44]">{member.display_name}</p>
+                        <p className="truncate text-[11px] text-[#8a90a0]">
+                          {member.role || "Member"} •{" "}
+                          {member.status === "in_meeting"
+                            ? "In a meeting"
                             : member.status === "away"
-                            ? "bg-amber-500"
-                            : "bg-sky-500"
-                        )}
-                      />
+                            ? "Away"
+                            : "Active"}
+                        </p>
+                      </div>
+                      {canRemove ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleRemoveMember(member);
+                          }}
+                          disabled={isRemoving}
+                          className={cn(
+                            "rounded-md p-1 text-[#8a90a0] opacity-0 transition hover:bg-[#f1ece2] hover:text-[#9e3434] focus:opacity-100 group-hover:opacity-100",
+                            isRemoving && "opacity-100"
+                          )}
+                          title={`Remove ${member.display_name} from campaign`}
+                          aria-label={`Remove ${member.display_name} from campaign`}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      ) : null}
                     </div>
-                    <div className="min-w-0">
-                      <p className="truncate text-sm font-medium text-[#1f2a44]">{member.display_name}</p>
-                      <p className="truncate text-[11px] text-[#8a90a0]">
-                        {member.role || "Member"} •{" "}
-                        {member.status === "in_meeting"
-                          ? "In a meeting"
-                          : member.status === "away"
-                          ? "Away"
-                          : "Active"}
-                      </p>
-                    </div>
-                  </div>
-                ))
+                  );
+                })
               )}
             </div>
           </section>
