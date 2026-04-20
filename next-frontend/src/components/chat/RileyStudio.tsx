@@ -1717,7 +1717,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
               </div>
             </div>
 
-            <div className={cn("mx-1 h-px", isGlobal ? "bg-[#e1d8c8]" : "bg-[#d9dfd2]")} />
+            <div className={cn("mx-1 h-px", isGlobal ? "hidden" : "bg-[#d9dfd2]")} />
             <div>
               <div className={cn("px-2 pb-1 text-[11px] uppercase tracking-wide", isGlobal ? "text-[#8a90a0]" : "text-[#7d8799]")}>Ungrouped chats</div>
               <div className="space-y-1">
@@ -1736,20 +1736,14 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
       {/* Main Area */}
       <main className="riley-chat-area flex min-w-0 flex-1 flex-col">
-        {/* Header with Mode Toggle */}
-        <header
-          className={cn(
-            "h-16 flex items-center justify-between px-6 shrink-0",
-            isGlobal ? "border-b border-[#e3dac8] bg-[#fbf8f2]" : "h-auto min-h-16 border-b border-[#e5ddce] bg-[#f7f5ef] py-3"
-          )}
-        >
-          <div className="flex items-center gap-2">
-            {isGlobal ? (
-              <div>
-                <h1 className="text-lg font-semibold text-[#1f2a44]">Riley</h1>
-                <p className="text-xs text-[#6f788a]">Rally Global Brain</p>
-              </div>
-            ) : (
+        {!isGlobal && (
+          <header
+            className={cn(
+              "h-16 flex items-center justify-between px-6 shrink-0",
+              "h-auto min-h-16 border-b border-[#e5ddce] bg-[#f7f5ef] py-3"
+            )}
+          >
+            <div className="flex items-center gap-2">
               <div className="flex items-center gap-3">
                 <div className="flex h-8 w-8 items-center justify-center rounded-full border border-[#d8cb9d] bg-[#eadfb7]">
                   <span className="text-xs font-semibold text-[#6d560f]">R</span>
@@ -1759,26 +1753,19 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   <p className="text-xs text-[#6f788a]">{contextName || "Campaign Workspace"}</p>
                 </div>
               </div>
-            )}
-            {!isSidebarOpen && !isGlobal && !showCollapsedRail && (
-              <button
-                type="button"
-                onClick={() => setIsSidebarOpen(true)}
-                className={cn(
-                  "ml-2 inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors",
-                  isGlobal
-                    ? "border-[#d8d0bf] bg-white text-[#4d5871] hover:bg-[#f7f2e8]"
-                    : "border-[#d5dccf] bg-[#f8faf6] text-[#5d687f] hover:bg-[#eef2e9]"
-                )}
-                aria-label="Open sidebar"
-                title="Open sidebar"
-              >
-                <ChevronRight className="h-4 w-4" />
-              </button>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            {!isGlobal && (
+              {!isSidebarOpen && !showCollapsedRail && (
+                <button
+                  type="button"
+                  onClick={() => setIsSidebarOpen(true)}
+                  className="ml-2 inline-flex h-8 w-8 items-center justify-center rounded-md border border-[#d5dccf] bg-[#f8faf6] text-[#5d687f] transition-colors hover:bg-[#eef2e9]"
+                  aria-label="Open sidebar"
+                  title="Open sidebar"
+                >
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => setIsReportModalOpen(true)}
@@ -1788,8 +1775,6 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                 <ClipboardList className="h-4 w-4" />
                 <span>Generate Report</span>
               </button>
-            )}
-            {!isGlobal && (
               <>
                 <button
                   type="button"
@@ -1818,9 +1803,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                   <span>Deep</span>
                 </button>
               </>
-            )}
-          </div>
-        </header>
+            </div>
+          </header>
+        )}
 
         {!isGlobal && (
           <div className="border-b border-[#e5ddce] bg-[#f6f2e8] px-6 py-2.5">
@@ -1832,6 +1817,11 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
         {/* Message Area */}
         <div className="chat-container flex-1 overflow-y-auto">
+          {isGlobal ? (
+            <div className="px-6 pt-5 pb-1">
+              <h1 className="text-sm font-medium text-[#5d687f]">Riley</h1>
+            </div>
+          ) : null}
           {showWelcome ? (
             /* Empty State */
             <div className="h-full flex flex-col items-center justify-center px-6 py-12">
@@ -2200,7 +2190,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           className={cn(
             "flex-shrink-0 p-4",
             isGlobal
-              ? "border-t border-[#e3dac8] bg-[#fbf8f2]"
+              ? "bg-transparent"
               : "border-t border-[#e5ddce] bg-[#f7f5ef]"
           )}
         >
