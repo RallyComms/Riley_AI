@@ -1,5 +1,6 @@
-from datetime import datetime
-from typing import Any, Dict, List, Sequence, Optional
+import copy
+from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Dict, List, Sequence, Optional
 import logging
 
 from qdrant_client import AsyncQdrantClient
@@ -17,6 +18,8 @@ class VectorService:
     All access is strictly tenant-scoped via Qdrant filters to preserve
     data sovereignty between clients.
     """
+
+    _USAGE_METRICS_CACHE_TTL_SECONDS = 10 * 60
 
     def __init__(self, client: AsyncQdrantClient | None = None) -> None:
         settings = get_settings()
@@ -38,6 +41,9 @@ class VectorService:
         self._bm25_support_cache: Dict[str, bool] = {}
         self._bm25_warned_collections: set[str] = set()
         self._chunk_type_index_unavailable_collections: set[str] = set()
+        self._usage_metrics_cache: Optional[Dict[str, Any]] = None
+        self._usage_metrics_cache_expires_at: Optional[datetime] = None
+        self._usage_metrics_cache_key: Optional[str] = None
 
     @property
     def client(self) -> AsyncQdrantClient:
@@ -176,6 +182,16 @@ class VectorService:
             )
         except Exception:
             pass
+        # Campaign ownership/source fields used by hard-delete and campaign-scoped filters.
+        for field_name in ("client_id", "tenant_id", "source_campaign_id"):
+            try:
+                await self._client.create_payload_index(
+                    collection_name=collection_name,
+                    field_name=field_name,
+                    field_schema=models.PayloadSchemaType.KEYWORD,
+                )
+            except Exception:
+                pass
 
     async def _ensure_collection(self, collection_name: str) -> None:
         """Create a collection if it doesn't exist, using the configured vector params."""
@@ -1556,20 +1572,28 @@ class VectorService:
 
     async def hard_delete_campaign_vectors(self, campaign_id: str) -> Dict[str, Any]:
         """Hard delete vectors for a campaign across shared collections."""
-        if campaign_id == "global" or not campaign_id or not campaign_id.strip():
+        normalized_campaign_id = str(campaign_id or "").strip()
+        if normalized_campaign_id.lower() == "global" or not normalized_campaign_id:
             raise ValueError(f"Cannot delete vectors for campaign_id '{campaign_id}'. Protected campaign.")
 
         settings = get_settings()
+        # Best-effort ensure for legacy collections that predate payload indexes.
+        await self._ensure_payload_indexes(settings.QDRANT_COLLECTION_TIER_1)
+        await self._ensure_payload_indexes(settings.QDRANT_COLLECTION_TIER_2)
+
         vector_count_deleted = 0
         file_urls: List[str] = []
 
-        async def _collect_points(collection_name: str, qdrant_filter: Filter) -> List[Any]:
+        async def _collect_points_unfiltered(
+            collection_name: str,
+            *,
+            payload_matcher: Callable[[Dict[str, Any]], bool],
+        ) -> List[Any]:
             points: List[Any] = []
             offset = None
             while True:
                 scroll_result = await self._client.scroll(
                     collection_name=collection_name,
-                    scroll_filter=qdrant_filter,
                     limit=500,
                     offset=offset,
                     with_payload=True,
@@ -1578,10 +1602,56 @@ class VectorService:
                 batch = scroll_result[0]
                 if not batch:
                     break
-                points.extend(batch)
+                points.extend(
+                    point for point in batch if payload_matcher(point.payload or {})
+                )
                 offset = scroll_result[1]
                 if offset is None:
                     break
+            return points
+
+        async def _collect_points(
+            collection_name: str,
+            qdrant_filter: Filter,
+            *,
+            fallback_on_missing_index_for: Optional[str] = None,
+            fallback_payload_matcher: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        ) -> List[Any]:
+            points: List[Any] = []
+            offset = None
+            try:
+                while True:
+                    scroll_result = await self._client.scroll(
+                        collection_name=collection_name,
+                        scroll_filter=qdrant_filter,
+                        limit=500,
+                        offset=offset,
+                        with_payload=True,
+                        with_vectors=False,
+                    )
+                    batch = scroll_result[0]
+                    if not batch:
+                        break
+                    points.extend(batch)
+                    offset = scroll_result[1]
+                    if offset is None:
+                        break
+            except Exception as exc:
+                if (
+                    fallback_on_missing_index_for
+                    and fallback_payload_matcher is not None
+                    and self._is_missing_payload_index_error(exc, fallback_on_missing_index_for)
+                ):
+                    logger.warning(
+                        "qdrant_missing_payload_index_fallback collection=%s field=%s",
+                        collection_name,
+                        fallback_on_missing_index_for,
+                    )
+                    return await _collect_points_unfiltered(
+                        collection_name,
+                        payload_matcher=fallback_payload_matcher,
+                    )
+                raise
             return points
 
         async def _delete_points(collection_name: str, point_ids: List[str]) -> None:
@@ -1596,9 +1666,17 @@ class VectorService:
 
         # Tier 2 (shared private collection): delete all points where client_id == campaign_id.
         tier2_filter = Filter(
-            must=[FieldCondition(key="client_id", match=MatchValue(value=campaign_id))]
+            must=[FieldCondition(key="client_id", match=MatchValue(value=normalized_campaign_id))]
         )
-        tier2_points = await _collect_points(settings.QDRANT_COLLECTION_TIER_2, tier2_filter)
+        tier2_points = await _collect_points(
+            settings.QDRANT_COLLECTION_TIER_2,
+            tier2_filter,
+            fallback_on_missing_index_for="client_id",
+            fallback_payload_matcher=(
+                lambda payload: str(payload.get("client_id") or "").strip()
+                == normalized_campaign_id
+            ),
+        )
         tier2_ids = [str(point.id) for point in tier2_points]
         for point in tier2_points:
             url = (point.payload or {}).get("url")
@@ -1609,12 +1687,22 @@ class VectorService:
         # Tier 1 (global archive copies): delete file points sourced from this campaign.
         tier1_filter = Filter(
             should=[
-                FieldCondition(key="source_campaign_id", match=MatchValue(value=campaign_id)),
-                FieldCondition(key="client_id", match=MatchValue(value=campaign_id)),
-                FieldCondition(key="tenant_id", match=MatchValue(value=campaign_id)),
+                FieldCondition(key="source_campaign_id", match=MatchValue(value=normalized_campaign_id)),
+                FieldCondition(key="client_id", match=MatchValue(value=normalized_campaign_id)),
+                FieldCondition(key="tenant_id", match=MatchValue(value=normalized_campaign_id)),
             ]
         )
-        tier1_points = await _collect_points(settings.QDRANT_COLLECTION_TIER_1, tier1_filter)
+        tier1_points = await _collect_points(
+            settings.QDRANT_COLLECTION_TIER_1,
+            tier1_filter,
+            fallback_on_missing_index_for="source_campaign_id",
+            fallback_payload_matcher=(
+                lambda payload: str(payload.get("source_campaign_id") or "").strip()
+                == normalized_campaign_id
+                or str(payload.get("client_id") or "").strip() == normalized_campaign_id
+                or str(payload.get("tenant_id") or "").strip() == normalized_campaign_id
+            ),
+        )
         tier1_ids = [str(point.id) for point in tier1_points]
         parent_file_ids: List[str] = []
         for point in tier1_points:
@@ -1676,6 +1764,18 @@ class VectorService:
         vector_bytes = max(1, int(settings.EMBEDDING_DIM)) * 4
 
         qdrant_cost_per_gb_month_usd = float(settings.QDRANT_COST_PER_GB_MONTH_USD or 0.25)
+        cache_key = (
+            f"{collections[0]}|{collections[1]}|{vector_bytes}|"
+            f"{qdrant_cost_per_gb_month_usd}"
+        )
+        now = datetime.now(timezone.utc)
+        if (
+            self._usage_metrics_cache_key == cache_key
+            and self._usage_metrics_cache is not None
+            and self._usage_metrics_cache_expires_at is not None
+            and self._usage_metrics_cache_expires_at > now
+        ):
+            return copy.deepcopy(self._usage_metrics_cache)
 
         campaign_vector_counts: Dict[str, int] = {}
         total_vectors = 0
@@ -1733,12 +1833,18 @@ class VectorService:
         total_estimated_size_mb = (float(total_vectors) * float(vector_bytes)) / float(1024 * 1024)
         estimated_monthly_cost = (total_estimated_size_mb / 1024.0) * qdrant_cost_per_gb_month_usd
 
-        return {
+        result = {
             "total_vectors": int(total_vectors),
             "campaigns": campaigns,
             "total_estimated_size_mb": round(float(total_estimated_size_mb), 2),
             "estimated_monthly_cost": round(float(estimated_monthly_cost), 2),
         }
+        self._usage_metrics_cache_key = cache_key
+        self._usage_metrics_cache_expires_at = datetime.now(timezone.utc) + timedelta(
+            seconds=self._USAGE_METRICS_CACHE_TTL_SECONDS
+        )
+        self._usage_metrics_cache = copy.deepcopy(result)
+        return result
 
     async def delete_tenant_data(self, tenant_id: str) -> List[str]:
         """Delete all data for a tenant from Qdrant and return list of file URLs.

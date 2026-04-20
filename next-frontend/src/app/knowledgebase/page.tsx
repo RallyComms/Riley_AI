@@ -60,6 +60,25 @@ export default function KnowledgebasePage() {
     }
   };
 
+  const handleRestore = (campaignId: string) => {
+    const confirmed = window.confirm("Restore this archived campaign?");
+    if (!confirmed) return;
+
+    void (async () => {
+      try {
+        const token = await getToken();
+        if (!token) throw new Error("No authentication token available");
+        await apiFetch(`/api/v1/campaigns/${encodeURIComponent(campaignId)}/restore`, {
+          token,
+          method: "PATCH",
+        });
+        setCampaignsVersion((prev) => prev + 1);
+      } catch (error) {
+        alert(`Failed to restore campaign: ${error instanceof Error ? error.message : "Unknown error"}`);
+      }
+    })();
+  };
+
   return (
     <div className="mx-auto w-full max-w-7xl">
       <section className="mb-3 px-1 py-1">
@@ -83,7 +102,7 @@ export default function KnowledgebasePage() {
         onEnterCampaign={(campaignId) => router.push(`/campaign/${campaignId}`)}
         onRequestAccess={handleRequestAccess}
         onArchive={handleArchive}
-        onRestore={() => {}}
+        onRestore={handleRestore}
         onTerminate={handleTerminate}
         terminatingCampaignId={terminatingCampaignId}
         campaignsVersion={campaignsVersion}

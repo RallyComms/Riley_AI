@@ -2324,6 +2324,30 @@ class GraphService:
                 "archived_at": record.get("archived_at"),
             }
 
+    async def restore_campaign(self, campaign_id: str) -> Dict[str, Any]:
+        """Restore an archived campaign to active status."""
+        async with self._driver.session() as session:
+            query = """
+            MATCH (c:Campaign {id: $campaign_id})
+            SET
+                c.status = "active",
+                c.archived_at = NULL,
+                c.last_activity_at = datetime()
+            RETURN
+                c.id as id,
+                coalesce(c.status, "active") as status,
+                toString(c.archived_at) as archived_at
+            """
+            result = await session.run(query, campaign_id=campaign_id)
+            record = await result.single()
+            if not record:
+                raise ValueError(f"Campaign {campaign_id} not found")
+            return {
+                "id": record.get("id"),
+                "status": record.get("status") or "active",
+                "archived_at": record.get("archived_at"),
+            }
+
     async def is_campaign_archived(self, campaign_id: str) -> bool:
         """Return whether campaign is archived; raise if missing."""
         async with self._driver.session() as session:
@@ -5012,6 +5036,8 @@ class GraphService:
             RETURN
                 coalesce(u.email, $email_fallback) as email,
                 u.username as username,
+                u.first_name as first_name,
+                u.last_name as last_name,
                 u.display_name as display_name,
                 u.avatar_url as avatar_url,
                 toString(u.updated_at) as updated_at
@@ -5026,6 +5052,8 @@ class GraphService:
                 return {
                     "email": email_fallback or "",
                     "username": None,
+                    "first_name": None,
+                    "last_name": None,
                     "display_name": None,
                     "avatar_url": None,
                     "updated_at": None,
@@ -5033,6 +5061,8 @@ class GraphService:
             return {
                 "email": record.get("email") or (email_fallback or ""),
                 "username": record.get("username"),
+                "first_name": record.get("first_name"),
+                "last_name": record.get("last_name"),
                 "display_name": record.get("display_name"),
                 "avatar_url": record.get("avatar_url"),
                 "updated_at": record.get("updated_at"),
@@ -5136,7 +5166,46 @@ class GraphService:
             user_id=normalized_user_id,
             email_fallback=normalized_email,
         )
-        has_resolved_identity = _is_meaningful_identity_value(profile.get("display_name"))
+        profile_display_name = str(profile.get("display_name") or "").strip()
+        profile_username = str(profile.get("username") or "").strip()
+        profile_email = str(profile.get("email") or "").strip()
+        profile_first_name = str(profile.get("first_name") or "").strip()
+        profile_last_name = str(profile.get("last_name") or "").strip()
+        stored_full_name = f"{profile_first_name} {profile_last_name}".strip()
+        email_prefix = profile_email.split("@")[0].strip() if "@" in profile_email else profile_email
+        display_matches_username = (
+            _is_meaningful_identity_value(profile_display_name)
+            and _is_meaningful_identity_value(profile_username)
+            and profile_display_name.lower() == profile_username.lower()
+        )
+        display_matches_email_prefix = (
+            _is_meaningful_identity_value(profile_display_name)
+            and _is_meaningful_identity_value(email_prefix)
+            and profile_display_name.lower() == email_prefix.lower()
+        )
+        if _is_meaningful_identity_value(stored_full_name) and (
+            not _is_meaningful_identity_value(profile_display_name)
+            or display_matches_username
+            or display_matches_email_prefix
+        ):
+            await self.upsert_user_identity(
+                user_id=normalized_user_id,
+                display_name=stored_full_name,
+                first_name=profile_first_name or None,
+                last_name=profile_last_name or None,
+            )
+            profile["display_name"] = stored_full_name
+            profile_display_name = stored_full_name
+
+        # Treat username/email-prefix display names as weak identities so we can
+        # opportunistically refresh from Clerk and promote real names when present.
+        has_weak_display_identity = (
+            display_matches_username or display_matches_email_prefix
+        )
+        has_resolved_identity = (
+            _is_meaningful_identity_value(profile_display_name)
+            and not has_weak_display_identity
+        )
 
         if (not has_resolved_identity) and fetch_from_clerk_if_missing:
             clerk_user: Optional[Dict[str, str]] = None

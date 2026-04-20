@@ -59,6 +59,13 @@ class ArchiveCampaignResponse(BaseModel):
     archived_at: Optional[str] = None
 
 
+class RestoreCampaignResponse(BaseModel):
+    ok: bool
+    id: str
+    status: Literal["active"]
+    archived_at: Optional[str] = None
+
+
 class CreateAccessRequest(BaseModel):
     message: Optional[str] = Field(None, max_length=500, description="Optional access request message")
 
@@ -480,6 +487,41 @@ async def archive_campaign(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to archive campaign: {exc}",
+        ) from exc
+
+
+@router.patch("/campaigns/{id}/restore", response_model=RestoreCampaignResponse)
+async def restore_campaign(
+    id: str,
+    request: Request,
+    current_user: Dict = Depends(verify_tenant_access),
+    graph: GraphService = Depends(get_graph),
+) -> RestoreCampaignResponse:
+    """Restore a previously archived campaign."""
+    try:
+        await _require_lead_for_campaign(
+            id,
+            current_user,
+            graph,
+            request=request,
+            action="campaign_restore",
+        )
+        restored = await graph.restore_campaign(campaign_id=id)
+        return RestoreCampaignResponse(
+            ok=True,
+            id=restored.get("id") or id,
+            status="active",
+            archived_at=restored.get("archived_at"),
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to restore campaign: {exc}",
         ) from exc
 
 
