@@ -49,15 +49,50 @@ interface TeamMemberStatusItem {
   status_updated_at?: string | null;
 }
 
+interface CampaignOverviewCacheEntry {
+  events: CampaignEventItem[];
+  teamMembers: TeamMemberStatusItem[];
+  deadlines: CampaignDeadlineItem[];
+}
+
+const campaignOverviewCache = new Map<string, CampaignOverviewCacheEntry>();
+
+const getCampaignOverviewCacheEntry = (campaignId: string | undefined) => {
+  if (!campaignId) return undefined;
+  return campaignOverviewCache.get(campaignId);
+};
+
+const updateCampaignOverviewCache = (
+  campaignId: string | undefined,
+  update: Partial<CampaignOverviewCacheEntry>
+) => {
+  if (!campaignId) return;
+  const existingEntry = campaignOverviewCache.get(campaignId) ?? {
+    events: [],
+    teamMembers: [],
+    deadlines: [],
+  };
+  campaignOverviewCache.set(campaignId, {
+    ...existingEntry,
+    ...update,
+  });
+};
+
 export default function CampaignOverviewPage() {
   const params = useParams();
   const campaignId = params.id as string;
   const { user } = useUser();
   const { getToken, isLoaded } = useAuth();
   const { name: campaignName } = useCampaignName(campaignId);
-  const [events, setEvents] = useState<CampaignEventItem[]>([]);
-  const [deadlines, setDeadlines] = useState<CampaignDeadlineItem[]>([]);
-  const [teamMembers, setTeamMembers] = useState<TeamMemberStatusItem[]>([]);
+  const [events, setEvents] = useState<CampaignEventItem[]>(
+    () => getCampaignOverviewCacheEntry(campaignId)?.events ?? []
+  );
+  const [deadlines, setDeadlines] = useState<CampaignDeadlineItem[]>(
+    () => getCampaignOverviewCacheEntry(campaignId)?.deadlines ?? []
+  );
+  const [teamMembers, setTeamMembers] = useState<TeamMemberStatusItem[]>(
+    () => getCampaignOverviewCacheEntry(campaignId)?.teamMembers ?? []
+  );
   const [isDeadlineFormOpen, setIsDeadlineFormOpen] = useState(false);
   const [deadlineTitle, setDeadlineTitle] = useState("");
   const [deadlineDescription, setDeadlineDescription] = useState("");
@@ -158,7 +193,9 @@ export default function CampaignOverviewPage() {
           }
         );
         if (mounted) {
-          setEvents(data.events || []);
+          const nextEvents = data.events || [];
+          setEvents(nextEvents);
+          updateCampaignOverviewCache(campaignId, { events: nextEvents });
         }
       } catch (err) {
         console.error("Failed to load campaign activity events:", err);
@@ -322,10 +359,11 @@ export default function CampaignOverviewPage() {
             method: "GET",
           }
         );
-        setTeamMembers(data.members || []);
+        const nextTeamMembers = data.members || [];
+        setTeamMembers(nextTeamMembers);
+        updateCampaignOverviewCache(campaignId, { teamMembers: nextTeamMembers });
       } catch (err) {
         console.error("Failed to load campaign team status:", err);
-        setTeamMembers([]);
       }
     };
     fetchTeamMembers();
@@ -344,10 +382,11 @@ export default function CampaignOverviewPage() {
             method: "GET",
           }
         );
-        setDeadlines(data.deadlines || []);
+        const nextDeadlines = data.deadlines || [];
+        setDeadlines(nextDeadlines);
+        updateCampaignOverviewCache(campaignId, { deadlines: nextDeadlines });
       } catch (err) {
         console.error("Failed to load campaign deadlines:", err);
-        setDeadlines([]);
       }
     };
     fetchDeadlines();
@@ -393,8 +432,14 @@ export default function CampaignOverviewPage() {
           { token, method: "GET" }
         ),
       ]);
-      setEvents(eventsData.events || []);
-      setDeadlines(deadlinesData.deadlines || []);
+      const nextEvents = eventsData.events || [];
+      const nextDeadlines = deadlinesData.deadlines || [];
+      setEvents(nextEvents);
+      setDeadlines(nextDeadlines);
+      updateCampaignOverviewCache(campaignId, {
+        events: nextEvents,
+        deadlines: nextDeadlines,
+      });
     } catch (err) {
       setDeadlineError(
         err instanceof Error ? err.message : "Failed to create deadline."
@@ -423,7 +468,11 @@ export default function CampaignOverviewPage() {
         token,
         method: "POST",
       });
-      setDeadlines((prev) => prev.filter((deadline) => deadline.id !== deadlineId));
+      setDeadlines((prev) => {
+        const nextDeadlines = prev.filter((deadline) => deadline.id !== deadlineId);
+        updateCampaignOverviewCache(campaignId, { deadlines: nextDeadlines });
+        return nextDeadlines;
+      });
     } catch (err) {
       console.error("Failed to complete deadline:", err);
     } finally {
@@ -448,7 +497,11 @@ export default function CampaignOverviewPage() {
           body: { action },
         }
       );
-      setEvents((prev) => prev.filter((e) => e.id !== event.id));
+      setEvents((prev) => {
+        const nextEvents = prev.filter((e) => e.id !== event.id);
+        updateCampaignOverviewCache(campaignId, { events: nextEvents });
+        return nextEvents;
+      });
     } catch (err) {
       console.error("Failed to resolve access request from activity:", err);
     } finally {
@@ -468,7 +521,11 @@ export default function CampaignOverviewPage() {
           method: "POST",
         }
       );
-      setEvents((prev) => prev.filter((event) => event.id !== eventId));
+      setEvents((prev) => {
+        const nextEvents = prev.filter((event) => event.id !== eventId);
+        updateCampaignOverviewCache(campaignId, { events: nextEvents });
+        return nextEvents;
+      });
     } catch (err) {
       console.error("Failed to dismiss activity event:", err);
     } finally {
@@ -533,8 +590,14 @@ export default function CampaignOverviewPage() {
           { token, method: "GET" }
         ),
       ]);
-      setEvents(eventsData.events || []);
-      setTeamMembers(membersData.members || []);
+      const nextEvents = eventsData.events || [];
+      const nextTeamMembers = membersData.members || [];
+      setEvents(nextEvents);
+      setTeamMembers(nextTeamMembers);
+      updateCampaignOverviewCache(campaignId, {
+        events: nextEvents,
+        teamMembers: nextTeamMembers,
+      });
     } catch (err) {
       setAddUserError(err instanceof Error ? err.message : "Failed to add member.");
     } finally {
@@ -583,8 +646,14 @@ export default function CampaignOverviewPage() {
           { token, method: "GET" }
         ),
       ]);
-      setEvents(eventsData.events || []);
-      setTeamMembers(membersData.members || []);
+      const nextEvents = eventsData.events || [];
+      const nextTeamMembers = membersData.members || [];
+      setEvents(nextEvents);
+      setTeamMembers(nextTeamMembers);
+      updateCampaignOverviewCache(campaignId, {
+        events: nextEvents,
+        teamMembers: nextTeamMembers,
+      });
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to remove member.";
       setRemoveMemberError(message);
