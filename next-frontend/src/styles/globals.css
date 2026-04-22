@@ -296,11 +296,23 @@ body {
   color: #1f2a44;
 }
 
+.riley-md.riley-md-light p,
+.riley-md.riley-md-light ul,
+.riley-md.riley-md-light ol,
+.riley-md.riley-md-light li,
+.riley-md.riley-md-light em {
+  color: #1f2a44;
+}
+
 .riley-md.riley-md-light h1,
 .riley-md.riley-md-light h2,
 .riley-md.riley-md-light h3,
 .riley-md.riley-md-light strong {
-  color: #1f2a44;
+  color: #14223b;
+}
+
+.riley-md.riley-md-light li::marker {
+  color: #6f788a;
 }
 
 .riley-md.riley-md-light blockquote {
@@ -317,4 +329,14 @@ body {
   background-color: #f4efe3;
   color: #1f2a44;
   border-color: #ddd5c5;
+}
+
+.riley-md.riley-md-light a {
+  color: #325590;
+  text-decoration-color: rgba(50, 85, 144, 0.35);
+}
+
+.riley-md.riley-md-light a:hover {
+  color: #25436f;
+  text-decoration-color: rgba(37, 67, 111, 0.5);
 }

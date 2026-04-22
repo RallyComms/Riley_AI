@@ -1992,15 +1992,11 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                         // Typewriter effect only for the currently live assistant response
                         <TypewriterMarkdown
                           content={message.content}
-                          className={cn(
-                            !isGlobal && "riley-md-light",
-                            isGlobal &&
-                              "text-[#1f2a44] [&_p]:text-[#1f2a44] [&_li]:text-[#1f2a44] [&_strong]:text-[#1f2a44] [&_em]:text-[#1f2a44] [&_h1]:text-[#1f2a44] [&_h2]:text-[#1f2a44] [&_h3]:text-[#1f2a44] [&_blockquote]:text-[#1f2a44] [&_code]:text-[#1f2a44] [&_pre]:text-[#1f2a44]"
-                          )}
+                          className="riley-md-light"
                         />
                       ) : message.role === "assistant" ? (
                         // Static markdown for previous assistant messages
-                        <div className={cn("riley-md", !isGlobal && "riley-md-light", "text-[#1f2a44] [&_p]:text-[#1f2a44] [&_li]:text-[#1f2a44] [&_strong]:text-[#1f2a44] [&_em]:text-[#1f2a44] [&_h1]:text-[#1f2a44] [&_h2]:text-[#1f2a44] [&_h3]:text-[#1f2a44] [&_blockquote]:text-[#1f2a44] [&_code]:text-[#1f2a44] [&_pre]:text-[#1f2a44]")}>
+                        <div className="riley-md riley-md-light">
                           <ReactMarkdown remarkPlugins={[remarkBreaks]}>
                             {message.content.replace(/<br\s*\/?>/gi, '\n\n')}
                           </ReactMarkdown>
