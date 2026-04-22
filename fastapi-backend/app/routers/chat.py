@@ -1,9 +1,10 @@
 import asyncio
+from contextlib import suppress
 import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Awaitable, Dict, List, Literal, Optional, TypeVar
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Depends, Request
 from fastapi.concurrency import run_in_threadpool
@@ -36,6 +37,40 @@ from app.services.pricing_registry import estimate_text_generation_cost
 from app.services.token_utils import estimate_tokens
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
+
+
+class ClientDisconnectedError(RuntimeError):
+    """Raised when the HTTP client disconnects before completion."""
+
+
+async def _raise_if_client_disconnected(http_request: Request) -> None:
+    if await http_request.is_disconnected():
+        raise ClientDisconnectedError("Client disconnected before completion")
+
+
+async def _await_with_disconnect_guard(
+    *,
+    http_request: Request,
+    operation: Awaitable[T],
+    poll_interval_seconds: float = 0.2,
+) -> T:
+    operation_task = asyncio.create_task(operation)
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {operation_task},
+                timeout=max(0.05, poll_interval_seconds),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if operation_task in done:
+                return operation_task.result()
+            await _raise_if_client_disconnected(http_request)
+    finally:
+        if not operation_task.done():
+            operation_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await operation_task
 
 def _extract_user_id_from_session(session_id: str) -> str:
     """Extract user_id from session_id format: session_{tenantId}_{userId}_{timestamp}
@@ -1365,6 +1400,17 @@ Context Data:
     system_prompt += f"\nUser Question: {request.query}"
 
     # Step F: Generate response using Riley primary provider (Gemini) with OpenAI fallback.
+    try:
+        await _raise_if_client_disconnected(http_request)
+    except ClientDisconnectedError:
+        logger.info(
+            "chat_generation_aborted_client_disconnect tenant_id=%s session_id=%s stage=%s",
+            request.tenant_id,
+            request.session_id,
+            "before_generation",
+        )
+        raise HTTPException(status_code=499, detail="Client disconnected") from None
+
     use_deep_model = is_deep_request
     primary_model = _get_riley_model_name(deep=use_deep_model)
     fallback_model = settings.RILEY_OPENAI_FALLBACK_MODEL
@@ -1375,10 +1421,13 @@ Context Data:
     generation_usage: Dict[str, int] = {}
     generation_usage_is_exact = False
     try:
-        response_text, gemini_usage = await generate_text_with_gemini_with_usage(
-            prompt=system_prompt,
-            model_name=primary_model,
-            timeout_seconds=max(5, int(settings.RILEY_TIMEOUT_SECONDS)),
+        response_text, gemini_usage = await _await_with_disconnect_guard(
+            http_request=http_request,
+            operation=generate_text_with_gemini_with_usage(
+                prompt=system_prompt,
+                model_name=primary_model,
+                timeout_seconds=max(5, int(settings.RILEY_TIMEOUT_SECONDS)),
+            ),
         )
         gemini_usage_exact = _has_exact_usage(gemini_usage)
         generation_usage = {
@@ -1397,6 +1446,15 @@ Context Data:
             generation_usage["completion_tokens"] = int(generation_usage["output_tokens"])
         generation_usage_is_exact = gemini_usage_exact
         generation_model_used = primary_model
+    except ClientDisconnectedError:
+        logger.info(
+            "chat_generation_aborted_client_disconnect tenant_id=%s session_id=%s stage=%s provider=%s",
+            request.tenant_id,
+            request.session_id,
+            "primary_generation",
+            "gemini",
+        )
+        raise HTTPException(status_code=499, detail="Client disconnected") from None
     except LLMCostGuardrailExceeded as exc:
         raise HTTPException(status_code=503, detail=GUARDRAIL_USER_MESSAGE) from exc
     except Exception as exc:
@@ -1432,10 +1490,13 @@ Context Data:
                 True,
             )
             try:
-                response_text, openai_usage = await _generate_riley_answer_openai(
-                    prompt=system_prompt,
-                    model_name=fallback_model,
-                    timeout_seconds=max(5, int(settings.RILEY_TIMEOUT_SECONDS)),
+                response_text, openai_usage = await _await_with_disconnect_guard(
+                    http_request=http_request,
+                    operation=_generate_riley_answer_openai(
+                        prompt=system_prompt,
+                        model_name=fallback_model,
+                        timeout_seconds=max(5, int(settings.RILEY_TIMEOUT_SECONDS)),
+                    ),
                 )
                 generation_usage = {
                     "input_tokens": int(openai_usage.get("input_tokens") or estimate_tokens(system_prompt)),
@@ -1463,6 +1524,15 @@ Context Data:
                     primary_model,
                     fallback_model,
                 )
+            except ClientDisconnectedError:
+                logger.info(
+                    "chat_generation_aborted_client_disconnect tenant_id=%s session_id=%s stage=%s provider=%s",
+                    request.tenant_id,
+                    request.session_id,
+                    "fallback_generation",
+                    "openai",
+                )
+                raise HTTPException(status_code=499, detail="Client disconnected") from None
             except Exception as fallback_exc:
                 last_error = fallback_exc
                 fallback_failure = classify_openai_generation_failure(fallback_exc)
@@ -1501,6 +1571,16 @@ Context Data:
             "output_tokens": output_tokens,
             "total_tokens": input_tokens + output_tokens,
         }
+    try:
+        await _raise_if_client_disconnected(http_request)
+    except ClientDisconnectedError:
+        logger.info(
+            "chat_generation_aborted_client_disconnect tenant_id=%s session_id=%s stage=%s",
+            request.tenant_id,
+            request.session_id,
+            "post_generation_pre_analytics",
+        )
+        raise HTTPException(status_code=499, detail="Client disconnected") from None
     generation_latency_ms = int((time.perf_counter() - generation_started) * 1000)
     generation_provider = infer_provider_from_model(generation_model_used) or "unknown"
     cost_meta = estimate_text_generation_cost(

@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { useUser, useAuth } from "@clerk/nextjs";
-import { Send, Loader2, Trash2, FileText, Pencil, RotateCcw } from "lucide-react";
+import { Send, Loader2, Trash2, FileText, Pencil, RotateCcw, Square } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import { cn } from "@app/lib/utils";
 import { TypewriterMarkdown } from "@app/components/ui/TypewriterMarkdown";
@@ -21,6 +21,13 @@ type Message = {
 type SourceCitation = {
   key: string;
   label: string;
+};
+
+type ActiveGeneration = {
+  requestId: number;
+  prompt: string;
+  userMessageId: string;
+  thinkingId: string;
 };
 
 interface RileyContextChatProps {
@@ -86,6 +93,9 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
   const [selectedSourceAsset, setSelectedSourceAsset] = useState<Asset | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const activeGenerationRef = useRef<ActiveGeneration | null>(null);
+  const activeAbortControllerRef = useRef<AbortController | null>(null);
+  const generationRequestSeqRef = useRef(0);
 
   // Derive sessionId with user ID to prevent collisions (after hooks, but handle conditionally)
   const sessionId = isLoaded && user && campaignId 
@@ -274,6 +284,7 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
   };
 
   // Check if send is enabled and why it might be disabled
+  const isGenerating = isLoading && !!activeGenerationRef.current;
   const canSend = input.trim().length > 0 && !isLoading && !missingAuth && !missingCampaignId;
   const sendDisabledReason = missingAuth 
     ? "Not authenticated" 
@@ -320,6 +331,16 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
     
     // Step 5: Set loading state
     setIsLoading(true);
+    const requestId = generationRequestSeqRef.current + 1;
+    generationRequestSeqRef.current = requestId;
+    const abortController = new AbortController();
+    activeGenerationRef.current = {
+      requestId,
+      prompt: userInput,
+      userMessageId: userMessage.id,
+      thinkingId,
+    };
+    activeAbortControllerRef.current = abortController;
 
     try {
       const token = await getToken();
@@ -337,7 +358,11 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
           session_id: sessionId,
           user_display_name: userDisplayName,
         },
+        signal: abortController.signal,
       });
+      if (activeGenerationRef.current?.requestId !== requestId) {
+        return;
+      }
 
       // Step 6: Replace thinking placeholder with actual assistant response
       const assistantMessage: Message = {
@@ -355,6 +380,13 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
     } catch (error) {
       // Log error to console for debugging
       console.error("Riley chat error:", error);
+      const isAbortError =
+        error instanceof DOMException
+          ? error.name === "AbortError"
+          : error instanceof Error && error.name === "AbortError";
+      if (isAbortError || activeGenerationRef.current?.requestId !== requestId) {
+        return;
+      }
       
       // Replace thinking placeholder with error message
       const errorText = error instanceof Error 
@@ -374,9 +406,31 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
         );
       });
     } finally {
-      setIsLoading(false);
+      if (activeGenerationRef.current?.requestId === requestId) {
+        activeGenerationRef.current = null;
+        activeAbortControllerRef.current = null;
+        setIsLoading(false);
+      }
     }
   }
+
+  const handleStopGeneration = () => {
+    const activeGeneration = activeGenerationRef.current;
+    if (!activeGeneration) return;
+    activeAbortControllerRef.current?.abort();
+    activeAbortControllerRef.current = null;
+    activeGenerationRef.current = null;
+    setMessages((prev) =>
+      prev.filter(
+        (msg) =>
+          msg.id !== activeGeneration.thinkingId &&
+          msg.id !== activeGeneration.userMessageId
+      )
+    );
+    setInput(activeGeneration.prompt);
+    setIsLoading(false);
+    inputRef.current?.focus();
+  };
 
   const getPromptForMessage = (messageId: string, snapshot: Message[]): string | null => {
     const idx = snapshot.findIndex((msg) => msg.id === messageId);
@@ -644,25 +698,34 @@ export function RileyContextChat({ mode, contextKey, campaignId, onViewAsset }: 
             disabled={isLoading || missingAuth || missingCampaignId}
             className="flex-1 rounded-lg border border-zinc-800 bg-zinc-900/50 px-3 py-2 text-sm text-zinc-100 placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-amber-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
           />
-          <button
-            type="button"
-            onClick={handleSend}
-            disabled={!canSend}
-            className={cn(
-              "flex-shrink-0 p-2 rounded-lg transition-colors",
-              canSend
-                ? "bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20"
-                : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-600 cursor-not-allowed"
-            )}
-            aria-label="Send message"
-            title={sendDisabledReason || "Send message"}
-          >
-            {isLoading ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : (
+          {isGenerating ? (
+            <button
+              type="button"
+              onClick={handleStopGeneration}
+              className="flex-shrink-0 inline-flex items-center gap-1.5 rounded-lg border border-rose-400/35 bg-rose-500/10 px-2.5 py-2 text-xs font-medium text-rose-300 transition-colors hover:bg-rose-500/20"
+              aria-label="Stop generation"
+              title="Stop generation"
+            >
+              <Square className="h-3 w-3 fill-current" />
+              <span>Stop</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleSend}
+              disabled={!canSend}
+              className={cn(
+                "flex-shrink-0 p-2 rounded-lg transition-colors",
+                canSend
+                  ? "bg-amber-500/10 border border-amber-500/20 text-amber-400 hover:bg-amber-500/20"
+                  : "bg-zinc-800/50 border border-zinc-700/50 text-zinc-600 cursor-not-allowed"
+              )}
+              aria-label="Send message"
+              title={sendDisabledReason || "Send message"}
+            >
               <Send className="h-4 w-4" />
-            )}
-          </button>
+            </button>
+          )}
         </div>
       </div>
       {selectedSourceAsset && (

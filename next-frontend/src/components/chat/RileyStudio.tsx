@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { useAuth, useUser } from "@clerk/nextjs";
-import { Send, Loader2, Sparkles, Zap, Brain, FileText, Check, X, Search, MessageSquare, BarChart3, ChevronLeft, FolderPlus, Folder, MoreHorizontal, ChevronDown, ChevronRight, Copy, CheckCheck, Download, ClipboardList, AlertTriangle, Pencil, RotateCcw, Trash2 } from "lucide-react";
+import { Send, Loader2, Sparkles, Zap, Brain, FileText, Check, X, Search, MessageSquare, BarChart3, ChevronLeft, FolderPlus, Folder, MoreHorizontal, ChevronDown, ChevronRight, Copy, CheckCheck, Download, ClipboardList, AlertTriangle, Pencil, RotateCcw, Trash2, Square } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import { cn } from "@app/lib/utils";
@@ -39,6 +39,13 @@ type MessageSource = {
   id: string;
   filename: string;
   location?: string;
+};
+
+type ActiveGeneration = {
+  requestId: number;
+  prompt: string;
+  userMessageId: string;
+  thinkingId: string;
 };
 
 function generateClientMessageId(): string {
@@ -174,6 +181,9 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const renameInputRef = useRef<HTMLInputElement>(null);
   const skipNextHistoryLoadConversationIdRef = useRef<string | null>(null);
   const activeConversationIdRef = useRef<string | null>(null);
+  const activeGenerationRef = useRef<ActiveGeneration | null>(null);
+  const activeAbortControllerRef = useRef<AbortController | null>(null);
+  const generationRequestSeqRef = useRef(0);
   
   // Check if this is Global Riley (Imperial Amber theme)
   const isGlobal = tenantId === "global";
@@ -976,6 +986,16 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
     // Step 6: Set loading state to show "Thinking" indicator
     setIsLoading(true);
+    const requestId = generationRequestSeqRef.current + 1;
+    generationRequestSeqRef.current = requestId;
+    const abortController = new AbortController();
+    activeGenerationRef.current = {
+      requestId,
+      prompt: trimmedInput,
+      userMessageId: userMessage.id,
+      thinkingId,
+    };
+    activeAbortControllerRef.current = abortController;
 
     try {
       // Step 7: Get auth token
@@ -1000,7 +1020,11 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
           user_display_name: userDisplayName,
           client_message_id: clientMessageId,
         },
+        signal: abortController.signal,
       });
+      if (activeGenerationRef.current?.requestId !== requestId) {
+        return;
+      }
 
       // Step 9: Replace thinking placeholder with actual assistant response
       const assistantMessage: Message = {
@@ -1048,6 +1072,13 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
     } catch (error) {
       // Log error to console for debugging
       console.error("Riley chat error:", error);
+      const isAbortError =
+        error instanceof DOMException
+          ? error.name === "AbortError"
+          : error instanceof Error && error.name === "AbortError";
+      if (isAbortError || activeGenerationRef.current?.requestId !== requestId) {
+        return;
+      }
       
       // On error, replace thinking placeholder with error message
       const errorText = error instanceof Error 
@@ -1084,9 +1115,33 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         );
       });
     } finally {
-      // Step 11: Clear loading state (hides "Thinking" indicator)
-      setIsLoading(false);
+      if (activeGenerationRef.current?.requestId === requestId) {
+        activeGenerationRef.current = null;
+        activeAbortControllerRef.current = null;
+        // Step 11: Clear loading state (hides "Thinking" indicator)
+        setIsLoading(false);
+      }
     }
+  };
+
+  const handleStopGeneration = () => {
+    const activeGeneration = activeGenerationRef.current;
+    if (!activeGeneration) return;
+    activeAbortControllerRef.current?.abort();
+    activeAbortControllerRef.current = null;
+    activeGenerationRef.current = null;
+    setAnimatingAssistantMessageId(null);
+    setMessages((prev) =>
+      prev.filter(
+        (msg) =>
+          msg.id !== activeGeneration.thinkingId &&
+          msg.id !== activeGeneration.userMessageId
+      )
+    );
+    setEditingMessageId(null);
+    setInput(activeGeneration.prompt);
+    setIsLoading(false);
+    inputRef.current?.focus();
   };
 
   const handleSend = async () => {
@@ -1271,6 +1326,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
 
   const isEmpty = messages.length === 0;
   const hasThinkingPlaceholder = messages.some((msg) => msg.status === "thinking");
+  const isGenerating = isLoading && !!activeGenerationRef.current;
   const showWelcome =
     isEmpty &&
     !isLoading &&
@@ -2239,29 +2295,43 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
                     : "rounded-3xl border border-[#ddd5c5] bg-white text-[#1f2a44] placeholder:text-[#98a1b1] focus:ring-2 focus:ring-[#d4ad47]/35"
                 )}
               />
-              <button
-                type="button"
-                onClick={handleSend}
-                disabled={!canSend}
-                className={cn(
-                  "flex-shrink-0 p-3 transition-colors",
-                  canSend
-                    ? isGlobal
-                      ? "rounded-full bg-[#e8e2d2] border border-[#d6ccb8] text-[#4f6386] hover:bg-[#ded6c3]"
-                      : "rounded-full bg-[#e8e2d2] border border-[#d6ccb8] text-[#4f6386] hover:bg-[#ded6c3]"
-                    : isGlobal
-                    ? "rounded-full bg-[#f2eee5] border border-[#e3dac8] text-[#a3a9b7] cursor-not-allowed"
-                    : "rounded-full bg-[#f2eee5] border border-[#e3dac8] text-[#a3a9b7] cursor-not-allowed"
-                )}
-                aria-label="Send message"
-                title={sendDisabledReason || "Send message"}
-              >
-                {isLoading ? (
-                  <Loader2 className="h-5 w-5 animate-spin" />
-                ) : (
+              {isGenerating ? (
+                <button
+                  type="button"
+                  onClick={handleStopGeneration}
+                  className={cn(
+                    "flex-shrink-0 inline-flex items-center gap-2 rounded-full border px-3 py-2 text-sm transition-colors",
+                    isGlobal
+                      ? "border-[#d6ccb8] bg-[#efe8d8] text-[#6f4e1f] hover:bg-[#e6dcc8]"
+                      : "border-[#d6ccb8] bg-[#efe8d8] text-[#6f4e1f] hover:bg-[#e6dcc8]"
+                  )}
+                  aria-label="Stop generation"
+                  title="Stop generation"
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                  <span>Stop</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleSend}
+                  disabled={!canSend}
+                  className={cn(
+                    "flex-shrink-0 p-3 transition-colors",
+                    canSend
+                      ? isGlobal
+                        ? "rounded-full bg-[#e8e2d2] border border-[#d6ccb8] text-[#4f6386] hover:bg-[#ded6c3]"
+                        : "rounded-full bg-[#e8e2d2] border border-[#d6ccb8] text-[#4f6386] hover:bg-[#ded6c3]"
+                      : isGlobal
+                      ? "rounded-full bg-[#f2eee5] border border-[#e3dac8] text-[#a3a9b7] cursor-not-allowed"
+                      : "rounded-full bg-[#f2eee5] border border-[#e3dac8] text-[#a3a9b7] cursor-not-allowed"
+                  )}
+                  aria-label="Send message"
+                  title={sendDisabledReason || "Send message"}
+                >
                   <Send className="h-5 w-5" />
-                )}
-              </button>
+                </button>
+              )}
             </div>
             {!isGlobal && (
               <p className="mt-2 text-center text-xs text-[#7d8799]">
