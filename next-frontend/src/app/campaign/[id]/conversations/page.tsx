@@ -48,6 +48,7 @@ export default function ConversationsPage() {
 
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [selectedConversationId, setSelectedConversationId] = useState<string>("");
+  const [hasExplicitSelection, setHasExplicitSelection] = useState(false);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -75,8 +76,11 @@ export default function ConversationsPage() {
   );
 
   const selectedConversation = useMemo(
-    () => conversations.find((c) => c.id === selectedConversationId) || null,
-    [conversations, selectedConversationId],
+    () =>
+      conversations.find((c) => c.id === selectedConversationId) ||
+      publicConversation ||
+      null,
+    [conversations, publicConversation, selectedConversationId],
   );
 
   const conversationLabel = useCallback(
@@ -129,11 +133,14 @@ export default function ConversationsPage() {
     const next = data.conversations || [];
     setConversations(next);
     setSelectedConversationId((prev) => {
-      if (prev && next.some((c) => c.id === prev)) return prev;
       const pub = next.find((c) => c.type === "public");
+      if (!hasExplicitSelection) {
+        return pub?.id || next[0]?.id || "";
+      }
+      if (prev && next.some((c) => c.id === prev)) return prev;
       return pub?.id || next[0]?.id || "";
     });
-  }, [campaignId, getToken, isLoaded]);
+  }, [campaignId, getToken, hasExplicitSelection, isLoaded]);
 
   const fetchMessages = useCallback(async () => {
     if (!campaignId || !selectedConversationId || !isLoaded) return;
@@ -148,6 +155,14 @@ export default function ConversationsPage() {
   }, [campaignId, fetchConversations, getToken, isLoaded, selectedConversationId]);
 
   useEffect(() => {
+    setHasExplicitSelection(false);
+    setSelectedConversationId("");
+    setMessages([]);
+    setShowNewConversation(false);
+    setShowAddPeople(false);
+  }, [campaignId]);
+
+  useEffect(() => {
     void fetchConversations();
     void fetchCampaignMembers();
   }, [fetchConversations, fetchCampaignMembers]);
@@ -158,17 +173,19 @@ export default function ConversationsPage() {
 
   const handlePost = async (event: FormEvent) => {
     event.preventDefault();
-    if (!selectedConversationId || !draft.trim()) return;
+    const targetConversationId = selectedConversation?.id || publicConversation?.id || "";
+    if (!targetConversationId || !draft.trim()) return;
     try {
       setLoading(true);
       setError(null);
       const token = await getToken();
       if (!token) throw new Error("Authentication required.");
-      await apiFetch(`/api/v1/conversations/${encodeURIComponent(selectedConversationId)}/messages`, {
+      await apiFetch(`/api/v1/conversations/${encodeURIComponent(targetConversationId)}/messages`, {
         token,
         method: "POST",
         body: { campaign_id: campaignId, content: draft.trim(), mention_user_ids: [] },
       });
+      setSelectedConversationId(targetConversationId);
       setDraft("");
       await fetchMessages();
     } catch (err) {
@@ -214,7 +231,10 @@ export default function ConversationsPage() {
       });
       setShowNewConversation(false);
       await fetchConversations();
-      if (created?.id) setSelectedConversationId(created.id);
+      if (created?.id) {
+        setHasExplicitSelection(true);
+        setSelectedConversationId(created.id);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create conversation.");
     } finally {
@@ -293,6 +313,7 @@ export default function ConversationsPage() {
         { token, method: "POST" },
       );
       setConversations((prev) => prev.filter((c) => c.id !== selectedConversationId));
+      setHasExplicitSelection(false);
       setSelectedConversationId(publicConversation?.id || "");
       setMessages([]);
       setShowAddPeople(false);
@@ -596,7 +617,7 @@ export default function ConversationsPage() {
                   />
                   <button
                     type="submit"
-                    disabled={loading || !selectedConversationId || !draft.trim()}
+                    disabled={loading || !selectedConversation?.id || !draft.trim()}
                     className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[#e0c469] text-[#1f2a44] transition hover:bg-[#d6bb62] disabled:opacity-50"
                   >
                     <Send className="h-3.5 w-3.5" />
@@ -640,6 +661,7 @@ export default function ConversationsPage() {
                 <button
                   type="button"
                   onClick={() => {
+                    setHasExplicitSelection(true);
                     setSelectedConversationId(publicConversation.id);
                     setShowNewConversation(false);
                     setShowAddPeople(false);
@@ -673,6 +695,7 @@ export default function ConversationsPage() {
                     key={conversation.id}
                     type="button"
                     onClick={() => {
+                      setHasExplicitSelection(true);
                       setSelectedConversationId(conversation.id);
                       setShowNewConversation(false);
                       setShowAddPeople(false);
@@ -707,6 +730,7 @@ export default function ConversationsPage() {
                     key={conversation.id}
                     type="button"
                     onClick={() => {
+                      setHasExplicitSelection(true);
                       setSelectedConversationId(conversation.id);
                       setShowNewConversation(false);
                       setShowAddPeople(false);

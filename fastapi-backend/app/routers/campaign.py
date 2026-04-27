@@ -105,6 +105,7 @@ class CampaignEventItem(BaseModel):
     user_id: Optional[str] = None
     actor_user_id: Optional[str] = None
     request_id: Optional[str] = None
+    source_tab: Optional[str] = None
     requester_display_name: Optional[str] = None
     notification_status: Optional[Literal["unread", "read", "completed"]] = None
     created_at: Optional[str] = None
@@ -1530,20 +1531,45 @@ async def remove_campaign_member(
             detail=f"Failed to remove member: {exc}"
         ) from exc
 
-    # Best-effort campaign activity event + notification for the removed user.
-    # Uses `create_campaign_event` which reuses the existing notification
-    # delivery path (Home notification bell/page) when `user_id` is provided.
+    # Best-effort campaign activity event + per-user notification. The shared
+    # activity feed gets admin/shared copy ("{actor} removed {target} from
+    # {campaign}."), while the removed user's notification gets user-targeted
+    # copy ("You've been removed from {campaign}."). These must NOT be the
+    # same string because the activity feed is visible to all campaign members.
     try:
         campaign_name = (str(removed.get("campaign_name") or "").strip()) or id
+        try:
+            identity_map = await graph.resolve_user_identities_batch(
+                [actor_user_id, user_id]
+            )
+        except Exception:
+            identity_map = {}
+        actor_name = (
+            str((identity_map.get(actor_user_id) or {}).get("display_name") or "").strip()
+            or "A campaign lead"
+        )
+        target_name = (
+            str((identity_map.get(user_id) or {}).get("display_name") or "").strip()
+            or "a member"
+        )
+        activity_feed_message = (
+            f"{actor_name} removed {target_name} from {campaign_name}."
+        )
+        removed_user_notification_message = (
+            f"You've been removed from {campaign_name}."
+        )
         await graph.create_campaign_event(
             campaign_id=id,
             event_type="campaign_member_removed",
-            message=f"You've been removed from {campaign_name}.",
+            message=activity_feed_message,
+            notification_message=removed_user_notification_message,
             user_id=user_id,
             actor_user_id=actor_user_id,
             object_id=f"{id}:campaign_member_removed:{user_id}",
             metadata={
                 "removed_role": removed.get("role"),
+                "removed_user_display_name": target_name,
+                "actor_display_name": actor_name,
                 "actor_is_platform_admin": bool(
                     getattr(request.state, "is_platform_admin", False)
                 ),

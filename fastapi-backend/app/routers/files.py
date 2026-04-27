@@ -118,6 +118,7 @@ class UpdateTagsRequest(BaseModel):
 class AssignRequest(BaseModel):
     assignee: str
     status: str  # "needs_review" or "in_review"
+    source_tab: Optional[str] = None
 
 
 class FileCommentItem(BaseModel):
@@ -954,7 +955,7 @@ async def upload_file(
     if isinstance(file_size, int) and file_size > max_bytes:
         raise HTTPException(
             status_code=413,
-            detail=f"File exceeds maximum allowed size ({settings.MAX_UPLOAD_MB}MB). Please compress or split.",
+            detail=f"This file is too large. Current limit is {settings.MAX_UPLOAD_MB} MB.",
         )
 
     # Always enforce by reading in chunks (covers missing/incorrect size metadata)
@@ -968,7 +969,7 @@ async def upload_file(
             if total > max_bytes:
                 raise HTTPException(
                     status_code=413,
-                    detail=f"File exceeds maximum allowed size ({settings.MAX_UPLOAD_MB}MB). Please compress or split.",
+                    detail=f"This file is too large. Current limit is {settings.MAX_UPLOAD_MB} MB.",
                 )
     finally:
         # Reset stream for downstream ingestion
@@ -1362,6 +1363,15 @@ async def assign_file_endpoint(
         try:
             filename = str(current_payload.get("filename") or file_id)
             status_value = str(request.status).strip().lower()
+            source_tab_raw = str(request.source_tab or "").strip().lower()
+            source_tab_map = {
+                "messaging": "Messaging",
+                "strategy": "Strategy",
+                "pitch": "Pitch & Intake",
+                "pitch & intake": "Pitch & Intake",
+                "pitch_and_intake": "Pitch & Intake",
+            }
+            source_tab = source_tab_map.get(source_tab_raw)
             member_display_map = await _get_campaign_member_display_map(
                 graph=graph,
                 campaign_id=tenant_id,
@@ -1388,7 +1398,12 @@ async def assign_file_endpoint(
                     user_id=assignee_value,
                     actor_user_id=actor_user_id,
                     object_id=f"{file_id}:{targeted_event_type}:{assignee_value}",
-                    metadata={"file_id": file_id, "status": status_value},
+                    metadata={
+                        "file_id": file_id,
+                        "status": status_value,
+                        "source_tab": source_tab,
+                    },
+                    source_tab=source_tab,
                 )
             elif not assignee_value and status_value != previous_status:
                 event_type = "document_assigned"
@@ -1404,6 +1419,12 @@ async def assign_file_endpoint(
                     event_type=event_type,
                     message=event_message,
                     actor_user_id=actor_user_id or current_user.get("id", "unknown"),
+                    metadata={
+                        "file_id": file_id,
+                        "status": status_value,
+                        "source_tab": source_tab,
+                    },
+                    source_tab=source_tab,
                 )
         except Exception as event_exc:
             logger.warning(

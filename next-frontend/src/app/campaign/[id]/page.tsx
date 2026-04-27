@@ -17,6 +17,7 @@ interface CampaignEventItem {
   user_id?: string | null;
   actor_user_id?: string | null;
   created_at?: string | null;
+  source_tab?: string | null;
   requester_display_name?: string | null;
   notification_status?: "unread" | "read" | "completed" | null;
 }
@@ -127,6 +128,21 @@ export default function CampaignOverviewPage() {
   );
   const getAccessRequesterLabel = (event: CampaignEventItem) =>
     event.requester_display_name?.trim() || "Unknown user";
+  const getRecentActivityMessage = (event: CampaignEventItem) => {
+    if (event.type === "access_request_created") {
+      return `${getAccessRequesterLabel(event)} requested access to this campaign`;
+    }
+    const message = String(event.message || "").trim();
+    const sourceTab = String(event.source_tab || "").trim();
+    if (!sourceTab) {
+      return message;
+    }
+    const normalizedPrefix = `${sourceTab.toLowerCase()}:`;
+    if (message.toLowerCase().startsWith(normalizedPrefix)) {
+      return message;
+    }
+    return message ? `${sourceTab}: ${message}` : `${sourceTab}: Activity updated`;
+  };
 
   const sortedTeamMembers = useMemo(() => {
     const rank = (s?: string | null) => {
@@ -791,9 +807,7 @@ export default function CampaignOverviewPage() {
                     </div>
                     <div className="min-w-0 flex-1">
                       <p className="text-sm leading-snug text-[#1f2a44]">
-                        {activity.type === "access_request_created"
-                          ? `${getAccessRequesterLabel(activity)} requested access to this campaign`
-                          : activity.message}
+                        {getRecentActivityMessage(activity)}
                       </p>
                       <p className="mt-0.5 text-[11px] text-[#8a90a0]">
                         {activity.created_at

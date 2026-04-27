@@ -126,6 +126,16 @@ function getRenderableType(asset: FileData): FileData["type"] {
   return asset.type;
 }
 
+function isPreviewUnavailableStatus(status?: Asset["previewStatus"]): boolean {
+  return status === "failed" || status === "skipped";
+}
+
+function toPdfViewerUrl(url: string): string {
+  if (!url) return url;
+  const separator = url.includes("#") ? "&" : "#";
+  return `${url}${separator}view=FitH&zoom=page-width`;
+}
+
 // Memoized DocViewer component to prevent re-renders when parent state changes
 const StableDocViewer = memo(({ documents, config }: { documents: any[]; config: any }) => {
   return (
@@ -419,16 +429,37 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
   };
 
   // Decide which URL and type to use for rendering.
+  const previewUnavailable = useMemo(
+    () => isPreviewUnavailableStatus(file.previewStatus),
+    [file.previewStatus]
+  );
+
   const effectiveUrl = useMemo(() => {
+    if (previewUnavailable) {
+      return null;
+    }
     return getRenderableUrl({
       ...file,
       previewUrl: runtimePreviewUrl,
     });
-  }, [file, runtimePreviewUrl]);
+  }, [file, runtimePreviewUrl, previewUnavailable]);
 
   const effectiveType = useMemo<Asset["type"]>(() => {
-    return getRenderableType(file);
-  }, [file]);
+    if (previewUnavailable) {
+      return file.type;
+    }
+    return getRenderableType({
+      ...file,
+      previewUrl: runtimePreviewUrl,
+    });
+  }, [file, runtimePreviewUrl, previewUnavailable]);
+
+  const pdfViewerUrl = useMemo(() => {
+    if (effectiveType !== "pdf" || !effectiveUrl) {
+      return null;
+    }
+    return toPdfViewerUrl(effectiveUrl);
+  }, [effectiveType, effectiveUrl]);
 
   // Memoize documents array to prevent unnecessary recalculations
   const documents = useMemo(() => [
@@ -614,7 +645,7 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
                 </div>
               </div>
               {/* Main viewer area: image, PDF (original or preview), or fallback */}
-              <div className="flex-1 overflow-auto bg-zinc-950">
+              <div className={cn("flex-1 bg-zinc-950", pdfViewerUrl ? "overflow-hidden" : "overflow-auto")}>
                 {file.type === "img" && effectiveUrl ? (
                   <div className="flex items-center justify-center h-full p-6">
                     <img
@@ -640,7 +671,9 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
                       <div className="space-y-2">
                         <h3 className="text-lg font-semibold text-zinc-100">Preview unavailable</h3>
                         <p className="text-sm text-zinc-500">
-                          This file cannot be previewed right now.
+                          {file.previewError?.trim()
+                            ? file.previewError
+                            : "This file cannot be previewed right now."}
                         </p>
                       </div>
                       <div className="flex gap-3 justify-center">
@@ -664,12 +697,11 @@ export function DocumentViewer({ file, onClose, variant = "drawer" }: DocumentVi
                     </div>
                   </div>
                   )
-                ) : effectiveType === "pdf" ? (
-                  <div className="w-full h-full">
+                ) : effectiveType === "pdf" && pdfViewerUrl ? (
+                  <div className="w-full h-full overflow-hidden">
                     <iframe
-                      src={effectiveUrl}
-                      style={{ width: "100%", height: "70vh" }}
-                      className="border-0"
+                      src={pdfViewerUrl}
+                      className="block h-full w-full border-0 bg-white"
                       title={`Preview of ${file.name}`}
                     />
                   </div>

@@ -334,10 +334,68 @@ async def _extract_text_from_doc(file_content: bytes) -> str:
         return "[Binary file — no text extracted]"
 
 
+def _iter_pptx_text_pieces(shape):
+    """Yield text strings from a python-pptx shape, recursing into groups/tables.
+
+    Default `shape.text` only covers text-frame shapes and skips:
+      - grouped shapes (Rally templates frequently group title+chart+caption)
+      - table cells (used in findings/opportunity grids)
+      - text frames whose body lives in run-level XML rather than paragraph.text
+
+    This walker captures all of those without inflating image/chart shapes.
+    """
+    try:
+        from pptx.enum.shapes import MSO_SHAPE_TYPE  # type: ignore
+    except Exception:  # pragma: no cover - defensive import
+        MSO_SHAPE_TYPE = None  # type: ignore
+
+    shape_type = getattr(shape, "shape_type", None)
+    if MSO_SHAPE_TYPE is not None and shape_type == MSO_SHAPE_TYPE.GROUP:
+        for child in getattr(shape, "shapes", []) or []:
+            yield from _iter_pptx_text_pieces(child)
+        return
+
+    if getattr(shape, "has_table", False):
+        try:
+            for row in shape.table.rows:
+                cell_texts: List[str] = []
+                for cell in row.cells:
+                    cell_text = ""
+                    try:
+                        cell_text = (cell.text or "").strip()
+                    except Exception:
+                        cell_text = ""
+                    if cell_text:
+                        cell_texts.append(cell_text)
+                if cell_texts:
+                    yield " | ".join(cell_texts)
+        except Exception:
+            pass
+        return
+
+    if getattr(shape, "has_text_frame", False):
+        try:
+            for paragraph in shape.text_frame.paragraphs:
+                line = "".join(run.text or "" for run in paragraph.runs).strip()
+                if line:
+                    yield line
+        except Exception:
+            pass
+        return
+
+    try:
+        text_value = getattr(shape, "text", None)
+        if isinstance(text_value, str) and text_value.strip():
+            yield text_value.strip()
+    except Exception:
+        return
+
+
 async def _extract_text_from_pptx(file_content: bytes) -> str:
     """Extract text from a PPTX file using python-pptx.
     
-    Processes up to PPTX_MAX_SLIDES slides, extracting text from shapes.
+    Processes up to PPTX_MAX_SLIDES slides, extracting text from shapes
+    (including grouped shapes and tables) and speaker notes.
     
     Args:
         file_content: The PPTX file content as bytes
@@ -358,7 +416,8 @@ async def _extract_text_from_pptx(file_content: bytes) -> str:
                 if slide_idx >= PPTX_MAX_SLIDES:
                     break
                 
-                slide_text_parts = []
+                slide_text_parts: List[str] = []
+                seen_pieces: set = set()
                 slide_title = ""
                 try:
                     title_shape = slide.shapes.title
@@ -366,13 +425,16 @@ async def _extract_text_from_pptx(file_content: bytes) -> str:
                         slide_title = str(title_shape.text).strip()
                 except Exception:
                     slide_title = ""
-                
-                # Extract text from all shapes in the slide
+
+                # Extract text from all shapes in the slide (recursively).
                 for shape in slide.shapes:
-                    if hasattr(shape, "text") and shape.text:
-                        shape_text = str(shape.text).strip()
-                        if shape_text:
-                            slide_text_parts.append(shape_text)
+                    for piece in _iter_pptx_text_pieces(shape):
+                        if not piece:
+                            continue
+                        if piece in seen_pieces:
+                            continue
+                        seen_pieces.add(piece)
+                        slide_text_parts.append(piece)
 
                 notes_text = ""
                 try:
@@ -857,11 +919,12 @@ async def _extract_structured_segments(
                 prs = Presentation(io.BytesIO(file_bytes))
                 result: List[Dict[str, Any]] = []
                 total_slides = min(len(prs.slides), PPTX_MAX_SLIDES)
-                skipped_slides = 0
+                native_empty_slides = 0
                 for slide_idx, slide in enumerate(prs.slides):
                     if slide_idx >= PPTX_MAX_SLIDES:
                         break
                     parts: List[str] = []
+                    seen_parts: set = set()
                     slide_title = ""
                     try:
                         title_shape = slide.shapes.title
@@ -870,10 +933,11 @@ async def _extract_structured_segments(
                     except Exception:
                         slide_title = ""
                     for shape in slide.shapes:
-                        if hasattr(shape, "text") and shape.text:
-                            text = shape.text.strip()
-                            if text:
-                                parts.append(text)
+                        for piece in _iter_pptx_text_pieces(shape):
+                            if not piece or piece in seen_parts:
+                                continue
+                            seen_parts.add(piece)
+                            parts.append(piece)
                     notes_text = ""
                     try:
                         if bool(getattr(slide, "has_notes_slide", False)):
@@ -888,10 +952,13 @@ async def _extract_structured_segments(
                         parts.insert(0, slide_title)
                     if notes_text:
                         parts.append(f"Speaker notes: {notes_text}")
-                    if not parts:
-                        skipped_slides += 1
-                        continue
+                    native_empty = not parts
+                    if native_empty:
+                        native_empty_slides += 1
                     merged = "\n".join(parts)
+                    # Retain image/chart-only slides as empty-text slide segments so
+                    # the vision pass can still render and caption them. They only
+                    # contribute to chunking after vision enrichment.
                     result.append(
                         {
                             "text": merged,
@@ -901,15 +968,17 @@ async def _extract_structured_segments(
                             "section_path": f"slide:{slide_idx + 1}",
                             "slide_title": slide_title or None,
                             "slide_number": slide_idx + 1,
+                            "slide_native_empty": native_empty,
                             "pptx_total_slides": total_slides,
-                            "pptx_skipped_slides": skipped_slides,
+                            "pptx_skipped_slides": 0,
+                            "pptx_native_empty_slides": native_empty_slides,
                         }
                     )
                 if result:
-                    final_skipped = max(0, total_slides - len(result))
                     for item in result:
                         item["pptx_total_slides"] = total_slides
-                        item["pptx_skipped_slides"] = final_skipped
+                        item["pptx_skipped_slides"] = 0
+                        item["pptx_native_empty_slides"] = native_empty_slides
                 return result
 
             segments = await run_in_threadpool(_read_pptx_segments)
@@ -1135,10 +1204,21 @@ def _build_pptx_slide_micro_chunks(
     chunk_size_tokens: int,
     overlap_tokens: int,
     max_chars_per_chunk: int,
+    total_slides_override: Optional[int] = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
-    """Build slide-preserving micro chunks for PPTX content."""
+    """Build slide-preserving micro chunks for PPTX content.
+
+    Only slides with non-empty text (after vision enrichment if applicable) are
+    included.  Empty/image-only slides that were not annotated by vision are
+    intentionally excluded here; they are also excluded upstream by
+    `_prepare_segments_for_chunking` (which skips ``if not cleaned: continue``),
+    so this function never receives empty-text segments from the normal path.
+    The ``total_slides_override`` parameter preserves the true deck total even
+    when all segments are empty (e.g. vision failed for every slide).
+    """
     explicit_slide_segments: List[Dict[str, Any]] = []
     total_slides_hint = 0
+    skipped_in_chunking = 0
     for segment in segments:
         total_raw = str(segment.get("pptx_total_slides") or "").strip()
         if total_raw.isdigit():
@@ -1146,6 +1226,17 @@ def _build_pptx_slide_micro_chunks(
         loc_type = str(segment.get("location_type") or "").strip().lower()
         loc_value = str(segment.get("location_value") or "").strip()
         segment_text = str(segment.get("text") or "").strip()
+        if loc_type == "slide" and loc_value.isdigit():
+            if not segment_text:
+                # This should not happen (empty slides are filtered upstream by
+                # _prepare_segments_for_chunking), but guard explicitly so no
+                # zero-content chunk is ever embedded.
+                skipped_in_chunking += 1
+                logger.debug(
+                    "pptx_slide_skipped_empty_text slide=%s",
+                    loc_value,
+                )
+                continue
         if loc_type == "slide" and loc_value.isdigit() and segment_text:
             explicit_slide_segments.append(
                 {
@@ -1256,11 +1347,12 @@ def _build_pptx_slide_micro_chunks(
 
     indexed_slides = len(slide_best)
     inferred_total = max(slide_best.keys()) if slide_best else 0
-    total_slides = max(total_slides_hint, inferred_total)
+    total_slides = max(total_slides_hint, inferred_total, int(total_slides_override or 0))
     stats = {
         "total_slides": total_slides,
         "indexed_slides": indexed_slides,
         "skipped_slides": max(0, total_slides - indexed_slides),
+        "skipped_in_chunking": skipped_in_chunking,
     }
     return chunks, stats
 
@@ -1416,7 +1508,9 @@ def _vision_candidate_pages(
     if quality_status == "indexed" and not ocr_enabled and ext == "pdf":
         # For clean text PDFs, skip default visual pass.
         return []
-    candidates: List[int] = []
+
+    is_pptx = ext in {"pptx", "ppt"}
+    scored: List[Tuple[int, int, int]] = []  # (priority_rank, native_text_len, page_num)
     for segment in segments:
         loc_type = str(segment.get("location_type") or "").lower()
         if loc_type not in {"page", "slide", "image_page"}:
@@ -1427,16 +1521,32 @@ def _vision_candidate_pages(
         num = int(loc_val)
         if num <= 0:
             continue
-        candidates.append(num)
-        if len(candidates) >= max_pages * 2:
-            break
+        text_value = str(segment.get("text") or segment.get("raw_text") or "").strip()
+        text_len = len(text_value)
+        if is_pptx:
+            # Cost-aware ordering: image-only slides first, then low-text slides,
+            # then anything else. Capped by max_pages downstream.
+            if bool(segment.get("slide_native_empty")) or text_len == 0:
+                rank = 0
+            elif text_len < 80:
+                rank = 1
+            else:
+                rank = 2
+        else:
+            rank = 0
+        scored.append((rank, text_len, num))
+
+    if is_pptx:
+        scored.sort(key=lambda item: (item[0], item[1], item[2]))
+    # else: preserve original document order for PDFs.
+
     deduped: List[int] = []
-    seen = set()
-    for page in candidates:
-        if page in seen:
+    seen: set = set()
+    for _, _, num in scored:
+        if num in seen:
             continue
-        seen.add(page)
-        deduped.append(page)
+        seen.add(num)
+        deduped.append(num)
         if len(deduped) >= max_pages:
             break
     return deduped
@@ -1865,6 +1975,24 @@ async def _run_ingestion_pipeline(
                 ocr_enabled=ocr_enabled,
                 max_pages=max_vision_segments,
             )
+            if (file_type or "").lower() in {"pptx", "ppt"}:
+                native_empty_slides = sum(
+                    1 for seg in structured_segments
+                    if str(seg.get("location_type") or "").lower() == "slide"
+                    and bool(seg.get("slide_native_empty"))
+                )
+                logger.info(
+                    "pptx_vision_candidates file_id=%s total_slide_segments=%s native_empty_slides=%s "
+                    "selected=%s budget=%s",
+                    point_id,
+                    sum(
+                        1 for seg in structured_segments
+                        if str(seg.get("location_type") or "").lower() == "slide"
+                    ),
+                    native_empty_slides,
+                    len(candidate_pages),
+                    max_vision_segments,
+                )
             if candidate_pages:
                 vision_enabled = True
                 vision_status = "processing"
@@ -1976,6 +2104,27 @@ async def _run_ingestion_pipeline(
         )
         quality_status = final_status
         quality_reason = decision_why
+
+        # Compute raw PPTX stats from the unfiltered structured_segments now that
+        # vision enrichment (if any) has already merged captions into segment text.
+        # We must read these from structured_segments rather than prepared_segments
+        # because _prepare_segments_for_chunking skips empty-text segments (image-only
+        # slides that received no vision caption), discarding their metadata.
+        pptx_raw_total_slides: int = 0
+        pptx_raw_native_empty_slides: int = 0
+        pptx_vision_enriched_slide_count: int = 0
+        if file_type == "pptx":
+            for _seg in structured_segments:
+                if str(_seg.get("location_type") or "").lower() != "slide":
+                    continue
+                total_raw = str(_seg.get("pptx_total_slides") or "").strip()
+                if total_raw.isdigit():
+                    pptx_raw_total_slides = max(pptx_raw_total_slides, int(total_raw))
+                if bool(_seg.get("slide_native_empty")):
+                    pptx_raw_native_empty_slides += 1
+                    if str(_seg.get("vision_caption") or "").strip():
+                        pptx_vision_enriched_slide_count += 1
+
         pptx_slide_stats: Dict[str, int] = {"total_slides": 0, "indexed_slides": 0, "skipped_slides": 0}
         if file_type == "pptx":
             _, pptx_slide_stats = _build_pptx_slide_micro_chunks(
@@ -1983,6 +2132,7 @@ async def _run_ingestion_pipeline(
                 chunk_size_tokens=MICRO_CHUNK_SIZE_TOKENS,
                 overlap_tokens=MICRO_CHUNK_OVERLAP_TOKENS,
                 max_chars_per_chunk=MERGED_CHUNK_MAX_CHARS,
+                total_slides_override=pptx_raw_total_slides or None,
             )
 
         if quality_status == "low_text":
@@ -2079,9 +2229,13 @@ async def _run_ingestion_pipeline(
             if file_type == "pptx":
                 low_text_payload.update(
                     {
-                        "pptx_total_slides": int(pptx_slide_stats.get("total_slides") or 0),
+                        "pptx_total_slides": int(
+                            pptx_raw_total_slides or pptx_slide_stats.get("total_slides") or 0
+                        ),
                         "pptx_indexed_slide_count": int(pptx_slide_stats.get("indexed_slides") or 0),
                         "pptx_skipped_slide_count": int(pptx_slide_stats.get("skipped_slides") or 0),
+                        "pptx_native_empty_slides": pptx_raw_native_empty_slides,
+                        "pptx_vision_enriched_slide_count": pptx_vision_enriched_slide_count,
                     }
                 )
             await vector_service.client.set_payload(
@@ -2115,6 +2269,7 @@ async def _run_ingestion_pipeline(
                 chunk_size_tokens=MICRO_CHUNK_SIZE_TOKENS,
                 overlap_tokens=MICRO_CHUNK_OVERLAP_TOKENS,
                 max_chars_per_chunk=MERGED_CHUNK_MAX_CHARS,
+                total_slides_override=pptx_raw_total_slides or None,
             )
         if not micro_chunks:
             if file_type == "pptx":
@@ -2446,9 +2601,13 @@ async def _run_ingestion_pipeline(
         if file_type == "pptx":
             parent_payload.update(
                 {
-                    "pptx_total_slides": int(pptx_chunk_stats.get("total_slides") or 0),
+                    "pptx_total_slides": int(
+                        pptx_raw_total_slides or pptx_chunk_stats.get("total_slides") or 0
+                    ),
                     "pptx_indexed_slide_count": int(pptx_chunk_stats.get("indexed_slides") or 0),
                     "pptx_skipped_slide_count": int(pptx_chunk_stats.get("skipped_slides") or 0),
+                    "pptx_native_empty_slides": pptx_raw_native_empty_slides,
+                    "pptx_vision_enriched_slide_count": pptx_vision_enriched_slide_count,
                 }
             )
         if not is_global:

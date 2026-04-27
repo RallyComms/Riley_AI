@@ -2766,6 +2766,7 @@ class GraphService:
                 e.user_id as user_id,
                 e.actor_user_id as actor_user_id,
                 e.request_id as request_id,
+                e.source_tab as source_tab,
                 toString(e.created_at) as created_at
             ORDER BY e.created_at DESC
             LIMIT $limit
@@ -2786,6 +2787,7 @@ class GraphService:
                         "user_id": record.get("user_id"),
                         "actor_user_id": record.get("actor_user_id"),
                         "request_id": record.get("request_id"),
+                        "source_tab": record.get("source_tab"),
                         "requester_display_name": None,
                         "notification_status": None,
                         "created_at": record.get("created_at"),
@@ -3150,6 +3152,7 @@ class GraphService:
         object_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         notification_message: Optional[str] = None,
+        source_tab: Optional[str] = None,
     ) -> None:
         """Create a campaign-scoped activity event.
 
@@ -3173,6 +3176,7 @@ class GraphService:
                 user_id: $user_id,
                 actor_user_id: $actor_user_id,
                 request_id: $request_id,
+                source_tab: $source_tab,
                 created_at: datetime()
             })
             SET
@@ -3190,6 +3194,7 @@ class GraphService:
                 user_id=user_id,
                 actor_user_id=actor_user_id,
                 request_id=request_id,
+                source_tab=source_tab,
             )
             record = await result.single()
             if not record:

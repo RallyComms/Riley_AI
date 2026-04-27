@@ -258,6 +258,7 @@ export default function MessagingPage() {
         body: {
           assignee: "", // Keep existing assignee
           status: newAssetStatus,
+          source_tab: "Messaging",
         },
       });
     } catch (error) {
@@ -291,6 +292,7 @@ export default function MessagingPage() {
           body: {
             assignee: userId,
             status: currentStatus,
+            source_tab: "Messaging",
           },
         });
       }

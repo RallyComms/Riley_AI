@@ -214,12 +214,13 @@ export default function PitchIntakePage() {
         throw new Error("Authentication required");
       }
       
-      await apiFetch(`/api/v1/files/${cardId}/assign`, {
+      await apiFetch(`/api/v1/files/${cardId}/assign?tenant_id=${encodeURIComponent(campaignId)}`, {
         token,
         method: "PATCH",
         body: {
           assignee: "", // Keep existing assignee
           status: newAssetStatus,
+          source_tab: "Pitch & Intake",
         },
       });
     } catch (error) {
