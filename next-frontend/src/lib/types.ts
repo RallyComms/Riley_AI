@@ -13,6 +13,14 @@ export interface CampaignBucket {
 }
 
 export type AssetTag = "Messaging" | "Research" | "Strategy" | "Media" | "Pitch" | "Other";
+export type PreviewStatus =
+  | "complete"
+  | "failed"
+  | "processing"
+  | "queued"
+  | "skipped"
+  | "not_requested"
+  | null;
 
 export interface Asset {
   id: string;
@@ -22,7 +30,7 @@ export interface Asset {
   // Optional server-generated preview metadata (e.g., Office/HTML -> PDF)
   previewUrl?: string | null;
   previewType?: string | null;
-  previewStatus?: "complete" | "failed" | "processing" | "queued" | "skipped" | "not_requested" | null;
+  previewStatus?: PreviewStatus;
   previewError?: string | null;
   ingestionStatus?:
     | "uploaded"

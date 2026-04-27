@@ -35,7 +35,7 @@ interface FileData {
   // Optional preview metadata from backend (e.g., Office/HTML -> PDF)
   previewUrl?: string | null;
   previewType?: string | null;
-  previewStatus?: "complete" | "failed" | "processing" | "queued" | null;
+  previewStatus?: Asset["previewStatus"];
   previewError?: string | null;
   status?: Asset["status"];
   uploader?: string;
