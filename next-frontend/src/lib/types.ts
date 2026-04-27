@@ -22,7 +22,7 @@ export interface Asset {
   // Optional server-generated preview metadata (e.g., Office/HTML -> PDF)
   previewUrl?: string | null;
   previewType?: string | null;
-  previewStatus?: "complete" | "failed" | "processing" | "queued" | null;
+  previewStatus?: "complete" | "failed" | "processing" | "queued" | "skipped" | "not_requested" | null;
   previewError?: string | null;
   ingestionStatus?:
     | "uploaded"

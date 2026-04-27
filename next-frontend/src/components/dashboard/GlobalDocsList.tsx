@@ -22,7 +22,7 @@ interface GlobalFile {
   origin_campaign_name?: string;
   preview_url?: string | null;
   preview_type?: string | null;
-  preview_status?: "complete" | "failed" | "processing" | "queued" | null;
+  preview_status?: "complete" | "failed" | "processing" | "queued" | "skipped" | "not_requested" | null;
   preview_error?: string | null;
   ingestion_status?: string | null;
 }

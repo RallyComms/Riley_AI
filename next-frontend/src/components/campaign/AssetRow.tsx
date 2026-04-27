@@ -351,7 +351,7 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
               {formatStatusLabel(asset.ingestionStatus)}
             </span>
           )}
-          {asset.previewStatus === "failed" && (
+          {(asset.previewStatus === "failed" || asset.previewStatus === "skipped") && (
             <span className="ml-1 inline-flex rounded-full border border-amber-500/30 bg-amber-500/12 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-700">
               {asset.ingestionStatus === "low_text"
                 ? "preview unavailable / extraction degraded"

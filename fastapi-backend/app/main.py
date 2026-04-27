@@ -1,6 +1,7 @@
 import os
 import time
 import uuid
+import asyncio
 from asyncio import create_task
 from contextlib import asynccontextmanager
 import logging
@@ -27,6 +28,7 @@ from app.routers import (
     notifications,
     mission_control,
     clerk_webhooks,
+    uploads,
 )
 from app.dependencies.auth import verify_clerk_token, extract_tenant_id
 from app.services.graph import GraphService
@@ -49,15 +51,37 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     """Manage application lifespan: startup and shutdown events."""
     # Startup: Initialize Neo4j connection and store in app.state
+    settings = get_settings()
     app.state.graph = GraphService()
     configure_guardrail_graph_service(app.state.graph)
-    try:
-        await app.state.graph.ensure_mission_control_schema()
-    except Exception as exc:
-        print(f"⚠️ Mission Control schema ensure failed: {exc}")
+    if getattr(settings, "MISSION_CONTROL_AUTO_SCHEMA_SETUP", False):
+        timeout_seconds = max(
+            1,
+            int(getattr(settings, "MISSION_CONTROL_SCHEMA_SETUP_TIMEOUT_SECONDS", 20)),
+        )
+        try:
+            await asyncio.wait_for(
+                app.state.graph.ensure_mission_control_schema(),
+                timeout=timeout_seconds,
+            )
+            logger.info(
+                "mission_control_schema_auto_setup_completed timeout_seconds=%s",
+                timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "mission_control_schema_auto_setup_timed_out timeout_seconds=%s",
+                timeout_seconds,
+            )
+        except Exception as exc:
+            logger.warning(
+                "mission_control_schema_auto_setup_failed error=%s",
+                exc,
+            )
+    else:
+        logger.info("mission_control_schema_auto_setup_disabled")
 
     # Startup: Log Qdrant connection mode
-    settings = get_settings()
     if (
         settings.NEO4J_URI
         and "localhost" not in settings.NEO4J_URI
@@ -124,8 +148,17 @@ def _safe_int(value: object, default: int = 0) -> int:
 async def request_cost_observability_middleware(request: Request, call_next):
     """Capture Cloud Run request behavior for operation-level cost attribution."""
     path = str(request.url.path or "")
+    # Skip observability for internal Cloud Tasks worker routes:
+    # - they already emit their own fine-grained analytics events on success/failure
+    # - avoid adding Neo4j load on every Cloud Tasks retry when Aura is degraded
+    # - prevents noisy request_cost_observability_failed logs on worker paths
+    is_internal_worker_path = (
+        path.startswith("/internal/")
+        or path.startswith("/api/v1/internal/")
+    )
     if (
         request.method == "OPTIONS"
+        or is_internal_worker_path
         or (not path.startswith("/api/v1/") and not path.startswith("/internal/"))
     ):
         return await call_next(request)
@@ -277,6 +310,8 @@ app.include_router(search.router, prefix="/api/v1", dependencies=[Depends(verify
 app.include_router(chat.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # CRITICAL: This puts the files route at /api/v1/files/{tenant_id}
 app.include_router(files.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
+# Direct-to-GCS upload session endpoints (signed URL init + metadata-only complete)
+app.include_router(uploads.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # CRITICAL: This puts the campaign route at /api/v1/campaign/{tenant_id}
 app.include_router(campaign.router, prefix="/api/v1", dependencies=[Depends(verify_clerk_token)])
 # Conversations v2 route (authenticated)

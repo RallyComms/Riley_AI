@@ -9,9 +9,13 @@ import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { Asset } from "@app/lib/types";
 import { cn } from "@app/lib/utils";
 import { apiFetch, ApiRequestError } from "@app/lib/api";
+import { uploadFileDirectToGcs, DirectUploadError } from "@app/lib/directUpload";
 import { toAsset } from "@app/lib/files";
 
 const MAX_UPLOAD_BATCH_SIZE = 10;
+const DIRECT_UPLOAD_MAX_MB = Number(process.env.NEXT_PUBLIC_DIRECT_UPLOAD_MAX_MB || "250");
+const MAX_UPLOAD_MB = DIRECT_UPLOAD_MAX_MB;
+const MAX_UPLOAD_BYTES = Math.max(1, Math.floor(MAX_UPLOAD_MB * 1024 * 1024));
 const UPLOAD_STATUS_POLL_INTERVAL_MS = 10000;
 const UPLOAD_STATUS_MAX_POLL_MS = 180000;
 const TERMINAL_INGESTION_STATUSES = new Set(["indexed", "partial", "failed", "low_text", "ocr_needed"]);
@@ -22,6 +26,10 @@ type UploadStatusItem = {
   status: "pending" | "uploading" | "queued" | "failed";
   message?: string;
 };
+
+function fileTooLargeMessage(): string {
+  return `This file is too large. Current limit is ${MAX_UPLOAD_MB} MB.`;
+}
 
 type ExternalMediaLink = {
   id: string;
@@ -383,8 +391,33 @@ export default function MediaPage() {
       return;
     }
 
+    const oversizedFiles = files.filter((file) => file.size > MAX_UPLOAD_BYTES);
+    const uploadCandidates = files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+    if (uploadCandidates.length === 0) {
+      setUploadStatuses(
+        files.map((file) => ({
+          fileName: file.name,
+          status: "failed",
+          message: fileTooLargeMessage(),
+        }))
+      );
+      showToast("error", fileTooLargeMessage());
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
     setIsUploading(true);
-    setUploadStatuses(files.map((file) => ({ fileName: file.name, status: "pending" })));
+    setUploadStatuses(
+      files.map((file) => {
+        if (file.size > MAX_UPLOAD_BYTES) {
+          return { fileName: file.name, status: "failed" as const, message: fileTooLargeMessage() };
+        }
+        return { fileName: file.name, status: "pending" as const };
+      })
+    );
+    if (oversizedFiles.length > 0) {
+      showToast("error", fileTooLargeMessage());
+    }
 
     try {
       const token = await getToken();
@@ -393,42 +426,55 @@ export default function MediaPage() {
       }
 
       const successfulUploads: string[] = [];
-      for (const file of files) {
+      for (const file of uploadCandidates) {
         setUploadStatuses((prev) =>
           prev.map((item) =>
             item.fileName === file.name
-              ? { ...item, status: "uploading", message: "Uploading..." }
+              ? { ...item, status: "uploading", message: "Uploading…" }
               : item
           )
         );
-        const formData = new FormData();
-        formData.append("file", file);
-        formData.append("tenant_id", campaignId);
-        formData.append("tags", "Media");
 
         if (process.env.NODE_ENV !== "production") {
-          console.log("[upload] FormData keys:", Array.from(formData.keys()));
           console.log("[upload] selected file:", { name: file.name, size: file.size, type: file.type });
         }
 
         try {
-          await apiFetch<{ id: string; url: string; filename: string; type?: string }>("/api/v1/upload", {
+          await uploadFileDirectToGcs({
             token,
-            method: "POST",
-            body: formData,
-            headers: { "X-Upload-Batch-Size": String(files.length) },
+            tenantId: campaignId,
+            surface: "media",
+            file,
+            tags: ["Media"],
+            onProgress: (uploadedBytes, totalBytes) => {
+              if (totalBytes <= 0) return;
+              const percent = Math.min(100, Math.round((uploadedBytes / totalBytes) * 100));
+              setUploadStatuses((prev) =>
+                prev.map((item) =>
+                  item.fileName === file.name
+                    ? { ...item, status: "uploading", message: `Uploading… ${percent}%` }
+                    : item
+                )
+              );
+            },
           });
           successfulUploads.push(file.name);
 
           setUploadStatuses((prev) =>
             prev.map((item) =>
               item.fileName === file.name
-                ? { ...item, status: "queued", message: "Indexing queued" }
+                ? { ...item, status: "queued", message: "Uploaded (Riley Memory off by default)" }
                 : item
             )
           );
         } catch (error) {
-          const message = error instanceof Error ? error.message : "Upload failed";
+          let message = error instanceof Error ? error.message : "Upload failed";
+          if (
+            (error instanceof ApiRequestError && error.status === 413) ||
+            (error instanceof DirectUploadError && error.status === 413)
+          ) {
+            message = fileTooLargeMessage();
+          }
           setUploadStatuses((prev) =>
             prev.map((item) =>
               item.fileName === file.name
@@ -447,7 +493,9 @@ export default function MediaPage() {
           return Array.from(merged);
         });
       }
-      showToast("success", `Queued indexing for ${files.length} file(s).`);
+      if (successfulUploads.length > 0) {
+        showToast("success", `Queued indexing for ${successfulUploads.length} file(s).`);
+      }
     } catch (error) {
       if (error instanceof ApiRequestError) {
         console.error("[upload] failed request", {
@@ -458,7 +506,11 @@ export default function MediaPage() {
       } else {
         console.error("[upload] failed:", error);
       }
-      showToast("error", `Upload failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+      const detail = error instanceof Error ? error.message : "Unknown error";
+      const normalizedDetail = detail.toLowerCase().includes("failed to fetch")
+        ? `${detail}. If this file is large, the request may exceed upload limits.`
+        : detail;
+      showToast("error", `Upload failed: ${normalizedDetail}`);
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) {

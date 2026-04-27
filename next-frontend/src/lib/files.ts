@@ -15,8 +15,8 @@ export interface BackendFileRecord {
   preview?: string | null;
   preview_type?: string | null;
   previewType?: string | null;
-  preview_status?: "complete" | "failed" | "processing" | "queued" | null;
-  previewStatus?: "complete" | "failed" | "processing" | "queued" | null;
+  preview_status?: "complete" | "failed" | "processing" | "queued" | "skipped" | "not_requested" | null;
+  previewStatus?: "complete" | "failed" | "processing" | "queued" | "skipped" | "not_requested" | null;
   preview_error?: string | null;
   previewError?: string | null;
   ingestion_status?: "uploaded" | "queued" | "processing" | "indexed" | "failed" | "low_text" | "ocr_needed" | "partial" | null;

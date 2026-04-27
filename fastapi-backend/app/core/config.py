@@ -118,10 +118,14 @@ class Settings(BaseSettings):
     # Upload limits (server-side hard cap)
     MAX_UPLOAD_MB: int = 25
     MAX_UPLOAD_BATCH_SIZE: int = 10
+    # Direct-to-GCS signed upload (browser uploads bypass Cloud Run request body limits).
+    DIRECT_UPLOAD_MAX_MB: int = 250
+    DIRECT_UPLOAD_URL_TTL_SECONDS: int = 900
 
     # Preview generation configuration (Office/HTML -> PDF)
     ENABLE_PREVIEW_GENERATION: bool = True
     PREVIEW_MAX_MB: int = 25
+    PREVIEW_GENERATION_TIMEOUT_SECONDS: int = 20
     PREVIEW_BUCKET_PATH_PREFIX: str = "previews"
     SIGN_PREVIEW_URLS: bool = True
     PREVIEW_URL_TTL_SECONDS: int = 3600
@@ -144,9 +148,19 @@ class Settings(BaseSettings):
     # Clerk Backend API secret key (for user directory lookups)
     CLERK_SECRET_KEY: Optional[str] = None
     CLERK_WEBHOOK_SECRET: Optional[str] = None
+    # Platform admin allowlists (comma-separated values).
+    # Primary gate: user ids. Secondary fallback: emails.
+    PLATFORM_ADMIN_USER_IDS: Optional[str] = None
+    PLATFORM_ADMIN_EMAILS: str = "ayoungers@wearerally.com"
     # Mission Control admin allowlists (comma-separated values).
     MISSION_CONTROL_ADMIN_USER_IDS: Optional[str] = None
     MISSION_CONTROL_ADMIN_EMAILS: Optional[str] = None
+    # Whether API startup should auto-apply Neo4j schema DDL for Mission Control.
+    # Keep disabled by default to avoid startup races/deadlocks across many
+    # Cloud Run instances. Enable explicitly for local/dev or controlled one-offs.
+    MISSION_CONTROL_AUTO_SCHEMA_SETUP: bool = False
+    # Upper bound for schema-setup startup wait when auto-setup is enabled.
+    MISSION_CONTROL_SCHEMA_SETUP_TIMEOUT_SECONDS: int = 20
     # Mission Control rollup refresh hook (request-triggered, throttled).
     MISSION_CONTROL_ROLLUP_AUTO_REFRESH_ENABLED: bool = True
     MISSION_CONTROL_ROLLUP_REFRESH_MINUTES: int = 15
@@ -158,7 +172,9 @@ class Settings(BaseSettings):
     GCP_BILLING_PROJECT_ID: Optional[str] = None
     GCP_BILLING_EXPORT_TABLE: Optional[str] = None
     GCP_BILLING_ACCOUNT_ID: Optional[str] = None
-    # Fixed monthly SaaS cost components for total platform spend visibility.
+    # Fixed monthly cost components for total platform spend visibility.
+    NEO4J_AURA_MONTHLY_COST_USD: float = 0.0
+    DEV_OPS_VM_MONTHLY_COST_USD: float = 0.0
     CLERK_MONTHLY_COST_USD: float = 0.0
     VERCEL_MONTHLY_COST_USD: float = 0.0
     QDRANT_BASE_MONTHLY_COST_USD: float = 0.0

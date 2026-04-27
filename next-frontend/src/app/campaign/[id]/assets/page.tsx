@@ -10,10 +10,14 @@ import { DocumentViewer } from "@app/components/ui/DocumentViewer";
 import { RenameAssetModal } from "@app/components/campaign/RenameAssetModal";
 import { DeleteFileModal } from "@app/components/campaign/DeleteFileModal";
 import { PromoteModal } from "@app/components/campaign/PromoteModal";
-import { apiFetch } from "@app/lib/api";
+import { apiFetch, ApiRequestError } from "@app/lib/api";
+import { uploadFileDirectToGcs, DirectUploadError } from "@app/lib/directUpload";
 import { cn } from "@app/lib/utils";
 
 const MAX_UPLOAD_BATCH_SIZE = 10;
+const DIRECT_UPLOAD_MAX_MB = Number(process.env.NEXT_PUBLIC_DIRECT_UPLOAD_MAX_MB || "250");
+const MAX_UPLOAD_MB = DIRECT_UPLOAD_MAX_MB;
+const MAX_UPLOAD_BYTES = Math.max(1, Math.floor(MAX_UPLOAD_MB * 1024 * 1024));
 const UPLOAD_STATUS_POLL_INTERVAL_MS = 10000;
 const TERMINAL_INGESTION_STATUSES = new Set(["indexed", "partial", "failed", "low_text", "ocr_needed"]);
 const TRANSIENT_INGESTION_STATUSES = new Set(["queued", "processing", "uploaded"]);
@@ -25,6 +29,10 @@ type UploadStatusItem = {
   status: "pending" | "uploading" | "queued" | "failed";
   message?: string;
 };
+
+function fileTooLargeMessage(): string {
+  return `This file is too large. Current limit is ${MAX_UPLOAD_MB} MB.`;
+}
 
 // Helper function to determine if file type supports AI processing
 function isAISupportedType(type: Asset["type"]): boolean {
@@ -385,90 +393,94 @@ export default function CampaignAssetsPage() {
       return;
     }
 
-    setIsUploading(true);
-    setUploadStatuses(selectedFiles.map((file) => ({ fileName: file.name, status: "pending" })));
+    const oversizedFiles = selectedFiles.filter((file) => file.size > MAX_UPLOAD_BYTES);
+    const uploadCandidates = selectedFiles.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+    if (uploadCandidates.length === 0) {
+      setUploadStatuses(
+        selectedFiles.map((file) => ({
+          fileName: file.name,
+          status: "failed",
+          message: fileTooLargeMessage(),
+        }))
+      );
+      showToast("error", fileTooLargeMessage());
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
 
-    const uploadFile = async (
-      file: File,
-      batchSize: number,
-      overwrite: boolean = false
-    ): Promise<{ id: string; url: string; filename: string; type?: string }> => {
-      const formData = new FormData();
-      formData.append("file", file);
-      formData.append("tenant_id", campaignId); // Use actual campaign ID from URL
-      formData.append("tags", ""); // Empty tags - user will add tags via UI
+    setIsUploading(true);
+    setUploadStatuses(
+      selectedFiles.map((file) => {
+        if (file.size > MAX_UPLOAD_BYTES) {
+          return { fileName: file.name, status: "failed" as const, message: fileTooLargeMessage() };
+        }
+        return { fileName: file.name, status: "pending" as const };
+      })
+    );
+    if (oversizedFiles.length > 0) {
+      showToast("error", fileTooLargeMessage());
+    }
+
+    const uploadFile = async (file: File): Promise<void> => {
       const token = await getToken();
       if (!token) {
         throw new Error("Authentication required");
       }
-      
-      const path = `/api/v1/upload${overwrite ? "?overwrite=true" : ""}`;
-      const result = await apiFetch<{ id: string; url: string; filename: string; type?: string }>(path, {
+      await uploadFileDirectToGcs({
         token,
-        method: "POST",
-        body: formData,
-        headers: {
-          "X-Upload-Batch-Size": String(batchSize),
+        tenantId: campaignId,
+        surface: "assets",
+        file,
+        onProgress: (uploadedBytes, totalBytes) => {
+          if (totalBytes <= 0) return;
+          const percent = Math.min(100, Math.round((uploadedBytes / totalBytes) * 100));
+          setUploadStatuses((prev) =>
+            prev.map((item) =>
+              item.fileName === file.name
+                ? { ...item, status: "uploading", message: `Uploading… ${percent}%` }
+                : item
+            )
+          );
         },
       });
-      return result;
     };
 
     try {
       const successfulUploads: string[] = [];
-      for (const file of selectedFiles) {
+      for (const file of uploadCandidates) {
         setUploadStatuses((prev) =>
           prev.map((item) =>
             item.fileName === file.name
-              ? { ...item, status: "uploading", message: "Uploading..." }
+              ? { ...item, status: "uploading", message: "Uploading…" }
               : item
           )
         );
 
         try {
-          await uploadFile(file, selectedFiles.length, false);
+          await uploadFile(file);
           successfulUploads.push(file.name);
           setUploadStatuses((prev) =>
             prev.map((item) =>
               item.fileName === file.name
-              ? { ...item, status: "queued", message: "Uploaded (Riley Memory off by default)" }
+                ? { ...item, status: "queued", message: "Uploaded (Riley Memory off by default)" }
                 : item
             )
           );
         } catch (error) {
-          const errorMessage = error instanceof Error ? error.message : "Upload failed";
-          if (errorMessage.includes("409")) {
-            const shouldOverwrite = window.confirm(
-              `File "${file.name}" already exists. Overwrite?`
-            );
-            if (shouldOverwrite) {
-              await uploadFile(file, selectedFiles.length, true);
-              successfulUploads.push(file.name);
-              setUploadStatuses((prev) =>
-                prev.map((item) =>
-                  item.fileName === file.name
-                    ? { ...item, status: "queued", message: "Uploaded (Riley Memory off by default)" }
-                    : item
-                )
-              );
-            } else {
-              setUploadStatuses((prev) =>
-                prev.map((item) =>
-                  item.fileName === file.name
-                    ? { ...item, status: "failed", message: "Skipped (existing file)" }
-                    : item
-                )
-              );
-            }
-          } else {
-            setUploadStatuses((prev) =>
-              prev.map((item) =>
-                item.fileName === file.name
-                  ? { ...item, status: "failed", message: errorMessage }
-                  : item
-              )
-            );
+          let errorMessage = error instanceof Error ? error.message : "Upload failed";
+          if (
+            (error instanceof ApiRequestError && error.status === 413) ||
+            (error instanceof DirectUploadError && error.status === 413)
+          ) {
+            errorMessage = fileTooLargeMessage();
           }
+          setUploadStatuses((prev) =>
+            prev.map((item) =>
+              item.fileName === file.name
+                ? { ...item, status: "failed", message: errorMessage }
+                : item
+            )
+          );
         }
       }
       
@@ -485,10 +497,16 @@ export default function CampaignAssetsPage() {
           return Array.from(merged);
         });
       }
-      showToast("success", `Uploaded ${selectedFiles.length} file(s). Riley Memory is off by default.`);
+      if (successfulUploads.length > 0) {
+        showToast("success", `Uploaded ${successfulUploads.length} file(s). Riley Memory is off by default.`);
+      }
     } catch (error) {
       console.error("Upload error:", error);
-      showToast("error", `Upload failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+      const detail = error instanceof Error ? error.message : "Unknown error";
+      const normalizedDetail = detail.toLowerCase().includes("failed to fetch")
+        ? `${detail}. If this file is large, the request may exceed upload limits.`
+        : detail;
+      showToast("error", `Upload failed: ${normalizedDetail}`);
     } finally {
       setIsUploading(false);
       // Reset file input

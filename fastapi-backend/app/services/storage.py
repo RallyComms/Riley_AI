@@ -268,6 +268,101 @@ class StorageService:
             ) from exc
 
     @classmethod
+    async def generate_signed_upload_url(
+        cls,
+        object_name: str,
+        ttl_seconds: int,
+        *,
+        content_type: str,
+    ) -> str:
+        """Generate a V4 signed URL that allows a browser to PUT bytes directly to GCS.
+
+        The signed URL locks the request method to PUT and the Content-Type to the
+        provided value, so the client must send the same Content-Type header for the
+        upload to be accepted by GCS. The bucket itself stays private.
+        """
+        settings = get_settings()
+        client = cls._get_client()
+        bucket = client.bucket(settings.GCS_BUCKET_NAME)
+        canonical_name = cls._canonical_blob_name(object_name)
+        blob = bucket.blob(canonical_name)
+
+        try:
+            credentials, _project = google.auth.default()
+            request = google.auth.transport.requests.Request()
+            credentials.refresh(request)
+
+            service_account_email = settings.SIGNING_SERVICE_ACCOUNT_EMAIL
+            if not service_account_email and getattr(credentials, "service_account_email", None):
+                service_account_email = credentials.service_account_email
+
+            if not service_account_email:
+                raise HTTPException(
+                    status_code=500,
+                    detail=(
+                        "SIGNING_SERVICE_ACCOUNT_EMAIL not configured. "
+                        "Set SIGNING_SERVICE_ACCOUNT_EMAIL to the service account email "
+                        "with 'Service Account Token Creator' role for IAM-based signing."
+                    ),
+                )
+
+            url = blob.generate_signed_url(
+                version="v4",
+                expiration=timedelta(seconds=int(ttl_seconds)),
+                method="PUT",
+                content_type=content_type or "application/octet-stream",
+                service_account_email=service_account_email,
+                access_token=credentials.token,
+            )
+            return url
+        except HTTPException:
+            raise
+        except GoogleCloudError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"GCS error generating signed upload URL for object '{object_name}': {type(exc).__name__}",
+            ) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unexpected error generating signed upload URL for object '{object_name}': {type(exc).__name__}",
+            ) from exc
+
+    @classmethod
+    async def stat_object(cls, object_name: str) -> Optional[dict]:
+        """Return a small dict describing a GCS object (size, content_type, etag, public_url) or None."""
+        settings = get_settings()
+        client = cls._get_client()
+        bucket = client.bucket(settings.GCS_BUCKET_NAME)
+        canonical_name = cls._canonical_blob_name(object_name)
+        blob = bucket.blob(canonical_name)
+        try:
+            blob.reload()
+        except GoogleCloudError as exc:
+            message = str(exc).lower()
+            if "404" in message or "not found" in message:
+                return None
+            raise HTTPException(
+                status_code=500,
+                detail=f"GCS error stating object '{object_name}': {type(exc).__name__}",
+            ) from exc
+        except Exception:
+            if not blob.exists():
+                return None
+            raise
+
+        if blob.size is None:
+            # Fallback when reload didn't populate metadata.
+            if not blob.exists():
+                return None
+        return {
+            "size": int(blob.size or 0),
+            "content_type": blob.content_type,
+            "etag": blob.etag,
+            "public_url": blob.public_url,
+        }
+
+    @classmethod
     async def download_file(cls, file_url: str) -> bytes:
         """Download a file from GCS and return its content as bytes.
         

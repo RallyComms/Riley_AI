@@ -2552,6 +2552,208 @@ async def _run_ingestion_pipeline(
         )
 
 
+async def _persist_uploaded_file_point(
+    *,
+    point_id: str,
+    tenant_id: str,
+    filename: str,
+    file_url: str,
+    file_size: int,
+    tags: List[str],
+    preview_url: Optional[str],
+    preview_object_name: Optional[str],
+    preview_type: Optional[str],
+    preview_status: str,
+    preview_error: Optional[str],
+) -> dict:
+    """Create the canonical Qdrant parent-file point for a freshly uploaded file.
+
+    This is the single source of truth for the parent-file payload shape used by
+    both the legacy proxy upload (`process_upload`) and the direct-to-GCS
+    completion endpoint. It does NOT enqueue ingestion. `ai_enabled` stays False
+    and `ingestion_status` stays `"uploaded"` until the user opts in.
+    """
+    settings = get_settings()
+    upload_date = datetime.now().isoformat()
+    file_type = filename.split(".")[-1].lower() if "." in filename else "unknown"
+    is_global_upload = tenant_id == "global"
+    is_image = is_image_ext(filename)
+    size_str = _format_file_size(int(file_size or 0))
+    target_collection = (
+        settings.QDRANT_COLLECTION_TIER_1 if is_global_upload
+        else settings.QDRANT_COLLECTION_TIER_2
+    )
+    ingestion_status = "uploaded"
+
+    payload: Dict[str, Any] = {
+        "record_type": "file",
+        "filename": filename,
+        "file_type": file_type,
+        "type": file_type,
+        "url": file_url,
+        "is_global": is_global_upload,
+        "tags": tags,
+        "size": size_str,
+        "size_bytes": int(file_size or 0),
+        "upload_date": upload_date,
+        "uploaded_at": upload_date,
+        "ai_enabled": False,
+        "raw_content": "",
+        "cleaned_content": "",
+        "content": "",
+        "content_preview": "",
+        "ingestion_status": ingestion_status,
+        "ingestion_error": None,
+        "extracted_char_count": 0,
+        "chunk_count": 0,
+        "embedding_model": settings.EMBEDDING_MODEL,
+        "embedding_tokens_estimate": 0,
+        "embedding_cost_estimate_usd": 0.0,
+        "chunk_profiles": {"micro": 0, "macro": 0},
+        "bm25_enabled": False,
+        "preview_url": preview_url,
+        "preview_object_name": preview_object_name,
+        "preview_type": preview_type,
+        "preview_status": preview_status,
+        "preview_error": preview_error,
+        "ocr_enabled": False,
+        "ocr_status": "not_requested",
+        "ocr_text_present": False,
+        "ocr_confidence": None,
+        "multimodal_status": "pending",
+        "multimodal_enabled": True,
+        "ocr_processed": False,
+        "vision_processed": False,
+        "visual_chunk_count": 0,
+        "vision_enabled": bool(settings.RILEY_VISION_ENABLED),
+        "vision_status": "not_requested",
+        "vision_segments_annotated": 0,
+        "analysis_status": "not_requested",
+        "analysis_completed_at": None,
+        "analysis_error": None,
+    }
+    if not is_global_upload:
+        payload["client_id"] = tenant_id
+    if is_image:
+        payload["content"] = "[Image file — Riley Memory is off by default; enable it to start OCR/ingestion]"
+        payload["content_preview"] = payload["content"]
+
+    existing_points = await vector_service.client.retrieve(
+        collection_name=target_collection,
+        ids=[point_id],
+        with_payload=True,
+        with_vectors=False,
+    )
+    existing_payload: Dict[str, Any] = {}
+    if existing_points:
+        existing_payload = existing_points[0].payload or {}
+        if str(existing_payload.get("record_type") or "").strip().lower() == "chunk":
+            raise HTTPException(
+                status_code=409,
+                detail=f"File id {point_id} already belongs to a chunk record.",
+            )
+
+    if existing_payload:
+        merged_payload = dict(existing_payload)
+        # Canonical upload-owned fields.
+        merged_payload.update(
+            {
+                "record_type": "file",
+                "filename": filename,
+                "file_type": file_type,
+                "type": file_type,
+                "url": file_url,
+                "is_global": is_global_upload,
+                "tags": tags,
+                "size": size_str,
+                "size_bytes": int(file_size or 0),
+                "preview_url": preview_url,
+                "preview_object_name": preview_object_name,
+                "preview_type": preview_type,
+                "preview_status": preview_status,
+                "preview_error": preview_error,
+            }
+        )
+        if not str(merged_payload.get("upload_date") or "").strip():
+            merged_payload["upload_date"] = upload_date
+        if not str(merged_payload.get("uploaded_at") or "").strip():
+            merged_payload["uploaded_at"] = upload_date
+        if not is_global_upload:
+            merged_payload["client_id"] = tenant_id
+
+        # Never regress existing ingestion/AI state on idempotent replays.
+        defaults = {
+            "ai_enabled": False,
+            "raw_content": "",
+            "cleaned_content": "",
+            "content": "",
+            "content_preview": "",
+            "ingestion_status": ingestion_status,
+            "ingestion_error": None,
+            "extracted_char_count": 0,
+            "chunk_count": 0,
+            "embedding_model": settings.EMBEDDING_MODEL,
+            "embedding_tokens_estimate": 0,
+            "embedding_cost_estimate_usd": 0.0,
+            "chunk_profiles": {"micro": 0, "macro": 0},
+            "bm25_enabled": False,
+            "ocr_enabled": False,
+            "ocr_status": "not_requested",
+            "ocr_text_present": False,
+            "ocr_confidence": None,
+            "multimodal_status": "pending",
+            "multimodal_enabled": True,
+            "ocr_processed": False,
+            "vision_processed": False,
+            "visual_chunk_count": 0,
+            "vision_enabled": bool(settings.RILEY_VISION_ENABLED),
+            "vision_status": "not_requested",
+            "vision_segments_annotated": 0,
+            "analysis_status": "not_requested",
+            "analysis_completed_at": None,
+            "analysis_error": None,
+        }
+        for key, value in defaults.items():
+            if key not in merged_payload:
+                merged_payload[key] = value
+
+        if is_image and not str(merged_payload.get("content") or "").strip():
+            merged_payload["content"] = (
+                "[Image file — Riley Memory is off by default; enable it to start OCR/ingestion]"
+            )
+            merged_payload["content_preview"] = merged_payload["content"]
+
+        await vector_service.client.set_payload(
+            collection_name=target_collection,
+            payload=merged_payload,
+            points=[point_id],
+        )
+    else:
+        placeholder_vector = [0.0] * int(settings.EMBEDDING_DIM)
+        await vector_service.client.upsert(
+            collection_name=target_collection,
+            points=[PointStruct(id=point_id, vector=placeholder_vector, payload=payload)],
+        )
+
+    logger.info(
+        "upload_staged file_id=%s tenant=%s file_type=%s collection=%s ai_enabled=%s status=%s",
+        point_id,
+        tenant_id,
+        file_type,
+        target_collection,
+        False,
+        ingestion_status,
+    )
+    return {
+        "id": point_id,
+        "url": file_url,
+        "filename": filename,
+        "type": file_type,
+        "preview_status": preview_status,
+        "preview_error": preview_error,
+    }
+
+
 async def process_upload(
     file: UploadFile,
     tenant_id: str,
@@ -2595,12 +2797,7 @@ async def process_upload(
     try:
         file_content = await file.read()
         file_size = len(file_content)
-        size_str = _format_file_size(file_size)
-        upload_date = datetime.now().isoformat()
         filename = file.filename or "unknown"
-        file_type = filename.split(".")[-1].lower() if "." in filename else "unknown"
-        is_global_upload = tenant_id == "global"
-        is_image = is_image_ext(filename)
 
         point_id = str(uuid.uuid4())
 
@@ -2637,88 +2834,19 @@ async def process_upload(
                 preview_status = "failed"
                 preview_error = str(exc)
 
-        target_collection = (
-            settings.QDRANT_COLLECTION_TIER_1 if is_global_upload
-            else settings.QDRANT_COLLECTION_TIER_2
+        return await _persist_uploaded_file_point(
+            point_id=point_id,
+            tenant_id=tenant_id,
+            filename=filename,
+            file_url=file_url,
+            file_size=file_size,
+            tags=tags,
+            preview_url=preview_url,
+            preview_object_name=preview_object_name,
+            preview_type=preview_type,
+            preview_status=preview_status,
+            preview_error=preview_error,
         )
-        ingestion_status = "uploaded"
-
-        payload: Dict[str, Any] = {
-            "record_type": "file",
-            "filename": filename,
-            "file_type": file_type,
-            "type": file_type,
-            "url": file_url,
-            "is_global": is_global_upload,
-            "tags": tags,
-            "size": size_str,
-            "size_bytes": file_size,
-            "upload_date": upload_date,
-            "uploaded_at": upload_date,
-            "ai_enabled": False,
-            "raw_content": "",
-            "cleaned_content": "",
-            "content": "",
-            "content_preview": "",
-            "ingestion_status": ingestion_status,
-            "ingestion_error": None,
-            "extracted_char_count": 0,
-            "chunk_count": 0,
-            "embedding_model": settings.EMBEDDING_MODEL,
-            "embedding_tokens_estimate": 0,
-            "embedding_cost_estimate_usd": 0.0,
-            "chunk_profiles": {"micro": 0, "macro": 0},
-            "bm25_enabled": False,
-            "preview_url": preview_url,
-            "preview_object_name": preview_object_name,
-            "preview_type": preview_type,
-            "preview_status": preview_status,
-            "preview_error": preview_error,
-            "ocr_enabled": False,
-            "ocr_status": "not_requested",
-            "ocr_text_present": False,
-            "ocr_confidence": None,
-            "multimodal_status": "pending",
-            "multimodal_enabled": True,
-            "ocr_processed": False,
-            "vision_processed": False,
-            "visual_chunk_count": 0,
-            "vision_enabled": bool(settings.RILEY_VISION_ENABLED),
-            "vision_status": "not_requested",
-            "vision_segments_annotated": 0,
-            "analysis_status": "not_requested",
-            "analysis_completed_at": None,
-            "analysis_error": None,
-        }
-        if not is_global_upload:
-            payload["client_id"] = tenant_id
-        if is_image:
-            payload["content"] = "[Image file — Riley Memory is off by default; enable it to start OCR/ingestion]"
-            payload["content_preview"] = payload["content"]
-
-        placeholder_vector = [0.0] * int(settings.EMBEDDING_DIM)
-        await vector_service.client.upsert(
-            collection_name=target_collection,
-            points=[PointStruct(id=point_id, vector=placeholder_vector, payload=payload)],
-        )
-
-        logger.info(
-            "upload_staged file_id=%s tenant=%s file_type=%s collection=%s ai_enabled=%s status=%s",
-            point_id,
-            tenant_id,
-            file_type,
-            target_collection,
-            False,
-            ingestion_status,
-        )
-        return {
-            "id": point_id,
-            "url": file_url,
-            "filename": filename,
-            "type": file_type,
-            "preview_status": preview_status,
-            "preview_error": preview_error,
-        }
     except HTTPException:
         raise
     except Exception as exc:
@@ -2726,6 +2854,117 @@ async def process_upload(
             status_code=500,
             detail=f"Failed to process upload: {exc}"
         ) from exc
+
+
+async def finalize_direct_upload_record(
+    *,
+    tenant_id: str,
+    file_id: str,
+    filename: str,
+    file_url: str,
+    file_size: int,
+    tags: List[str],
+    attempt_preview: bool,
+) -> dict:
+    """Direct-to-GCS completion path: build the same parent-file Qdrant point.
+
+    Generates a PDF preview from the GCS object only when the file is small
+    enough to read into memory (gated by `PREVIEW_MAX_MB`). Never enqueues
+    ingestion.
+    """
+    settings = get_settings()
+    preview_url: Optional[str] = None
+    preview_object_name: Optional[str] = None
+    preview_type: Optional[str] = None
+    preview_status: str = "not_requested"
+    preview_error: Optional[str] = None
+
+    if (
+        attempt_preview
+        and settings.ENABLE_PREVIEW_GENERATION
+        and is_office_or_html(filename)
+    ):
+        preview_max_bytes = int(getattr(settings, "PREVIEW_MAX_MB", 25)) * 1024 * 1024
+        if int(file_size or 0) > preview_max_bytes:
+            preview_status = "skipped"
+            preview_error = (
+                f"Preview unavailable: file exceeds preview limit "
+                f"({settings.PREVIEW_MAX_MB}MB)."
+            )
+            logger.info(
+                "direct_upload_preview_skipped file_id=%s filename=%s size_bytes=%s preview_max_bytes=%s reason=size_limit",
+                file_id,
+                filename,
+                int(file_size or 0),
+                preview_max_bytes,
+            )
+        else:
+            preview_status = "processing"
+            try:
+                timeout_seconds = max(
+                    5,
+                    int(getattr(settings, "PREVIEW_GENERATION_TIMEOUT_SECONDS", 20)),
+                )
+
+                async def _generate_preview_pdf() -> Tuple[str, str, str]:
+                    file_bytes = await StorageService.download_file(file_url)
+                    pdf_bytes = await generate_pdf_preview(file_bytes, filename)
+                    object_name = f"{settings.PREVIEW_BUCKET_PATH_PREFIX}/{file_id}.pdf"
+                    public_url = await StorageService.upload_bytes(
+                        object_name,
+                        pdf_bytes,
+                        content_type="application/pdf",
+                    )
+                    return public_url, object_name, "pdf"
+
+                preview_url, preview_object_name, preview_type = await asyncio.wait_for(
+                    _generate_preview_pdf(),
+                    timeout=timeout_seconds,
+                )
+                preview_status = "complete"
+            except asyncio.TimeoutError:
+                preview_status = "failed"
+                preview_error = (
+                    f"Preview generation timed out after {timeout_seconds} seconds."
+                )
+                logger.warning(
+                    "direct_upload_preview_failed file_id=%s filename=%s reason=timeout timeout_seconds=%s",
+                    file_id,
+                    filename,
+                    timeout_seconds,
+                )
+            except HTTPException as exc:
+                preview_status = "failed"
+                preview_error = exc.detail if isinstance(exc.detail, str) else str(exc.detail)
+                logger.warning(
+                    "direct_upload_preview_failed file_id=%s filename=%s reason=http_exception error=%s",
+                    file_id,
+                    filename,
+                    preview_error,
+                )
+            except Exception as exc:
+                preview_status = "failed"
+                preview_error = str(exc)
+                logger.warning(
+                    "direct_upload_preview_failed file_id=%s filename=%s reason=exception error=%s",
+                    file_id,
+                    filename,
+                    preview_error,
+                )
+
+    return await _persist_uploaded_file_point(
+        point_id=file_id,
+        tenant_id=tenant_id,
+        filename=filename,
+        file_url=file_url,
+        file_size=int(file_size or 0),
+        tags=tags,
+        preview_url=preview_url,
+        preview_object_name=preview_object_name,
+        preview_type=preview_type,
+        preview_status=preview_status,
+        preview_error=preview_error,
+    )
 
 
 async def reindex_existing_file(
