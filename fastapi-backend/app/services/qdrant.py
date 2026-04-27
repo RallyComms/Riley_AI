@@ -19,7 +19,7 @@ class VectorService:
     data sovereignty between clients.
     """
 
-    _USAGE_METRICS_CACHE_TTL_SECONDS = 10 * 60
+    _USAGE_METRICS_CACHE_TTL_SECONDS = 20 * 60
 
     def __init__(self, client: AsyncQdrantClient | None = None) -> None:
         settings = get_settings()
@@ -1757,7 +1757,11 @@ class VectorService:
                         pass
         return 0
 
-    async def get_qdrant_usage_metrics(self) -> Dict[str, Any]:
+    async def get_qdrant_usage_metrics(
+        self,
+        *,
+        include_cache_status: bool = False,
+    ) -> Dict[str, Any]:
         """Aggregate Qdrant usage for Mission Control reporting."""
         settings = get_settings()
         collections = [settings.QDRANT_COLLECTION_TIER_1, settings.QDRANT_COLLECTION_TIER_2]
@@ -1775,7 +1779,10 @@ class VectorService:
             and self._usage_metrics_cache_expires_at is not None
             and self._usage_metrics_cache_expires_at > now
         ):
-            return copy.deepcopy(self._usage_metrics_cache)
+            cached = copy.deepcopy(self._usage_metrics_cache)
+            if include_cache_status:
+                cached["_served_from_cache"] = True
+            return cached
 
         campaign_vector_counts: Dict[str, int] = {}
         total_vectors = 0
@@ -1844,6 +1851,8 @@ class VectorService:
             seconds=self._USAGE_METRICS_CACHE_TTL_SECONDS
         )
         self._usage_metrics_cache = copy.deepcopy(result)
+        if include_cache_status:
+            result["_served_from_cache"] = False
         return result
 
     async def delete_tenant_data(self, tenant_id: str) -> List[str]:

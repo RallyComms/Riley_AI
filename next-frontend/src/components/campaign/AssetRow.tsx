@@ -351,6 +351,13 @@ export function AssetRow({ asset, onTagChange, onDelete, onDownload, onAIEnabled
               {formatStatusLabel(asset.ingestionStatus)}
             </span>
           )}
+          {asset.previewStatus === "failed" && (
+            <span className="ml-1 inline-flex rounded-full border border-amber-500/30 bg-amber-500/12 px-2 py-0.5 text-[10px] uppercase tracking-wide text-amber-700">
+              {asset.ingestionStatus === "low_text"
+                ? "preview unavailable / extraction degraded"
+                : "preview unavailable"}
+            </span>
+          )}
           <div className="flex flex-wrap gap-1 pt-0.5">
             {asset.ocrStatus === "complete" && (
               <span

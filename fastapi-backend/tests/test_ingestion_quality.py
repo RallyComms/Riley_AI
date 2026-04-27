@@ -2,6 +2,7 @@ import unittest
 
 from app.services.ingestion import (
     _assess_extraction_quality,
+    _build_pptx_slide_micro_chunks,
     _compute_content_signals,
     _decide_final_ingestion_status,
 )
@@ -114,3 +115,80 @@ class IngestionQualityDecisionTests(unittest.TestCase):
             signals=signals,
         )
         self.assertEqual(status, "low_text")
+
+
+class PptxSlideChunkingTests(unittest.TestCase):
+    def test_pptx_slide_chunk_preserves_title_notes_metadata(self) -> None:
+        chunks, stats = _build_pptx_slide_micro_chunks(
+            [
+                {
+                    "text": "Campaign Priority Update\nSpeaker notes: Focus on suburban voters first.",
+                    "location_type": "slide",
+                    "location_value": "1",
+                    "slide_title": "Campaign Priority Update",
+                    "char_start": 0,
+                    "char_end": 80,
+                    "pptx_total_slides": 1,
+                }
+            ],
+            chunk_size_tokens=120,
+            overlap_tokens=20,
+            max_chars_per_chunk=6000,
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["slide_number"], 1)
+        self.assertEqual(chunks[0]["slide_title"], "Campaign Priority Update")
+        self.assertEqual(chunks[0]["slide_subchunk_index"], 0)
+        self.assertEqual(stats["total_slides"], 1)
+        self.assertEqual(stats["indexed_slides"], 1)
+        self.assertEqual(stats["skipped_slides"], 0)
+
+    def test_pptx_long_slide_is_split_into_slide_subchunks(self) -> None:
+        long_slide_text = " ".join(f"token{i}" for i in range(1200))
+        chunks, stats = _build_pptx_slide_micro_chunks(
+            [
+                {
+                    "text": long_slide_text,
+                    "location_type": "slide",
+                    "location_value": "3",
+                    "slide_title": "Deep Dive Notes",
+                    "char_start": 0,
+                    "char_end": len(long_slide_text),
+                    "pptx_total_slides": 3,
+                }
+            ],
+            chunk_size_tokens=180,
+            overlap_tokens=40,
+            max_chars_per_chunk=1200,
+        )
+        self.assertGreater(len(chunks), 1)
+        self.assertTrue(all(chunk["slide_number"] == 3 for chunk in chunks))
+        self.assertTrue(all(chunk["slide_title"] == "Deep Dive Notes" for chunk in chunks))
+        self.assertTrue(all(len(chunk["text"]) <= 1200 for chunk in chunks))
+        self.assertEqual([chunk["slide_subchunk_index"] for chunk in chunks], list(range(len(chunks))))
+        self.assertEqual(stats["total_slides"], 3)
+        self.assertEqual(stats["indexed_slides"], 1)
+        self.assertEqual(stats["skipped_slides"], 2)
+
+    def test_pptx_empty_slides_not_chunked_but_counted(self) -> None:
+        chunks, stats = _build_pptx_slide_micro_chunks(
+            [
+                {
+                    "text": "Only this slide has text.",
+                    "location_type": "slide",
+                    "location_value": "2",
+                    "slide_title": "Only Content Slide",
+                    "char_start": 20,
+                    "char_end": 44,
+                    "pptx_total_slides": 4,
+                }
+            ],
+            chunk_size_tokens=120,
+            overlap_tokens=20,
+            max_chars_per_chunk=6000,
+        )
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0]["slide_number"], 2)
+        self.assertEqual(stats["total_slides"], 4)
+        self.assertEqual(stats["indexed_slides"], 1)
+        self.assertEqual(stats["skipped_slides"], 3)

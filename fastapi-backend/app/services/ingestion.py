@@ -7,7 +7,7 @@ import json
 import re
 import uuid
 import time
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import UploadFile, HTTPException
@@ -59,6 +59,7 @@ MERGED_CHUNK_MAX_CHARS = 6000
 MIN_MEANINGFUL_NATIVE_CHARS = 80
 MIN_MEANINGFUL_TOTAL_CHARS = 120
 MIN_PARTIAL_TOTAL_CHARS = 35
+MAX_RETRYABLE_INGESTION_ATTEMPTS = 5
 
 TEXT_NATIVE_EXTENSIONS = {
     "pdf", "docx", "doc", "pptx", "ppt", "txt", "md", "rtf",
@@ -66,6 +67,14 @@ TEXT_NATIVE_EXTENSIONS = {
 }
 
 IMAGE_EXTENSIONS = {"png", "jpg", "jpeg", "webp", "tiff"}
+
+
+class IngestionPermanentFailure(RuntimeError):
+    """Raised when ingestion should stop retrying for this job."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 def _format_file_size(size_bytes: int) -> str:
@@ -350,11 +359,36 @@ async def _extract_text_from_pptx(file_content: bytes) -> str:
                     break
                 
                 slide_text_parts = []
+                slide_title = ""
+                try:
+                    title_shape = slide.shapes.title
+                    if title_shape and getattr(title_shape, "text", None):
+                        slide_title = str(title_shape.text).strip()
+                except Exception:
+                    slide_title = ""
                 
                 # Extract text from all shapes in the slide
                 for shape in slide.shapes:
                     if hasattr(shape, "text") and shape.text:
-                        slide_text_parts.append(shape.text.strip())
+                        shape_text = str(shape.text).strip()
+                        if shape_text:
+                            slide_text_parts.append(shape_text)
+
+                notes_text = ""
+                try:
+                    if bool(getattr(slide, "has_notes_slide", False)):
+                        notes_slide = slide.notes_slide
+                        notes_frame = getattr(notes_slide, "notes_text_frame", None)
+                        if notes_frame and getattr(notes_frame, "text", None):
+                            notes_text = str(notes_frame.text).strip()
+                except Exception:
+                    notes_text = ""
+
+                if slide_title:
+                    slide_text_parts = [part for part in slide_text_parts if part != slide_title]
+                    slide_text_parts.insert(0, f"Title: {slide_title}")
+                if notes_text:
+                    slide_text_parts.append(f"Speaker notes: {notes_text}")
                 
                 # Add slide content with slide number header
                 if slide_text_parts:
@@ -822,14 +856,40 @@ async def _extract_structured_segments(
             def _read_pptx_segments() -> List[Dict[str, Any]]:
                 prs = Presentation(io.BytesIO(file_bytes))
                 result: List[Dict[str, Any]] = []
+                total_slides = min(len(prs.slides), PPTX_MAX_SLIDES)
+                skipped_slides = 0
                 for slide_idx, slide in enumerate(prs.slides):
+                    if slide_idx >= PPTX_MAX_SLIDES:
+                        break
                     parts: List[str] = []
+                    slide_title = ""
+                    try:
+                        title_shape = slide.shapes.title
+                        if title_shape and getattr(title_shape, "text", None):
+                            slide_title = str(title_shape.text).strip()
+                    except Exception:
+                        slide_title = ""
                     for shape in slide.shapes:
                         if hasattr(shape, "text") and shape.text:
                             text = shape.text.strip()
                             if text:
                                 parts.append(text)
+                    notes_text = ""
+                    try:
+                        if bool(getattr(slide, "has_notes_slide", False)):
+                            notes_slide = slide.notes_slide
+                            notes_frame = getattr(notes_slide, "notes_text_frame", None)
+                            if notes_frame and getattr(notes_frame, "text", None):
+                                notes_text = str(notes_frame.text).strip()
+                    except Exception:
+                        notes_text = ""
+                    if slide_title:
+                        parts = [part for part in parts if part != slide_title]
+                        parts.insert(0, slide_title)
+                    if notes_text:
+                        parts.append(f"Speaker notes: {notes_text}")
                     if not parts:
+                        skipped_slides += 1
                         continue
                     merged = "\n".join(parts)
                     result.append(
@@ -839,8 +899,17 @@ async def _extract_structured_segments(
                             "location_type": "slide",
                             "location_value": str(slide_idx + 1),
                             "section_path": f"slide:{slide_idx + 1}",
+                            "slide_title": slide_title or None,
+                            "slide_number": slide_idx + 1,
+                            "pptx_total_slides": total_slides,
+                            "pptx_skipped_slides": skipped_slides,
                         }
                     )
+                if result:
+                    final_skipped = max(0, total_slides - len(result))
+                    for item in result:
+                        item["pptx_total_slides"] = total_slides
+                        item["pptx_skipped_slides"] = final_skipped
                 return result
 
             segments = await run_in_threadpool(_read_pptx_segments)
@@ -970,6 +1039,27 @@ def _prepare_segments_for_chunking(segments: List[Dict[str, Any]]) -> Tuple[str,
                 "location_type": str(segment.get("location_type") or "paragraph"),
                 "location_value": str(segment.get("location_value") or ""),
                 "section_path": str(segment.get("section_path") or ""),
+                "slide_title": str(segment.get("slide_title") or "").strip() or None,
+                "slide_number": (
+                    int(segment.get("slide_number"))
+                    if isinstance(segment.get("slide_number"), int)
+                    else (
+                        int(str(segment.get("location_value") or "").strip())
+                        if str(segment.get("location_value") or "").strip().isdigit()
+                        and str(segment.get("location_type") or "").strip().lower() == "slide"
+                        else None
+                    )
+                ),
+                "pptx_total_slides": (
+                    int(str(segment.get("pptx_total_slides") or "").strip())
+                    if str(segment.get("pptx_total_slides") or "").strip().isdigit()
+                    else None
+                ),
+                "pptx_skipped_slides": (
+                    int(str(segment.get("pptx_skipped_slides") or "").strip())
+                    if str(segment.get("pptx_skipped_slides") or "").strip().isdigit()
+                    else None
+                ),
                 "char_start": char_start,
                 "char_end": char_end,
             }
@@ -1007,6 +1097,172 @@ def _chunk_text_with_offsets(
             break
         start_idx += step
     return chunks
+
+
+def _split_text_with_char_limit_offsets(text: str, *, char_limit: int) -> List[Dict[str, Any]]:
+    if char_limit <= 0:
+        return []
+    matches = list(re.finditer(r"\S+", text))
+    if not matches:
+        return []
+    chunks: List[Dict[str, Any]] = []
+    start_idx = 0
+    while start_idx < len(matches):
+        char_start = matches[start_idx].start()
+        end_idx = start_idx
+        while end_idx + 1 < len(matches):
+            next_end = matches[end_idx + 1].end()
+            if next_end - char_start > char_limit:
+                break
+            end_idx += 1
+        char_end = matches[end_idx].end()
+        chunk_text = text[char_start:char_end].strip()
+        if chunk_text:
+            chunks.append(
+                {
+                    "text": chunk_text,
+                    "char_start": char_start,
+                    "char_end": char_end,
+                }
+            )
+        start_idx = end_idx + 1
+    return chunks
+
+
+def _build_pptx_slide_micro_chunks(
+    segments: List[Dict[str, Any]],
+    *,
+    chunk_size_tokens: int,
+    overlap_tokens: int,
+    max_chars_per_chunk: int,
+) -> Tuple[List[Dict[str, Any]], Dict[str, int]]:
+    """Build slide-preserving micro chunks for PPTX content."""
+    explicit_slide_segments: List[Dict[str, Any]] = []
+    total_slides_hint = 0
+    for segment in segments:
+        total_raw = str(segment.get("pptx_total_slides") or "").strip()
+        if total_raw.isdigit():
+            total_slides_hint = max(total_slides_hint, int(total_raw))
+        loc_type = str(segment.get("location_type") or "").strip().lower()
+        loc_value = str(segment.get("location_value") or "").strip()
+        segment_text = str(segment.get("text") or "").strip()
+        if loc_type == "slide" and loc_value.isdigit() and segment_text:
+            explicit_slide_segments.append(
+                {
+                    "slide_number": int(loc_value),
+                    "slide_title": str(segment.get("slide_title") or "").strip() or None,
+                    "text": segment_text,
+                    "char_start": int(segment.get("char_start") or 0),
+                    "char_end": int(segment.get("char_end") or 0),
+                }
+            )
+
+    if not explicit_slide_segments:
+        # Fallback path for degraded segmentation: infer slide blocks from inline headers.
+        for idx, segment in enumerate(segments, start=1):
+            source_text = str(segment.get("text") or "").strip()
+            if not source_text:
+                continue
+            segment_start = int(segment.get("char_start") or 0)
+            slide_header_matches = list(re.finditer(r"(?im)^\s*slide\s+(\d+)\s*:\s*", source_text))
+            if slide_header_matches:
+                for match_idx, match in enumerate(slide_header_matches):
+                    content_start = match.end()
+                    content_end = (
+                        slide_header_matches[match_idx + 1].start()
+                        if match_idx + 1 < len(slide_header_matches)
+                        else len(source_text)
+                    )
+                    content_text = source_text[content_start:content_end].strip()
+                    if not content_text:
+                        continue
+                    explicit_slide_segments.append(
+                        {
+                            "slide_number": int(match.group(1)),
+                            "slide_title": None,
+                            "text": content_text,
+                            "char_start": segment_start + content_start,
+                            "char_end": segment_start + content_end,
+                        }
+                    )
+            else:
+                explicit_slide_segments.append(
+                    {
+                        "slide_number": idx,
+                        "slide_title": None,
+                        "text": source_text,
+                        "char_start": segment_start,
+                        "char_end": int(segment.get("char_end") or segment_start + len(source_text)),
+                    }
+                )
+
+    slide_best: Dict[int, Dict[str, Any]] = {}
+    for entry in explicit_slide_segments:
+        slide_number = int(entry.get("slide_number") or 0)
+        if slide_number <= 0:
+            continue
+        existing = slide_best.get(slide_number)
+        candidate_text = str(entry.get("text") or "")
+        if existing is None or len(candidate_text) > len(str(existing.get("text") or "")):
+            merged = dict(entry)
+            if existing and not merged.get("slide_title"):
+                merged["slide_title"] = existing.get("slide_title")
+            slide_best[slide_number] = merged
+        elif existing and not existing.get("slide_title") and entry.get("slide_title"):
+            existing["slide_title"] = entry.get("slide_title")
+
+    chunks: List[Dict[str, Any]] = []
+    for slide_number in sorted(slide_best.keys()):
+        entry = slide_best[slide_number]
+        slide_text = str(entry.get("text") or "").strip()
+        if not slide_text:
+            continue
+        token_chunks = _chunk_text_with_offsets(
+            slide_text,
+            chunk_size_tokens=chunk_size_tokens,
+            overlap_tokens=overlap_tokens,
+        )
+        if not token_chunks:
+            token_chunks = [{"text": slide_text, "char_start": 0, "char_end": len(slide_text)}]
+        slide_subchunk_index = 0
+        for token_chunk in token_chunks:
+            token_text = str(token_chunk.get("text") or "").strip()
+            if not token_text:
+                continue
+            token_start = int(token_chunk.get("char_start") or 0)
+            char_chunks = _split_text_with_char_limit_offsets(
+                token_text,
+                char_limit=max_chars_per_chunk,
+            )
+            if not char_chunks:
+                char_chunks = [{"text": token_text, "char_start": 0, "char_end": len(token_text)}]
+            for char_chunk in char_chunks:
+                chunk_text = str(char_chunk.get("text") or "").strip()
+                if not chunk_text:
+                    continue
+                local_start = token_start + int(char_chunk.get("char_start") or 0)
+                local_end = token_start + int(char_chunk.get("char_end") or len(chunk_text))
+                chunks.append(
+                    {
+                        "text": chunk_text,
+                        "char_start": int(entry.get("char_start") or 0) + local_start,
+                        "char_end": int(entry.get("char_start") or 0) + local_end,
+                        "slide_number": slide_number,
+                        "slide_title": entry.get("slide_title"),
+                        "slide_subchunk_index": slide_subchunk_index,
+                    }
+                )
+                slide_subchunk_index += 1
+
+    indexed_slides = len(slide_best)
+    inferred_total = max(slide_best.keys()) if slide_best else 0
+    total_slides = max(total_slides_hint, inferred_total)
+    stats = {
+        "total_slides": total_slides,
+        "indexed_slides": indexed_slides,
+        "skipped_slides": max(0, total_slides - indexed_slides),
+    }
+    return chunks, stats
 
 
 def _best_segment_for_span(span_start: int, span_end: int, segments: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -1294,6 +1550,49 @@ async def _mark_job_failed(
     )
 
 
+async def mark_ingestion_job_permanently_failed(
+    *,
+    collection_name: str,
+    file_id: str,
+    job_id: Optional[str],
+    reason: str,
+    error_message: str,
+    attempt_count: Optional[int] = None,
+    prior_failure_reason: Optional[str] = None,
+    prior_error_message: Optional[str] = None,
+) -> None:
+    """Persist deterministic terminal status for permanent ingestion failures."""
+    await vector_service.client.set_payload(
+        collection_name=collection_name,
+        payload={
+            "ingestion_status": "permanently_failed",
+            "ingestion_error": error_message,
+            "ingestion_job_status": "permanently_failed" if job_id else None,
+            "ingestion_job_error_message": error_message if job_id else None,
+            "ingestion_job_completed_at": datetime.now().isoformat() if job_id else None,
+            "ingestion_job_attempt_count": attempt_count if attempt_count is not None and job_id else None,
+            "ingestion_failure_reason": reason,
+            "ingestion_previous_failure_reason": prior_failure_reason,
+            "ingestion_previous_error": prior_error_message,
+        },
+        points=[file_id],
+    )
+
+
+def _parse_payload_datetime(value: Any) -> Optional[datetime]:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        normalized = raw.replace("Z", "+00:00")
+        parsed = datetime.fromisoformat(normalized)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
 def _build_worker_payload(job_id: str, file_id: str, collection_name: str) -> Dict[str, str]:
     return {
         "job_id": job_id,
@@ -1415,6 +1714,7 @@ async def _run_ingestion_pipeline(
     preview_error: Optional[str],
     initial_ai_enabled: bool,
     source_content_sha256: str,
+    attempt_count: int,
 ) -> None:
     """Async extraction -> quality gate -> chunk embedding pipeline."""
     settings = get_settings()
@@ -1447,16 +1747,8 @@ async def _run_ingestion_pipeline(
 
     try:
         started_at = datetime.now().isoformat()
-        attempt_count = 1
-        if job_id:
-            existing = await vector_service.client.retrieve(
-                collection_name=collection_name,
-                ids=[point_id],
-                with_payload=True,
-                with_vectors=False,
-            )
-            payload = existing[0].payload if existing else {}
-            attempt_count = int((payload or {}).get("ingestion_job_attempt_count") or 0) + 1
+        if await _abort_if_ai_disabled("pre_extract"):
+            return
         await vector_service.client.set_payload(
             collection_name=collection_name,
             payload={
@@ -1469,9 +1761,6 @@ async def _run_ingestion_pipeline(
             },
             points=[point_id],
         )
-
-        if await _abort_if_ai_disabled("pre_extract"):
-            return
 
         raw_text = await extract_text(file_bytes, filename)
         structured_segments = await _extract_structured_segments(file_bytes, filename, raw_text)
@@ -1687,6 +1976,14 @@ async def _run_ingestion_pipeline(
         )
         quality_status = final_status
         quality_reason = decision_why
+        pptx_slide_stats: Dict[str, int] = {"total_slides": 0, "indexed_slides": 0, "skipped_slides": 0}
+        if file_type == "pptx":
+            _, pptx_slide_stats = _build_pptx_slide_micro_chunks(
+                prepared_segments,
+                chunk_size_tokens=MICRO_CHUNK_SIZE_TOKENS,
+                overlap_tokens=MICRO_CHUNK_OVERLAP_TOKENS,
+                max_chars_per_chunk=MERGED_CHUNK_MAX_CHARS,
+            )
 
         if quality_status == "low_text":
             deleted_points = await _delete_chunk_points(collection_name, point_id)
@@ -1714,9 +2011,7 @@ async def _run_ingestion_pipeline(
                 quality_status,
                 quality_reason,
             )
-            await vector_service.client.set_payload(
-                collection_name=collection_name,
-                payload={
+            low_text_payload: Dict[str, Any] = {
                     "record_type": "file",
                     "filename": filename,
                     "file_type": file_type,
@@ -1780,7 +2075,18 @@ async def _run_ingestion_pipeline(
                         "nonempty_page_count": content_signals.get("nonempty_page_count", 0),
                         "total_page_count": content_signals.get("total_page_count", 0),
                     },
-                },
+                }
+            if file_type == "pptx":
+                low_text_payload.update(
+                    {
+                        "pptx_total_slides": int(pptx_slide_stats.get("total_slides") or 0),
+                        "pptx_indexed_slide_count": int(pptx_slide_stats.get("indexed_slides") or 0),
+                        "pptx_skipped_slide_count": int(pptx_slide_stats.get("skipped_slides") or 0),
+                    }
+                )
+            await vector_service.client.set_payload(
+                collection_name=collection_name,
+                payload=low_text_payload,
                 points=[point_id],
             )
             logger.info(
@@ -1801,19 +2107,73 @@ async def _run_ingestion_pipeline(
         if await _abort_if_ai_disabled("pre_chunking"):
             return
 
-        micro_chunks = _chunk_text_with_offsets(
-            cleaned_text,
-            chunk_size_tokens=MICRO_CHUNK_SIZE_TOKENS,
-            overlap_tokens=MICRO_CHUNK_OVERLAP_TOKENS,
-        )
-        macro_chunks = _chunk_text_with_offsets(
-            cleaned_text,
-            chunk_size_tokens=MACRO_CHUNK_SIZE_TOKENS,
-            overlap_tokens=MACRO_CHUNK_OVERLAP_TOKENS,
-        )
+        pptx_chunk_stats: Dict[str, int] = {"total_slides": 0, "indexed_slides": 0, "skipped_slides": 0}
+        micro_chunks: List[Dict[str, Any]] = []
+        if file_type == "pptx":
+            micro_chunks, pptx_chunk_stats = _build_pptx_slide_micro_chunks(
+                prepared_segments,
+                chunk_size_tokens=MICRO_CHUNK_SIZE_TOKENS,
+                overlap_tokens=MICRO_CHUNK_OVERLAP_TOKENS,
+                max_chars_per_chunk=MERGED_CHUNK_MAX_CHARS,
+            )
         if not micro_chunks:
-            micro_chunks = [{"text": cleaned_text[:MAX_CHARS_TOTAL], "char_start": 0, "char_end": len(cleaned_text[:MAX_CHARS_TOTAL])}]
-        if not macro_chunks:
+            if file_type == "pptx":
+                fallback_text = cleaned_text[:MAX_CHARS_TOTAL].strip()
+                fallback_chunks = _chunk_text_with_offsets(
+                    fallback_text,
+                    chunk_size_tokens=MICRO_CHUNK_SIZE_TOKENS,
+                    overlap_tokens=MICRO_CHUNK_OVERLAP_TOKENS,
+                )
+                if not fallback_chunks and fallback_text:
+                    fallback_chunks = [{"text": fallback_text, "char_start": 0, "char_end": len(fallback_text)}]
+                for idx, fallback_chunk in enumerate(fallback_chunks):
+                    micro_chunks.append(
+                        {
+                            "text": str(fallback_chunk.get("text") or ""),
+                            "char_start": int(fallback_chunk.get("char_start") or 0),
+                            "char_end": int(fallback_chunk.get("char_end") or 0),
+                            "slide_number": 1,
+                            "slide_title": None,
+                            "slide_subchunk_index": idx,
+                        }
+                    )
+                if micro_chunks:
+                    inferred_total = max(1, int(pptx_chunk_stats.get("total_slides") or 0))
+                    pptx_chunk_stats = {
+                        "total_slides": inferred_total,
+                        "indexed_slides": 1,
+                        "skipped_slides": max(0, inferred_total - 1),
+                    }
+            else:
+                micro_chunks = _chunk_text_with_offsets(
+                    cleaned_text,
+                    chunk_size_tokens=MICRO_CHUNK_SIZE_TOKENS,
+                    overlap_tokens=MICRO_CHUNK_OVERLAP_TOKENS,
+                )
+        macro_chunks: List[Dict[str, Any]] = []
+        if file_type != "pptx":
+            macro_chunks = _chunk_text_with_offsets(
+                cleaned_text,
+                chunk_size_tokens=MACRO_CHUNK_SIZE_TOKENS,
+                overlap_tokens=MACRO_CHUNK_OVERLAP_TOKENS,
+            )
+        if not micro_chunks:
+            fallback_text = cleaned_text[:MAX_CHARS_TOTAL]
+            if file_type == "pptx":
+                if fallback_text.strip():
+                    micro_chunks = [
+                        {
+                            "text": fallback_text,
+                            "char_start": 0,
+                            "char_end": len(fallback_text),
+                            "slide_number": 1,
+                            "slide_title": None,
+                            "slide_subchunk_index": 0,
+                        }
+                    ]
+            else:
+                micro_chunks = [{"text": fallback_text, "char_start": 0, "char_end": len(fallback_text)}]
+        if file_type != "pptx" and not macro_chunks:
             macro_chunks = [{"text": cleaned_text[:MAX_CHARS_TOTAL], "char_start": 0, "char_end": len(cleaned_text[:MAX_CHARS_TOTAL])}]
 
         deleted_points = await _delete_chunk_points(collection_name, point_id)
@@ -1907,6 +2267,27 @@ async def _run_ingestion_pipeline(
                     "vision_enabled": vision_enabled,
                     "vision_status": vision_status if vision_enabled else "not_requested",
                 }
+                location_type = str(chunk_payload.get("location_type") or "").strip().lower()
+                location_value = str(chunk_payload.get("location_value") or "").strip()
+                slide_number: Optional[int] = None
+                if location_type == "slide" and location_value.isdigit():
+                    slide_number = int(location_value)
+                slide_title = str(best_segment.get("slide_title") or chunk.get("slide_title") or "").strip() or None
+                if file_type == "pptx":
+                    slide_number = int(chunk.get("slide_number")) if isinstance(chunk.get("slide_number"), int) else slide_number
+                    slide_subchunk_index = (
+                        int(chunk.get("slide_subchunk_index"))
+                        if isinstance(chunk.get("slide_subchunk_index"), int)
+                        else 0
+                    )
+                    chunk_payload["content_type"] = "presentation_slide"
+                    chunk_payload["slide_number"] = slide_number
+                    chunk_payload["slide_title"] = slide_title
+                    chunk_payload["slide_subchunk_index"] = slide_subchunk_index
+                    if slide_number is not None:
+                        chunk_payload["location_type"] = "slide"
+                        chunk_payload["location_value"] = str(slide_number)
+                        chunk_payload["section_path"] = f"slide:{slide_number}"
                 chunk_rows.append(
                     {
                         "id": point_uuid,
@@ -2062,6 +2443,14 @@ async def _run_ingestion_pipeline(
                 "total_page_count": content_signals.get("total_page_count", 0),
             },
         }
+        if file_type == "pptx":
+            parent_payload.update(
+                {
+                    "pptx_total_slides": int(pptx_chunk_stats.get("total_slides") or 0),
+                    "pptx_indexed_slide_count": int(pptx_chunk_stats.get("indexed_slides") or 0),
+                    "pptx_skipped_slide_count": int(pptx_chunk_stats.get("skipped_slides") or 0),
+                }
+            )
         if not is_global:
             parent_payload["client_id"] = tenant_id
         completed_at = datetime.now().isoformat()
@@ -2473,6 +2862,8 @@ async def run_ingestion_job(
             # Stale task; a newer job exists for this file.
             return
 
+        attempt_count = int(payload.get("ingestion_job_attempt_count") or 0) + 1
+
         # Riley Memory is the source of truth for whether ingestion is allowed.
         if not bool(payload.get("ai_enabled", False)):
             now_iso = datetime.now().isoformat()
@@ -2489,27 +2880,104 @@ async def run_ingestion_job(
             )
             return
 
+        if attempt_count > MAX_RETRYABLE_INGESTION_ATTEMPTS:
+            prior_failure_reason = str(payload.get("ingestion_failure_reason") or "").strip() or None
+            prior_error_message = (
+                str(payload.get("ingestion_job_error_message") or payload.get("ingestion_error") or "").strip()
+                or None
+            )
+            prior_summary = ""
+            if prior_failure_reason or prior_error_message:
+                prior_summary = (
+                    f" Previous failure: reason={prior_failure_reason or 'unknown'}; "
+                    f"detail={(prior_error_message or 'n/a')[:240]}"
+                )
+            error_message = (
+                f"Ingestion retry threshold exceeded ({attempt_count}>{MAX_RETRYABLE_INGESTION_ATTEMPTS})."
+                f"{prior_summary}"
+            )
+            await mark_ingestion_job_permanently_failed(
+                collection_name=collection_name,
+                file_id=str(file_id),
+                job_id=job_id,
+                reason="attempt_threshold_exceeded",
+                error_message=error_message,
+                attempt_count=attempt_count,
+                prior_failure_reason=prior_failure_reason,
+                prior_error_message=prior_error_message,
+            )
+            logger.error(
+                "ingestion_permanent_failure reason=attempt_threshold_exceeded job_id=%s file_id=%s collection=%s attempt_count=%s threshold=%s prior_reason=%s",
+                job_id,
+                file_id,
+                collection_name,
+                attempt_count,
+                MAX_RETRYABLE_INGESTION_ATTEMPTS,
+                prior_failure_reason or "none",
+            )
+            raise IngestionPermanentFailure("attempt_threshold_exceeded")
+
         filename = payload.get("filename") or "unknown"
         file_type = (payload.get("file_type") or payload.get("type") or "").lower()
         file_url = payload.get("url")
         if not file_url:
-            raise HTTPException(status_code=400, detail=f"File {file_id} has no URL")
+            error_message = "File has no URL; ingestion cannot proceed."
+            await mark_ingestion_job_permanently_failed(
+                collection_name=collection_name,
+                file_id=str(file_id),
+                job_id=job_id,
+                reason="missing_file_url",
+                error_message=error_message,
+                attempt_count=attempt_count,
+            )
+            logger.error(
+                "ingestion_permanent_failure reason=missing_file_url job_id=%s file_id=%s collection=%s",
+                job_id,
+                file_id,
+                collection_name,
+            )
+            raise IngestionPermanentFailure("missing_file_url")
 
         if file_type not in TEXT_NATIVE_EXTENSIONS and file_type not in IMAGE_EXTENSIONS:
-            await vector_service.client.set_payload(
+            error_message = f"Unsupported file type: {file_type or 'unknown'}"
+            await mark_ingestion_job_permanently_failed(
                 collection_name=collection_name,
-                payload={
-                    "ingestion_status": "failed",
-                    "ingestion_error": f"Unsupported file type for multimodal ingestion: {file_type or 'unknown'}",
-                    "ingestion_job_status": "failed",
-                    "ingestion_job_error_message": f"Unsupported file type: {file_type or 'unknown'}",
-                    "ingestion_job_completed_at": datetime.now().isoformat(),
-                },
-                points=[file_id],
+                file_id=str(file_id),
+                job_id=job_id,
+                reason="unsupported_file_type",
+                error_message=error_message,
+                attempt_count=attempt_count,
             )
-            return
+            logger.error(
+                "ingestion_permanent_failure reason=unsupported_file_type job_id=%s file_id=%s collection=%s file_type=%s",
+                job_id,
+                file_id,
+                collection_name,
+                file_type,
+            )
+            raise IngestionPermanentFailure("unsupported_file_type")
 
-        file_bytes = await StorageService.download_file(file_url)
+        try:
+            file_bytes = await StorageService.download_file(file_url)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                error_message = str(exc.detail or "Storage object is missing.")
+                await mark_ingestion_job_permanently_failed(
+                    collection_name=collection_name,
+                    file_id=str(file_id),
+                    job_id=job_id,
+                    reason="gcs_file_missing",
+                    error_message=error_message,
+                    attempt_count=attempt_count,
+                )
+                logger.error(
+                    "ingestion_permanent_failure reason=gcs_file_missing job_id=%s file_id=%s collection=%s",
+                    job_id,
+                    file_id,
+                    collection_name,
+                )
+                raise IngestionPermanentFailure("gcs_file_missing") from exc
+            raise
         source_content_sha256 = _content_sha256_hex(file_bytes)
         existing_indexed_sha = str(payload.get("indexed_content_sha256") or "").strip()
         existing_chunk_count = int(payload.get("chunk_count") or 0)
@@ -2593,13 +3061,17 @@ async def run_ingestion_job(
             preview_error=payload.get("preview_error"),
             initial_ai_enabled=bool(payload.get("ai_enabled", False)),
             source_content_sha256=source_content_sha256,
+            attempt_count=attempt_count,
         )
+    except IngestionPermanentFailure:
+        raise
     except Exception as exc:
-        logger.exception(
-            "ingestion_worker_job_failed job_id=%s file_id=%s collection=%s error=%s",
+        logger.warning(
+            "ingestion_retryable_failure job_id=%s file_id=%s collection=%s error_type=%s error=%s",
             job_id,
             file_id,
             collection_name,
+            type(exc).__name__,
             exc,
         )
         try:
@@ -2617,6 +3089,161 @@ async def run_ingestion_job(
                 status_exc,
             )
         raise
+
+
+def _is_safe_reenqueue_payload(payload: Dict[str, Any]) -> bool:
+    if str(payload.get("record_type") or "").strip().lower() == "chunk":
+        return False
+    status_now = str(payload.get("ingestion_status") or "").strip().lower()
+    job_status_now = str(payload.get("ingestion_job_status") or "").strip().lower()
+    if status_now == "permanently_failed" or job_status_now == "permanently_failed":
+        return False
+    if not bool(payload.get("ai_enabled", False)):
+        return False
+    file_type = str(payload.get("file_type") or payload.get("type") or "").strip().lower()
+    if file_type not in TEXT_NATIVE_EXTENSIONS and file_type not in IMAGE_EXTENSIONS:
+        return False
+    file_url = str(payload.get("url") or "").strip()
+    if not file_url:
+        return False
+    return True
+
+
+async def reset_stuck_processing_ingestion_jobs(
+    *,
+    older_than_minutes: int = 30,
+    reenqueue_safe: bool = False,
+    limit_per_collection: int = 500,
+) -> Dict[str, Any]:
+    """Reset stale ingestion jobs stuck in processing status.
+
+    This utility is manual/admin-invoked and intentionally not auto-scheduled.
+    """
+    settings = get_settings()
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=max(1, int(older_than_minutes)))
+    collections = [
+        settings.QDRANT_COLLECTION_TIER_2,
+        settings.QDRANT_COLLECTION_TIER_1,
+    ]
+    summary: Dict[str, Any] = {
+        "older_than_minutes": max(1, int(older_than_minutes)),
+        "reenqueue_safe": bool(reenqueue_safe),
+        "detected": 0,
+        "reset_to_queued": 0,
+        "reset_to_failed": 0,
+        "reenqueued": 0,
+        "errors": 0,
+    }
+
+    processing_filter = Filter(
+        must=[
+            FieldCondition(key="record_type", match=MatchValue(value="file")),
+            FieldCondition(key="ingestion_status", match=MatchValue(value="processing")),
+        ]
+    )
+
+    for collection_name in collections:
+        offset = None
+        while True:
+            points, next_offset = await vector_service.client.scroll(
+                collection_name=collection_name,
+                scroll_filter=processing_filter,
+                limit=max(1, int(limit_per_collection)),
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            if not points:
+                break
+
+            for point in points:
+                point_id = str(point.id)
+                payload = point.payload or {}
+                started_at = _parse_payload_datetime(
+                    payload.get("ingestion_started_at") or payload.get("ingestion_job_started_at")
+                )
+                if started_at is None or started_at > cutoff:
+                    continue
+
+                summary["detected"] += 1
+                logger.warning(
+                    "ingestion_stuck_processing_detected file_id=%s collection=%s ingestion_started_at=%s cutoff=%s",
+                    point_id,
+                    collection_name,
+                    payload.get("ingestion_started_at") or payload.get("ingestion_job_started_at"),
+                    cutoff.isoformat(),
+                )
+                try:
+                    if _is_safe_reenqueue_payload(payload):
+                        reset_payload = {
+                            "ingestion_status": "queued",
+                            "ingestion_error": "Reset from stale processing state; awaiting retry.",
+                            "ingestion_job_status": "queued",
+                            "ingestion_started_at": None,
+                            "ingestion_job_started_at": None,
+                        }
+                        await vector_service.client.set_payload(
+                            collection_name=collection_name,
+                            payload=reset_payload,
+                            points=[point_id],
+                        )
+                        summary["reset_to_queued"] += 1
+                        logger.info(
+                            "ingestion_status_reset action=reset_to_queued file_id=%s collection=%s",
+                            point_id,
+                            collection_name,
+                        )
+                        if reenqueue_safe:
+                            tenant_id = str(payload.get("client_id") or "global")
+                            try:
+                                await enqueue_ingestion_job(
+                                    collection_name=collection_name,
+                                    file_id=point_id,
+                                    tenant_id=tenant_id,
+                                )
+                                summary["reenqueued"] += 1
+                                logger.info(
+                                    "ingestion_status_reset action=reenqueued file_id=%s collection=%s",
+                                    point_id,
+                                    collection_name,
+                                )
+                            except Exception as exc:
+                                summary["errors"] += 1
+                                logger.exception(
+                                    "ingestion_status_reset action=reenqueue_failed file_id=%s collection=%s error=%s",
+                                    point_id,
+                                    collection_name,
+                                    exc,
+                                )
+                    else:
+                        await mark_ingestion_job_permanently_failed(
+                            collection_name=collection_name,
+                            file_id=point_id,
+                            job_id=str(payload.get("ingestion_job_id") or "").strip() or None,
+                            reason="stuck_processing_unrecoverable",
+                            error_message="Stale processing state reset; payload unsafe to re-enqueue.",
+                            attempt_count=int(payload.get("ingestion_job_attempt_count") or 0),
+                        )
+                        summary["reset_to_failed"] += 1
+                        logger.info(
+                            "ingestion_status_reset action=reset_to_failed file_id=%s collection=%s",
+                            point_id,
+                            collection_name,
+                        )
+                except Exception as exc:
+                    summary["errors"] += 1
+                    logger.exception(
+                        "ingestion_status_reset action=error file_id=%s collection=%s error=%s",
+                        point_id,
+                        collection_name,
+                        exc,
+                    )
+
+            if next_offset is None:
+                break
+            offset = next_offset
+
+    return summary
 
 
 async def backfill_reindex_supported_files(

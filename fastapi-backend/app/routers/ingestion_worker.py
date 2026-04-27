@@ -1,13 +1,14 @@
 import hmac
 import logging
 import time
+import uuid
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, Request
 from pydantic import BaseModel
 
 from app.core.config import get_settings
-from app.services.ingestion import run_ingestion_job
+from app.services.ingestion import IngestionPermanentFailure, run_ingestion_job
 from app.services.analytics_contract import infer_provider_from_model
 from app.services.pricing_registry import estimate_single_unit_cost, estimate_worker_runtime_cost
 from app.services.qdrant import vector_service
@@ -23,6 +24,44 @@ class IngestionWorkerRequest(BaseModel):
     collection_name: str
 
 
+async def _emit_worker_failure_event(
+    request: Request,
+    *,
+    event_key: str,
+    reason: str,
+    payload: Optional[IngestionWorkerRequest],
+    include_file_context: bool,
+) -> None:
+    graph = getattr(request.app.state, "graph", None)
+    if graph is None:
+        return
+    try:
+        await graph.append_analytics_event(
+            event_id=f"{event_key}:{int(time.time() * 1000)}:{uuid.uuid4().hex[:8]}",
+            source_event_type_raw="worker_failed",
+            source_entity="IngestionWorker",
+            campaign_id=None,
+            object_id=(payload.file_id if (payload and include_file_context) else None),
+            status="failed",
+            metadata={
+                "service": "ingestion_worker",
+                "worker": "ingestion_worker",
+                "severity": "critical",
+                "failure_event_key": event_key,
+                "failure_reason": reason,
+                "permanent_failure": True,
+                "job_id": (payload.job_id if payload else None),
+                "collection_name": (payload.collection_name if payload else None),
+                "unverified_payload_file_id": (
+                    payload.file_id if payload and not include_file_context else None
+                ),
+                "error_message": reason,
+            },
+        )
+    except Exception:
+        pass
+
+
 @router.post("/internal/ingestion/run")
 async def run_ingestion_worker(
     payload: IngestionWorkerRequest,
@@ -34,12 +73,40 @@ async def run_ingestion_worker(
     settings = get_settings()
     expected_token = settings.INGESTION_WORKER_TOKEN
     if not expected_token:
-        raise HTTPException(status_code=500, detail="INGESTION_WORKER_TOKEN is not configured")
+        event_key = "ingestion_worker_token_misconfigured"
+        await _emit_worker_failure_event(
+            request,
+            event_key=event_key,
+            reason="INGESTION_WORKER_TOKEN is not configured; worker auth cannot be validated.",
+            payload=payload,
+            include_file_context=False,
+        )
+        logger.error(
+            "ingestion_worker_token_misconfigured reason=worker_token_not_configured job_id=%s file_id=%s collection=%s",
+            payload.job_id,
+            payload.file_id,
+            payload.collection_name,
+        )
+        return {"status": "permanent_failure", "reason": "worker_token_not_configured"}
 
     if not x_ingestion_worker_token or not hmac.compare_digest(
         x_ingestion_worker_token, expected_token
     ):
-        raise HTTPException(status_code=401, detail="Invalid ingestion worker token")
+        event_key = "ingestion_worker_auth_permanent_failure"
+        await _emit_worker_failure_event(
+            request,
+            event_key=event_key,
+            reason="Worker token header missing or invalid; rejecting ingestion worker request.",
+            payload=payload,
+            include_file_context=False,
+        )
+        logger.error(
+            "ingestion_worker_auth_permanent_failure reason=invalid_worker_token job_id=%s file_id=%s collection=%s",
+            payload.job_id,
+            payload.file_id,
+            payload.collection_name,
+        )
+        return {"status": "permanent_failure", "reason": "invalid_worker_token"}
 
     try:
         await run_ingestion_job(
@@ -182,7 +249,66 @@ async def run_ingestion_worker(
                 )
             except Exception:
                 pass
+    except IngestionPermanentFailure as exc:
+        point_payload: Dict[str, object] = {}
+        try:
+            point_records = await vector_service.client.retrieve(
+                collection_name=payload.collection_name,
+                ids=[payload.file_id],
+                with_payload=True,
+                with_vectors=False,
+            )
+            point_payload = (point_records[0].payload or {}) if point_records else {}
+        except Exception:
+            point_payload = {}
+        logger.error(
+            "ingestion_permanent_failure reason=%s job_id=%s file_id=%s collection=%s",
+            getattr(exc, "reason", "permanent_failure"),
+            payload.job_id,
+            payload.file_id,
+            payload.collection_name,
+        )
+        graph = getattr(request.app.state, "graph", None)
+        if graph is not None:
+            try:
+                await graph.append_analytics_event(
+                    event_id=f"ingestion_failed:{payload.file_id}:{payload.job_id}:{getattr(exc, 'reason', 'permanent_failure')}",
+                    source_event_type_raw="ingestion_failed",
+                    source_entity="IngestionWorker",
+                    campaign_id=None,
+                    object_id=payload.file_id,
+                    status="failed",
+                    metadata={
+                        "worker": "ingestion_worker",
+                        "job_id": payload.job_id,
+                        "collection_name": payload.collection_name,
+                        "failure_reason": str(getattr(exc, "reason", "permanent_failure")),
+                        "error_type": "IngestionPermanentFailure",
+                        "permanent_failure": True,
+                        "error_message": str(point_payload.get("ingestion_error") or "")[:500] or None,
+                        "ingestion_failure_reason": (
+                            str(point_payload.get("ingestion_failure_reason") or "").strip() or None
+                        ),
+                        "ingestion_previous_failure_reason": (
+                            str(point_payload.get("ingestion_previous_failure_reason") or "").strip() or None
+                        ),
+                        "ingestion_previous_error": (
+                            str(point_payload.get("ingestion_previous_error") or "").strip()[:500] or None
+                        ),
+                    },
+                )
+            except Exception:
+                pass
+        return {"status": "permanent_failure", "reason": getattr(exc, "reason", "permanent_failure")}
     except Exception as exc:
+        logger.warning(
+            "ingestion_retryable_failure job_id=%s file_id=%s collection=%s error_type=%s error=%s",
+            payload.job_id,
+            payload.file_id,
+            payload.collection_name,
+            type(exc).__name__,
+            exc,
+        )
         graph = getattr(request.app.state, "graph", None)
         if graph is not None:
             try:

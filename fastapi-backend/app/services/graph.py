@@ -113,6 +113,10 @@ class GraphService:
             FOR (e:AnalyticsEvent) ON (e.occurred_at)
             """,
             """
+            CREATE INDEX analytics_event_provider_occurred_at_idx IF NOT EXISTS
+            FOR (e:AnalyticsEvent) ON (e.provider, e.occurred_at)
+            """,
+            """
             CREATE INDEX analytics_event_campaign_id_idx IF NOT EXISTS
             FOR (e:AnalyticsEvent) ON (e.campaign_id)
             """,
@@ -176,8 +180,12 @@ class GraphService:
                 try:
                     result = await session.run(statement)
                     await result.consume()
-                except Exception:
-                    logger.exception("mission_control_schema_statement_failed")
+                except Exception as exc:
+                    logger.warning(
+                        "mission_control_schema_statement_failed error_type=%s error=%s",
+                        type(exc).__name__,
+                        exc,
+                    )
 
     async def _label_exists(self, label: str) -> bool:
         """Return True if the Neo4j label exists in current DB."""
@@ -3141,8 +3149,18 @@ class GraphService:
         request_id: Optional[str] = None,
         object_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        notification_message: Optional[str] = None,
     ) -> None:
-        """Create a campaign-scoped activity event."""
+        """Create a campaign-scoped activity event.
+
+        The `message` is the shared/admin copy stored on the CampaignEvent and
+        rendered in the campaign activity feed. When `notification_message` is
+        provided it is used exclusively for the per-user notification delivered
+        to `user_id` (e.g. "You've been removed from ..."), which keeps
+        audience-specific phrasing out of the shared activity feed. When
+        `notification_message` is omitted, the notification reuses `message`
+        (backward-compatible with existing callers).
+        """
         event_id = str(uuid.uuid4())
         async with self._driver.session() as session:
             query = """
@@ -3201,13 +3219,18 @@ class GraphService:
                     event_id,
                 )
                 return
+            delivered_notification_message = (
+                notification_message
+                if isinstance(notification_message, str) and notification_message.strip()
+                else message
+            )
             try:
                 await self.create_notification(
                     user_id=user_id,
                     notification_type=event_type,
                     entity_id=stable_entity_id,
                     campaign_id=campaign_id,
-                    message=message,
+                    message=delivered_notification_message,
                     status="unread",
                     actor_user_id=actor_user_id,
                     target_user_id=user_id,

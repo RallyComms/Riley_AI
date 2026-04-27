@@ -165,6 +165,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   const [isReportModalOpen, setIsReportModalOpen] = useState(false);
   const [isSubmittingReport, setIsSubmittingReport] = useState(false);
   const [hasInFlightReportJobs, setHasInFlightReportJobs] = useState(false);
+  const hasInFlightReportJobsRef = useRef(false);
   const [reportType, setReportType] = useState<
     "summary" | "strategy_memo" | "audience_analysis" | "narrative_brief" | "opposition_framing_brief"
   >("summary");
@@ -420,6 +421,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         }
       });
       knownReportStatusRef.current = nextStatuses;
+      hasInFlightReportJobsRef.current = nextHasInFlightReportJobs;
       setHasInFlightReportJobs(nextHasInFlightReportJobs);
       // Add concise chat notifications for relevant status transitions.
       for (const job of visibleMapped) {
@@ -471,12 +473,16 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
   useEffect(() => {
     if (isGlobal || !tenantId || !authLoaded || !userLoaded || !user) return;
     let cancelled = false;
-    let intervalId: number | null = null;
+    let timeoutId: number | null = null;
+    let completedPollCycles = 0;
+    const FAST_POLL_LIMIT = 3;
+    const FAST_POLL_MS = 10_000;
+    const SLOW_POLL_MS = 30_000;
 
     const stopPolling = () => {
-      if (intervalId !== null) {
-        window.clearInterval(intervalId);
-        intervalId = null;
+      if (timeoutId !== null) {
+        window.clearTimeout(timeoutId);
+        timeoutId = null;
       }
     };
 
@@ -485,8 +491,8 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
       await loadReportJobs({ silent: true });
     };
 
-    const startPollingIfNeeded = () => {
-      if (!hasInFlightReportJobs) {
+    const scheduleNextPoll = () => {
+      if (cancelled || !hasInFlightReportJobsRef.current) {
         stopPolling();
         return;
       }
@@ -494,11 +500,28 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         stopPolling();
         return;
       }
-      if (intervalId !== null) return;
-      // Removed unconditional 8s polling: only poll while report jobs are actively in-flight.
-      intervalId = window.setInterval(() => {
-        void pollOnce();
-      }, 8000);
+      if (timeoutId !== null) return;
+      const delayMs = completedPollCycles < FAST_POLL_LIMIT ? FAST_POLL_MS : SLOW_POLL_MS;
+      timeoutId = window.setTimeout(() => {
+        timeoutId = null;
+        void (async () => {
+          await pollOnce();
+          completedPollCycles += 1;
+          scheduleNextPoll();
+        })();
+      }, delayMs);
+    };
+
+    const startPollingIfNeeded = () => {
+      if (!hasInFlightReportJobsRef.current) {
+        stopPolling();
+        return;
+      }
+      if (document.visibilityState !== "visible") {
+        stopPolling();
+        return;
+      }
+      scheduleNextPoll();
     };
 
     if (document.visibilityState === "visible") {
@@ -511,7 +534,7 @@ export function RileyStudio({ contextName, tenantId, mode: initialMode = "fast" 
         stopPolling();
         return;
       }
-      if (!hasInFlightReportJobs) return;
+      if (!hasInFlightReportJobsRef.current) return;
       void pollOnce();
       startPollingIfNeeded();
     };

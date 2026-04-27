@@ -294,6 +294,17 @@ def _weighted_projection_model(
     }
 
 
+def _build_spend_group_summary(*, label: str, breakdown: List[Dict[str, Any]]) -> Dict[str, Any]:
+    current_total = round(sum(float(row.get("current") or 0.0) for row in breakdown), 2)
+    projected_total = round(sum(float(row.get("projected") or 0.0) for row in breakdown), 2)
+    return {
+        "label": label,
+        "current_total": current_total,
+        "projected_month_end_total": projected_total,
+        "breakdown": list(breakdown),
+    }
+
+
 def _build_cloud_cost_optimization_recommendations(
     *,
     top_operations: List[Dict[str, Any]],
@@ -1425,7 +1436,7 @@ async def mission_control_cost_summary(
     daily_burn_rate = float(llm_projection.get("projected_daily") or 0.0)
     projected_month_end_cost = float(llm_projection.get("projected_month") or 0.0)
     monthly_llm_budget_limit = round(float(settings.MAX_MONTHLY_COST or 2000.0), 2)
-    current_month_llm_spend = round(float(await get_current_month_llm_cost_usd()), 2)
+    current_month_llm_spend = current_month_cost
     projected_month_end_llm_spend = round(float(projected_month_end_cost), 2)
     percent_budget_used = round(
         (current_month_llm_spend / monthly_llm_budget_limit) * 100.0,
@@ -1469,18 +1480,40 @@ async def mission_control_cost_summary(
         2,
     )
     qdrant_fixed_projected_month_end_spend = round(float(settings.QDRANT_BASE_MONTHLY_COST_USD or 0.0), 2)
+    neo4j_aura_projected_month_end_spend = round(float(settings.NEO4J_AURA_MONTHLY_COST_USD or 0.0), 2)
+    dev_ops_vm_projected_month_end_spend = round(float(settings.DEV_OPS_VM_MONTHLY_COST_USD or 0.0), 2)
     qdrant_fixed_daily_rate = (
         (qdrant_fixed_projected_month_end_spend / float(days_in_month))
+        if days_in_month > 0 else 0.0
+    )
+    neo4j_aura_daily_rate = (
+        (neo4j_aura_projected_month_end_spend / float(days_in_month))
+        if days_in_month > 0 else 0.0
+    )
+    dev_ops_vm_daily_rate = (
+        (dev_ops_vm_projected_month_end_spend / float(days_in_month))
         if days_in_month > 0 else 0.0
     )
     qdrant_fixed_current_month_spend = round(
         qdrant_fixed_daily_rate * float(window_days),
         2,
     )
+    neo4j_aura_current_month_spend = round(
+        neo4j_aura_daily_rate * float(window_days),
+        2,
+    )
+    dev_ops_vm_current_month_spend = round(
+        dev_ops_vm_daily_rate * float(window_days),
+        2,
+    )
     fixed_saas_clerk_projected_month_end_spend = round(float(settings.CLERK_MONTHLY_COST_USD or 0.0), 2)
     fixed_saas_vercel_projected_month_end_spend = round(float(settings.VERCEL_MONTHLY_COST_USD or 0.0), 2)
     fixed_saas_other_projected_month_end_spend = round(float(settings.OTHER_FIXED_MONTHLY_COST_USD or 0.0), 2)
     other_fixed_saas_projected_month_end_spend = round(
+        fixed_saas_other_projected_month_end_spend,
+        2,
+    )
+    legacy_saas_bundle_projected_month_end_spend = round(
         fixed_saas_clerk_projected_month_end_spend
         + fixed_saas_vercel_projected_month_end_spend
         + fixed_saas_other_projected_month_end_spend,
@@ -1511,6 +1544,10 @@ async def mission_control_cost_summary(
         2,
     )
     other_fixed_saas_current_month_spend = round(
+        fixed_saas_other_current_month_spend,
+        2,
+    )
+    legacy_saas_bundle_current_month_spend = round(
         fixed_saas_clerk_current_month_spend
         + fixed_saas_vercel_current_month_spend
         + fixed_saas_other_current_month_spend,
@@ -1519,6 +1556,8 @@ async def mission_control_cost_summary(
     estimated_accrual_daily_rate = (
         qdrant_variable_daily_rate
         + qdrant_fixed_daily_rate
+        + neo4j_aura_daily_rate
+        + dev_ops_vm_daily_rate
         + fixed_saas_clerk_daily_rate
         + fixed_saas_vercel_daily_rate
         + fixed_saas_other_daily_rate
@@ -1555,6 +1594,10 @@ async def mission_control_cost_summary(
     current_month_estimated_accrual_spend = round(
         qdrant_variable_current_month_spend
         + qdrant_fixed_current_month_spend
+        + neo4j_aura_current_month_spend
+        + dev_ops_vm_current_month_spend
+        + fixed_saas_clerk_current_month_spend
+        + fixed_saas_vercel_current_month_spend
         + other_fixed_saas_current_month_spend,
         2,
     )
@@ -1604,12 +1647,63 @@ async def mission_control_cost_summary(
             "projected": qdrant_fixed_projected_month_end_spend,
         },
         {
+            "category": "Neo4j Aura",
+            "current": neo4j_aura_current_month_spend,
+            "current_semantics": "estimated_accrual_mtd",
+            "projected": neo4j_aura_projected_month_end_spend,
+        },
+        {
+            "category": "Vercel",
+            "current": fixed_saas_vercel_current_month_spend,
+            "current_semantics": "estimated_accrual_mtd",
+            "projected": fixed_saas_vercel_projected_month_end_spend,
+        },
+        {
+            "category": "Clerk",
+            "current": fixed_saas_clerk_current_month_spend,
+            "current_semantics": "estimated_accrual_mtd",
+            "projected": fixed_saas_clerk_projected_month_end_spend,
+        },
+        {
+            "category": "Dev/Ops VM",
+            "current": dev_ops_vm_current_month_spend,
+            "current_semantics": "estimated_accrual_mtd",
+            "projected": dev_ops_vm_projected_month_end_spend,
+        },
+        {
             "category": "Other Fixed SaaS",
             "current": other_fixed_saas_current_month_spend,
             "current_semantics": "estimated_accrual_mtd",
             "projected": other_fixed_saas_projected_month_end_spend,
         },
     ]
+    production_runtime_categories = {
+        "LLM",
+        "Cloud Infrastructure",
+        "Qdrant Variable",
+        "Qdrant Fixed",
+        "Neo4j Aura",
+        "Vercel",
+        "Clerk",
+    }
+    development_ops_categories = {
+        "Dev/Ops VM",
+        "Other Fixed SaaS",
+    }
+    production_runtime_spend_summary = _build_spend_group_summary(
+        label="Production Runtime Spend",
+        breakdown=[
+            row for row in total_spend_breakdown
+            if str(row.get("category") or "") in production_runtime_categories
+        ],
+    )
+    development_ops_spend_summary = _build_spend_group_summary(
+        label="Development / Ops Spend",
+        breakdown=[
+            row for row in total_spend_breakdown
+            if str(row.get("category") or "") in development_ops_categories
+        ],
+    )
     llm_month_rows = await _rows(
         graph,
         """
@@ -1713,9 +1807,29 @@ async def mission_control_cost_summary(
         "projected_month_end_qdrant_variable_spend": qdrant_variable_projected_month_end_spend,
         "current_month_qdrant_fixed_spend": qdrant_fixed_current_month_spend,
         "projected_month_end_qdrant_fixed_spend": qdrant_fixed_projected_month_end_spend,
+        "current_month_neo4j_aura_spend": neo4j_aura_current_month_spend,
+        "projected_month_end_neo4j_aura_spend": neo4j_aura_projected_month_end_spend,
+        "current_month_dev_ops_vm_spend": dev_ops_vm_current_month_spend,
+        "projected_month_end_dev_ops_vm_spend": dev_ops_vm_projected_month_end_spend,
+        "current_month_clerk_spend": fixed_saas_clerk_current_month_spend,
+        "projected_month_end_clerk_spend": fixed_saas_clerk_projected_month_end_spend,
+        "current_month_vercel_spend": fixed_saas_vercel_current_month_spend,
+        "projected_month_end_vercel_spend": fixed_saas_vercel_projected_month_end_spend,
         "current_month_other_fixed_saas_spend": other_fixed_saas_current_month_spend,
         "projected_month_end_other_fixed_saas_spend": other_fixed_saas_projected_month_end_spend,
+        "production_runtime_spend_summary": production_runtime_spend_summary,
+        "development_ops_spend_summary": development_ops_spend_summary,
         "fixed_saas_component_breakdown": [
+            {
+                "component": "Neo4j Aura",
+                "current_mtd": neo4j_aura_current_month_spend,
+                "projected_month_end": neo4j_aura_projected_month_end_spend,
+            },
+            {
+                "component": "Dev/Ops VM",
+                "current_mtd": dev_ops_vm_current_month_spend,
+                "projected_month_end": dev_ops_vm_projected_month_end_spend,
+            },
             {
                 "component": "Clerk",
                 "current_mtd": fixed_saas_clerk_current_month_spend,
@@ -1736,10 +1850,16 @@ async def mission_control_cost_summary(
         "current_month_qdrant_spend": qdrant_variable_current_month_spend,
         "projected_month_end_qdrant_spend": qdrant_variable_projected_month_end_spend,
         "current_month_fixed_saas_spend": (
-            qdrant_fixed_current_month_spend + other_fixed_saas_current_month_spend
+            qdrant_fixed_current_month_spend
+            + neo4j_aura_current_month_spend
+            + dev_ops_vm_current_month_spend
+            + legacy_saas_bundle_current_month_spend
         ),
         "projected_month_end_fixed_saas_spend": (
-            qdrant_fixed_projected_month_end_spend + other_fixed_saas_projected_month_end_spend
+            qdrant_fixed_projected_month_end_spend
+            + neo4j_aura_projected_month_end_spend
+            + dev_ops_vm_projected_month_end_spend
+            + legacy_saas_bundle_projected_month_end_spend
         ),
         # Total-spend semantics:
         # - actual_or_metered_mtd: measured/metered MTD categories (Cloud may lag billing export ingestion)
@@ -2511,7 +2631,8 @@ async def mission_control_qdrant_metrics(
     graph: GraphService = Depends(get_graph),
 ) -> Dict[str, Any]:
     """Return Qdrant usage and estimated monthly storage cost."""
-    usage = await vector_service.get_qdrant_usage_metrics()
+    usage = await vector_service.get_qdrant_usage_metrics(include_cache_status=True)
+    served_from_cache = bool(usage.pop("_served_from_cache", False))
     campaign_rows = usage.get("campaigns") or []
     campaign_ids = [
         str(row.get("campaign_id") or "").strip()
@@ -2548,14 +2669,15 @@ async def mission_control_qdrant_metrics(
     warning_state = "normal"
     warning_reasons: List[str] = []
 
-    try:
-        await graph.upsert_qdrant_usage_snapshot(
-            total_vectors=total_vectors,
-            total_estimated_size_mb=total_estimated_size_mb,
-            estimated_monthly_cost=estimated_monthly_cost,
-        )
-    except Exception as exc:
-        logger.warning("mission_control_qdrant_snapshot_upsert_failed error=%s", exc)
+    if not served_from_cache:
+        try:
+            await graph.upsert_qdrant_usage_snapshot(
+                total_vectors=total_vectors,
+                total_estimated_size_mb=total_estimated_size_mb,
+                estimated_monthly_cost=estimated_monthly_cost,
+            )
+        except Exception as exc:
+            logger.warning("mission_control_qdrant_snapshot_upsert_failed error=%s", exc)
 
     trend_series = await graph.list_qdrant_usage_snapshots(days_back=60, limit=120)
     projection_snapshot_count = len(trend_series)
